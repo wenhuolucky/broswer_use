@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-05-26T12:43:24.839469",
+  "question_index": 25,
+  "question": "HTTP 和 HTTPS 有什么区别？",
+  "response": "HTTP 与 HTTPS 核心区别\n\n1. 基础定义\n- HTTP：超文本传输协议，明文传输，端口 80。\n- HTTPS：HTTP + SSL/TLS 加密，密文传输，端口 443。\n\n2. 主要差异\n1. 安全性\n   - HTTP：数据裸奔，抓包可直接看到账号、密码、内容，易被窃听、篡改、劫持。\n   - HTTPS：全程加密，数据无法窃听篡改，还能验证网站身份（防钓鱼）。\n2. 端口不同\n   - HTTP 默认 80，HTTPS 默认 443。\n3. 性能开销\n   - HTTP：无加密运算，速度更快、服务器压力小。\n   - HTTPS：握手、加解密有额外开销，略慢一点。\n4. 证书要求\n   - HTTP：无需证书，直接部署。\n   - HTTPS：必须配置 CA 数字证书（分免费 / 付费）。\n5. 浏览器标识\n   - HTTP：地址栏无安全锁，部分浏览器标记不安全。\n   - HTTPS：地址栏显示小锁，标识安全。\n\n3. 简单总结\n日常上网、登录、支付、隐私场景必须用 HTTPS；仅纯静态公开展示、内网测试可使用 HTTP。\n\n补充：访问逻辑\n- HTTP：客户端 ↔ 服务端 明文通信\n- HTTPS：先 TLS 握手建立加密通道，再在通道内走 HTTP 数据。\n\n[后续建议: 快速, 帮我写作, 编程, 图像生成, 翻译, 视频生成, 更多]",
+  "response_length": 592,
+  "response_time_ms": 53218,
+  "error": null,
+  "iteration": 61,
+  "total_seconds": 57.7
+}

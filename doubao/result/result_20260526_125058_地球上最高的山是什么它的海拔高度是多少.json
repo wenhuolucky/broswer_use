@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-05-26T12:50:58.967372",
+  "question_index": 30,
+  "question": "地球上最高的山是什么？它的海拔高度是多少？",
+  "response": "地球上最高的山是**珠穆朗玛峰**，最新官方海拔高度为**8848.86 米**。\n\n[后续建议: 珠穆朗玛峰位于哪个山脉？, 攀登珠穆朗玛峰需要哪些装备和技能？, 珠穆朗玛峰每年都在长高吗？]",
+  "response_length": 97,
+  "response_time_ms": 57409,
+  "error": null,
+  "iteration": 66,
+  "total_seconds": 62.4
+}

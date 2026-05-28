@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-05-27T12:37:29.396519",
+  "question_index": 46,
+  "question": "中国第一颗人造卫星叫什么名字？",
+  "response": "中国第一颗人造卫星是东方红一号，1970 年 4 月 24 日成功发射。\n\n[后续建议: 东方红一号卫星的质量是多少？, 东方红一号卫星发射时采用的是什么火箭？, 介绍一下东方红一号卫星的主要任务和科学目标]",
+  "response_length": 104,
+  "response_time_ms": 61377,
+  "error": null,
+  "iteration": 47,
+  "total_seconds": 65.8
+}

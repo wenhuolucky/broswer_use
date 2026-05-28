@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-05-26T12:28:27.384541",
+  "question_index": 16,
+  "question": "计算：95 × 78 = ?",
+  "response": "计算：95 × 78 = ?\n95×78=7410\n\n[后续建议: 两位数乘法的计算技巧有哪些？, 95乘以80等于多少？, 7410的质因数分解是多少？]",
+  "response_length": 78,
+  "response_time_ms": 84657,
+  "error": null,
+  "iteration": 52,
+  "total_seconds": 89.1
+}

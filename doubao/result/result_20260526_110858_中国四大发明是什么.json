@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-05-26T11:08:58.198563",
+  "question_index": 1,
+  "question": "中国四大发明是什么？",
+  "response": "中国四大发明分别是：造纸术、印刷术、火药、指南针\n\n[后续建议: 造纸术是谁发明的？, 四大发明对世界产生了哪些影响？, 四大发明中哪一项对世界影响最大？]",
+  "response_length": 78,
+  "response_time_ms": 64014,
+  "error": null,
+  "iteration": 2,
+  "total_seconds": 68.5
+}

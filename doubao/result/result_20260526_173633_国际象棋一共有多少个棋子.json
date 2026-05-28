@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-05-26T17:36:33.893184",
+  "question_index": 1,
+  "question": "国际象棋一共有多少个棋子？",
+  "response": "国际象棋双方棋子总数：一共 32 个 白方 16 个，黑方 16 个 每方棋子构成：1 王、1 后、2 车、2 象、2 马、8 兵\n\n[后续建议: 国际象棋的棋子都有哪些走法？, 国际象棋棋子的大小顺序是怎样的？, 国际象棋棋盘的大小是多少？]",
+  "response_length": 122,
+  "response_time_ms": 78735,
+  "error": null,
+  "iteration": 2,
+  "total_seconds": 83.8
+}

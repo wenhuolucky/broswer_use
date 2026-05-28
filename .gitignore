@@ -1,0 +1,38 @@
+# Secrets
+.env
+
+# Auth / session data
+auth.json
+auth.json.bak
+auth.json.*
+toutiao_auth.json
+
+# Browser profiles
+chrome_profile/
+chrome_profile_toutiao/
+chrome_profile_doubao/
+chrome_profile_doubao/
+*.png
+*.jpg
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/

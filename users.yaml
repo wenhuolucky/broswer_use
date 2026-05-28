@@ -1,0 +1,17 @@
+# 多用户配置文件
+# 每个用户拥有独立的 auth 文件、浏览器配置和 CDP 端口
+
+default_user_id: "user1"
+
+users:
+  - user_id: "user1"
+    name: "用户1"
+    auth_file: "users/user1/auth.json"
+    chrome_profile: "users/user1/chrome_profile"
+    cdp_port: 9227
+
+  - user_id: "user2"
+    name: "用户2"
+    auth_file: "users/user2/auth.json"
+    chrome_profile: "users/user2/chrome_profile"
+    cdp_port: 9237

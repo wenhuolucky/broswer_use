@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-05-27T10:35:44.878717",
+  "question_index": 14,
+  "question": "计算：72 - 37 = ?",
+  "response": "72 - 37 = 35\n\n[后续建议: 两位数减法的速算技巧有哪些？, 72-37的竖式计算过程是怎样的？, 被减数个位是2，减数个位是7，不够减时该怎么算？]",
+  "response_length": 81,
+  "response_time_ms": 47239,
+  "error": null,
+  "iteration": 15,
+  "total_seconds": 51.6
+}
