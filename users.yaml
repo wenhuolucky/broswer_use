@@ -15,3 +15,9 @@ users:
     auth_file: "users/user2/auth.json"
     chrome_profile: "users/user2/chrome_profile"
     cdp_port: 9237
+
+  - user_id: "user3"
+    name: "用户3"
+    auth_file: "users/user3/auth.json"
+    chrome_profile: "users/user3/chrome_profile"
+    cdp_port: 9247

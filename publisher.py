@@ -36,6 +36,7 @@ from browser_use import Agent, BrowserSession
 from browser_use.llm.openai.like import ChatOpenAILike
 
 from browser_utils import get_cdp_url, get_browser_path
+from platforms.base import PlatformConfig
 
 AUTH_FILE = Path(__file__).parent / "auth.json"
 TOUTIAO_HOME = "https://mp.toutiao.com"
@@ -52,12 +53,11 @@ CLOAK_CDP_PORT = EDGE_CDP_PORT
 _user_manager: Optional["UserManager"] = None
 
 
-def get_user_manager() -> "UserManager":
-    """获取全局 UserManager 实例（延迟加载）"""
+def get_user_manager(yaml_path: str = "users.yaml") -> "UserManager":
+    """获取全局 UserManager 实例（延迟加载），支持不同平台的 YAML"""
     global _user_manager
-    if _user_manager is None:
-        from user_manager import UserManager
-        _user_manager = UserManager.get_instance()
+    from user_manager import UserManager
+    _user_manager = UserManager.get_instance(yaml_path)
     return _user_manager
 
 
@@ -175,27 +175,33 @@ async def setup_login_cloak(
     auth_file: Path = AUTH_FILE,
     user_data_dir: Path = USER_DATA_DIR,
     cdp_port: int = EDGE_CDP_PORT,
+    platform: PlatformConfig = None,
 ):
     """
-    使用本地 Edge 打开浏览器，用户手动登录后按 Enter 保存 storage_state。
+    使用本地浏览器打开平台后台，用户手动登录后按 Enter 保存 storage_state。
 
     auth_file: 登录状态保存路径
     user_data_dir: 浏览器用户数据目录
     cdp_port: CDP 调试端口
+    platform: 平台配置（默认头条号）
     """
-    print("正在启动 Edge 浏览器...")
-    print(f"请在浏览器中手动登录头条号: {TOUTIAO_HOME}")
+    if platform is None:
+        from platforms.toutiao import ToutiaoPlatform
+        platform = ToutiaoPlatform()
+
+    print(f"正在启动浏览器...")
+    print(f"请在浏览器中手动登录{platform.name}: {platform.home_url}")
     print("登录完成后, 回到终端按 Enter 保存登录状态...")
     print()
 
-    playwright, ctx = await _launch_browser(user_data_dir, cdp_port)
+    playwright, ctx, _ = await _launch_browser(user_data_dir, cdp_port)
     try:
         cdp_url = get_cdp_url(cdp_port)
 
         session = BrowserSession(cdp_url=cdp_url)
         await session.connect()
         page = await session.new_page()
-        await page.goto(TOUTIAO_HOME)
+        await page.goto(platform.home_url)
 
         try:
             input(">>> 登录完成后按 Enter 保存...")
@@ -212,13 +218,22 @@ async def setup_login_cloak(
 RESULT_DIR = Path(__file__).parent / "result"
 
 
-def get_account_from_auth(auth_file: Path = AUTH_FILE) -> str:
-    """从 auth.json cookies 中尝试提取头条账号标识 (uid_tt 或 sessionid)。"""
+def get_account_from_auth(auth_file: Path = AUTH_FILE, platform: PlatformConfig = None) -> str:
+    """从 auth.json cookies 中尝试提取账号标识。"""
+    if platform is None:
+        from platforms.toutiao import ToutiaoPlatform
+        platform = ToutiaoPlatform()
     try:
         with open(auth_file, "r", encoding="utf-8") as f:
             auth_data = json.load(f)
+        # 尝试平台特定的 cookie 名
         for c in auth_data.get("cookies", []):
-            if c.get("name") in ("uid_tt", "uid_tt_ss"):
+            if c.get("name") in platform.account_cookies:
+                return c.get("value", "")
+        # 如果没有平台特定 cookie，尝试常见字段
+        for c in auth_data.get("cookies", []):
+            name = c.get("name", "")
+            if name in ("uid", "user_id", "userid", "account_id", "uid_tt", "uid_tt_ss"):
                 return c.get("value", "")
     except Exception:
         pass
@@ -259,6 +274,7 @@ async def publish_article_internal(
     user_data_dir: Path = USER_DATA_DIR,
     cdp_port: int = CLOAK_CDP_PORT,
     fresh_profile: bool = False,
+    platform: PlatformConfig = None,
 ) -> dict:
     """
     内部发布函数，参数化所有用户相关资源。
@@ -267,9 +283,14 @@ async def publish_article_internal(
     auth_file: 登录状态文件路径
     user_data_dir: 浏览器用户数据目录
     cdp_port: CDP 调试端口
+    platform: 平台配置（默认头条号）
     """
+    if platform is None:
+        from platforms.toutiao import ToutiaoPlatform
+        platform = ToutiaoPlatform()
+
     operation_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    account = get_account_from_auth(auth_file)
+    account = get_account_from_auth(auth_file, platform)
     result = {
         "operation_time": operation_time,
         "account": account,
@@ -280,24 +301,19 @@ async def publish_article_internal(
     }
 
     if not auth_file.exists():
-        msg = f"未找到登录状态文件 {auth_file}, 请先运行 --setup 登录"
+        msg = f"未找到登录状态文件 {auth_file}, 请先运行 --setup --platform {platform.name} 登录"
         print(f"错误: {msg}")
         result["failure_reason"] = msg
         return result
 
-    # 验证 auth.json 中包含头条号 cookie
+    # 验证 auth.json 中包含平台 cookie
     try:
         with open(auth_file, "r", encoding="utf-8") as f:
             auth_data = json.load(f)
         cookies = auth_data.get("cookies", [])
-        toutiao_domains = [".toutiao.com", "mp.toutiao.com", "www.toutiao.com"]
-        has_toutiao_cookie = any(
-            c.get("domain", "").rstrip(".") in toutiao_domains
-            or c.get("domain", "").lstrip(".") in toutiao_domains
-            for c in cookies
-        )
-        if not has_toutiao_cookie:
-            msg = f"{auth_file} 中未检测到头条号(toutiao.com)的 cookie，请重新运行 --setup 登录"
+        has_platform_cookie = platform.validate_cookies(cookies)
+        if not has_platform_cookie:
+            msg = f"{auth_file} 中未检测到 {platform.name} 的 cookie，请重新运行 --setup --platform {platform.name} 登录"
             print(f"警告: {msg}")
             result["failure_reason"] = msg
             return result
@@ -376,104 +392,14 @@ async def publish_article_internal(
 7. 检查封面设置。如果系统已自动匹配封面，可以跳过。如需设置封面，选择"无封面"。
 """
 
-        if is_markdown:
-            # Markdown 格式：先转换富文本，再粘贴到头条号
-            task = f"""请按顺序完成以下步骤来发布一篇文章：
-
-【第一阶段：Markdown 转富文本】
-1. 首先导航到: https://markdowntorichtext.com/zh/
-2. 等待页面加载完成。
-3. 找到页面的 Markdown 输入区域（通常是一个大的 textarea 或 contenteditable 区域）。
-4. 使用以下方法将 Markdown 内容粘贴到输入区域：
-   - 使用 evaluate 执行 JavaScript：
-     const textarea = document.querySelector('textarea') || document.querySelector('[contenteditable]');
-     if (textarea) {{ textarea.value = `{content}`.slice(0, 50000); textarea.dispatchEvent(new Event('input', {{ bubbles: true }})); }}
-   - 如果上述方法不行，尝试用 evaluate 直接设置输入区域的 value
-5. 等待页面渲染预览（右侧或下方应显示格式化后的预览）。
-6. 找到页面上的"复制"按钮（Copy / Copy rich text / 复制按钮），点击它。
-   - 如果页面上有多个复制按钮，尝试点击那个复制富文本的按钮。
-   - 复制成功后，页面上通常会有"已复制"或"Rich text copied to clipboard"的提示。
-7. 确认剪贴板中已有富文本内容。
-
-【第二阶段：发布到头条号】
-8. 导航到头条号后台: {TOUTIAO_HOME}
-9. 确认已登录后台。如果看到登录页面，停止并提示用户重新 --setup 登录。
-   - 在首页/后台读取当前登录账号的显示名（通常在页面右上角头像旁边，或个人中心，例如"头条号名称"/昵称），记录为 account_name。
-10. 导航到发布文章页面: {TOUTIAO_PUBLISH_URL}
-11. 等待页面加载完成。
-12. 找到文章标题输入框，输入标题: "{title}"
-13. 找到文章正文编辑区域（通常是富文本编辑器 body.contenteditable）。
-14. 使用以下方法粘贴富文本内容：
-    - 点击编辑区域获取焦点
-    - 使用 evaluate 执行 JavaScript 粘贴富文本（模拟粘贴 HTML）：
-      const editor = document.querySelector('[contenteditable=true]');
-      if (editor) {{
-        editor.focus();
-        // 使用 execCommand 插入 HTML（模拟 Ctrl+V 粘贴富文本）
-        document.execCommand('insertHTML', false, `从剪贴板获取的富文本HTML`);
-      }}
-    - 如果上述方法不行，尝试先导航回 markdowntorichtext.com 页面，手动 Ctrl+A 全选富文本预览区域，Ctrl+C 复制，然后回到头条号编辑器 Ctrl+V 粘贴{body_image_instruction}
-15. 等待编辑器渲染，确认内容已正确显示（标题、段落、加粗、图片等）。
-16. {cover_instruction.strip()}
-17. 检查分类等必填项是否缺失。
-18. 找到页面底部的"预览并发布"按钮（它是浮动固定在页面底部的）。
-    - 如果看不到该按钮，尝试缩小页面或等待页面加载完成。
-19. 点击"预览并发布"按钮。等待预览对话框弹出，然后点击对话框中的"确认发布"按钮。
-    - **重要**：点击"确认发布"后，无论页面显示什么（包括"草稿保存中"、无明显变化），
-      都**立即调用 done 并标记 success=true**，不要再回到编辑页或重新输入内容。
-    - 最多尝试 2 次"预览并发布"→"确认发布"。2 次后无论结果如何都调用 done。
-    - 只有出现明确的错误提示（红色Toast、弹窗报错、登录页）时，才标记 success=false。
-20. 调用 done 动作时，请把最终结果作为 JSON 字符串返回，格式为:
-    {{"success": true/false, "account_name": "步骤9读取到的账号名", "article_url": "", "failure_reason": "失败原因（若失败）"}}
-
-重要提示：
-- 头条号编辑器是 contenteditable 的富文本区域，可能需要先点击编辑区域获取焦点再粘贴。
-- 遇到弹窗/引导/广告先关闭再继续。
-- 每个步骤完成后确认页面响应再继续下一步。
-- 发布按钮是浮动固定在页面底部的，如果看不到，尝试等待或缩小页面。
-- 设置封面时：先点封面区域的"+"加号 → 弹出对话框后点"本地上传" → 使用 file input 上传
-- 预览对话框出现后，寻找文字为"确认发布"的按钮（不是"草稿已保存"），仔细找到正确的按钮并点击。
-- 预览对话框中，"确认发布"按钮通常在对话框底部，请耐心滚动或查找。
-- **点击"确认发布"后立即停止，不要反复搜索内容管理页或重新发布。**
-- Markdown 转换网站：https://markdowntorichtext.com/zh/
-- 如果复制按钮不起作用，尝试点击页面上的 Copy 或 "Copy rich text" 按钮。
-"""
-        else:
-            # 纯文本格式：原有流程
-            task = f"""你在头条号后台(mp.toutiao.com)操作。请按顺序完成以下步骤来发布一篇文章：
-
-1. 首先导航到: {TOUTIAO_HOME}
-2. 确认已登录后台。如果看到登录页面，停止并提示用户重新 --setup 登录。
-   - 在首页/后台读取当前登录账号的显示名（通常在页面右上角头像旁边，或个人中心，例如"头条号名称"/昵称），记录为 account_name。
-3. 导航到发布文章页面: {TOUTIAO_PUBLISH_URL}
-4. 等待页面加载完成。
-5. 找到文章标题输入框，输入标题: "{title}"
-6. 找到文章正文编辑区域（通常是富文本编辑器 body.contenteditable），输入以下内容:{body_image_instruction}
-
-<content>
-{content}
-</content>{cover_instruction}
-8. 检查分类等必填项是否缺失。
-9. 找到页面底部的"预览并发布"按钮（它是浮动固定在页面底部的）。
-   - 如果看不到该按钮，尝试缩小页面或等待页面加载完成。
-10. 点击"预览并发布"按钮。等待预览对话框弹出，然后点击对话框中的"确认发布"按钮。
-    - **重要**：点击"确认发布"后，无论页面显示什么（包括"草稿保存中"、无明显变化），
-      都**立即调用 done 并标记 success=true**，不要再回到编辑页或重新输入内容。
-    - 最多尝试 2 次"预览并发布"→"确认发布"。2 次后无论结果如何都调用 done。
-    - 只有出现明确的错误提示（红色Toast、弹窗报错、登录页）时，才标记 success=false。
-11. 调用 done 动作时，请把最终结果作为 JSON 字符串返回，格式为:
-    {{"success": true/false, "account_name": "步骤2读取到的账号名", "article_url": "", "failure_reason": "失败原因（若失败）"}}
-
-重要提示：
-- 头条号编辑器是 contenteditable 的富文本区域，可能需要先点击编辑区域获取焦点再输入。
-- 遇到弹窗/引导/广告先关闭再继续。
-- 每个步骤完成后确认页面响应再继续下一步。
-- 发布按钮是浮动固定在页面底部的，如果看不到，尝试等待或缩小页面。
-- 设置封面时：先点封面区域的"+"加号 → 弹出对话框后点"本地上传" → 使用 file input 上传
-- 预览对话框出现后，寻找文字为"确认发布"的按钮（不是"草稿已保存"），仔细找到正确的按钮并点击。
-- 预览对话框中，"确认发布"按钮通常在对话框底部，请耐心滚动或查找。
-- **点击"确认发布"后立即停止，不要反复搜索内容管理页或重新发布。**
-"""
+        # 使用平台配置生成 Agent prompt
+        task = platform.get_agent_prompt(
+            title=title,
+            content=content,
+            cover_instruction=cover_instruction,
+            body_image_instruction=body_image_instruction,
+            is_markdown=is_markdown,
+        )
 
         available_files = []
         if cover_local_path:
@@ -546,7 +472,7 @@ async def publish_article_internal(
     return result
 
 
-async def publish_article(title: str, content: str, image_paths: Optional[List[str]] = None) -> dict:
+async def publish_article(title: str, content: str, image_paths: Optional[List[str]] = None, platform=None) -> dict:
     """
     向后兼容的单用户发布函数，内部调用 publish_article_internal。
     """
@@ -557,6 +483,7 @@ async def publish_article(title: str, content: str, image_paths: Optional[List[s
         auth_file=AUTH_FILE,
         user_data_dir=USER_DATA_DIR,
         cdp_port=CLOAK_CDP_PORT,
+        platform=platform,
     )
 
 
@@ -588,7 +515,7 @@ def _mark_published(result: dict, article_dir: str | None):
     print(f"\n已标记文章为已发布: {base_name} → {new_name}")
 
 
-async def auto_publish_from_local(args):
+async def auto_publish_from_local(args, platform=None):
     """扫描 test_perper 目录，自动选取未发布的文章发布，成功后标记为已发布。"""
     if not TEST_PERPER_DIR.exists():
         print(f"错误: 找不到 test_perper 目录: {TEST_PERPER_DIR}")
@@ -690,10 +617,12 @@ async def auto_publish_from_local(args):
             title=title,
             content=body,
             image_paths=image_paths if image_paths else None,
+            fresh_profile=True,
+            platform=platform,
         )
         write_result(result)
     else:
-        result = await publish_article(title, body, image_paths if image_paths else None)
+        result = await publish_article(title, body, image_paths if image_paths else None, platform=current_platform)
         write_result(result)
 
     # 发布成功后，重命名文件夹标记为已发布
@@ -728,8 +657,19 @@ async def main():
     parser.add_argument("--topic-count", type=int, default=20, help="获取热点话题数量（默认20）")
     parser.add_argument("--auto-publish-local", action="store_true", help="从 test_perper 自动选取未发布文章并发布")
     parser.add_argument("--fresh-profile-count", type=int, help="使用新建 Chrome profile 逐个发布 N 篇未发布文章（测试反AI检测）")
+    parser.add_argument("--platform", type=str, default="toutiao", choices=["toutiao", "sohu"], help="目标平台（默认 toutiao）")
 
     args = parser.parse_args()
+
+    # 平台路由：根据 --platform 参数选择平台配置
+    if args.platform == "sohu":
+        from platforms.sohu import SohuPlatform
+        current_platform = SohuPlatform()
+    else:
+        from platforms.toutiao import ToutiaoPlatform
+        current_platform = ToutiaoPlatform()
+
+    print(f"当前平台: {current_platform.name} ({current_platform.home_url})")
 
     # 全新 profile 顺序发布：测试反AI检测
     if args.fresh_profile_count:
@@ -740,9 +680,9 @@ async def main():
         from concurrent_publisher import ConcurrentPublisher
 
         try:
-            um = get_user_manager()
+            um = get_user_manager(current_platform.users_yaml)
         except FileNotFoundError:
-            print("错误: 未找到 users.yaml 配置文件")
+            print(f"错误: 未找到 {current_platform.users_yaml} 配置文件")
             return
         user = um.get_user(args.user_id)
         if not user:
@@ -833,6 +773,7 @@ async def main():
                 content=body,
                 image_paths=img_paths if img_paths else None,
                 fresh_profile=True,
+                platform=platform,
             )
 
             ok = "✅ 成功" if result.get("success") else "❌ 失败"
@@ -874,7 +815,7 @@ async def main():
     # 本地文章自动发布：扫描 test_perper → 选未发布文件夹 → 发布 → 标记已发布
     if args.auto_publish_local:
         from hot_topic_generator import load_existing_articles
-        await auto_publish_from_local(args)
+        await auto_publish_from_local(args, current_platform)
         return
 
     # 热点自动生成：抓取头条热榜 → LLM 生成文章 → 注入 publish 流程
@@ -1041,12 +982,13 @@ async def main():
                 title=args.title,
                 content=body,
                 image_paths=image_paths if image_paths else None,
+                platform=platform,
             )
             write_result(result)
             _mark_published(result, getattr(args, '_hot_article_dir', None))
         else:
             # 单用户向后兼容模式
-            result = await publish_article(args.title, body, image_paths if image_paths else None)
+            result = await publish_article(args.title, body, image_paths if image_paths else None, platform=current_platform)
             write_result(result)
             _mark_published(result, getattr(args, '_hot_article_dir', None))
     else:

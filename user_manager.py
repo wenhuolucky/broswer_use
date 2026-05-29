@@ -31,6 +31,7 @@ class UserManager:
     """
 
     _instance: Optional["UserManager"] = None
+    _instance_yaml: Optional[str] = None
 
     def __init__(self, config_path: Path):
         self.config_path = config_path
@@ -40,18 +41,19 @@ class UserManager:
         self._load_config()
 
     @classmethod
-    def load_default(cls) -> "UserManager":
-        """加载默认配置文件 users.yaml"""
-        config_path = Path(__file__).parent / "users.yaml"
+    def load_default(cls, yaml_path: str = "users.yaml") -> "UserManager":
+        """加载指定配置文件"""
+        config_path = Path(__file__).parent / yaml_path
         if not config_path.exists():
             raise FileNotFoundError(f"配置文件不存在: {config_path}")
         return cls(config_path)
 
     @classmethod
-    def get_instance(cls) -> "UserManager":
-        """获取单例实例"""
-        if cls._instance is None:
-            cls._instance = cls.load_default()
+    def get_instance(cls, yaml_path: str = "users.yaml") -> "UserManager":
+        """获取单例实例，支持不同平台的 YAML 文件"""
+        if cls._instance is None or cls._instance_yaml != yaml_path:
+            cls._instance = cls.load_default(yaml_path)
+            cls._instance_yaml = yaml_path
         return cls._instance
 
     def _load_config(self):

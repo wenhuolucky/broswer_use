@@ -6,14 +6,12 @@ auth.json
 auth.json.bak
 auth.json.*
 toutiao_auth.json
+*_cloud_auth.json
 
 # Browser profiles
 chrome_profile/
 chrome_profile_toutiao/
 chrome_profile_doubao/
-chrome_profile_doubao/
-*.png
-*.jpg
 
 # Python
 __pycache__/
@@ -36,3 +34,13 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# Logs
+doubao/log/
+doubao/data/
+result/
+login_error_*.png
+captcha_*.png
+after_drag_test.png
+captcha_success*.png
+login_page_*.png

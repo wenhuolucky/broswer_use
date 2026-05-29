@@ -31,12 +31,14 @@ class ConcurrentPublisher:
         content: str,
         image_paths: Optional[List[str]] = None,
         fresh_profile: bool = False,
+        platform=None,
     ) -> dict:
         """
         为指定用户发布文章。
 
         如果该用户正在发布中，新请求会等待完成后再执行。
         fresh_profile=True 时，每次发布使用全新的浏览器 profile。
+        platform: PlatformConfig 平台配置实例
         """
         user_config = self.user_manager.get_user(user_id)
         if not user_config:
@@ -60,6 +62,7 @@ class ConcurrentPublisher:
                 user_data_dir=user_config.chrome_profile,
                 cdp_port=user_config.cdp_port,
                 fresh_profile=fresh_profile,
+                platform=platform,
             )
             result["user_id"] = user_id
             return result
@@ -105,13 +108,15 @@ async def publish_for_user(
     content: str,
     image_paths: Optional[List[str]] = None,
     fresh_profile: bool = False,
+    platform=None,
 ) -> dict:
     """
     便捷函数：通过全局 UserManager 为用户发布文章。
     """
-    user_mgr = UserManager.get_instance()
+    users_yaml = platform.users_yaml if platform else "users.yaml"
+    user_mgr = UserManager.get_instance(users_yaml)
     publisher = ConcurrentPublisher(user_mgr)
-    return await publisher.publish_for_user(user_id, title, content, image_paths, fresh_profile)
+    return await publisher.publish_for_user(user_id, title, content, image_paths, fresh_profile, platform=platform)
 
 
 async def publish_batch(requests: List[dict]) -> List[dict]:
