@@ -132,36 +132,53 @@ python doubao/doubao_tester.py --loop --interval 120
 ```
 browser_use_demo/
 ├── toutiao_login.py          # 头条号自动登录脚本（手机号 + 滑块 + 短信验证码）
-├── captcha_solver.py         # 滑块验证码求解模块（OpenCV 缺口检测 + 人类拖拽轨迹）
+├── captcha_solver.py         # 滑块验证码求解模块（LLM 视觉识别 + 人类拖拽轨迹）
 ├── publisher.py              # 头条号主程序，发文流程控制
 ├── concurrent_publisher.py   # 多用户并发发布管理器
 ├── user_manager.py           # 多用户配置管理
-├── browser_utils.py          # 共享工具（Edge 路径检测 + CDP URL 获取）
+├── browser_utils.py          # 共享工具（浏览器路径检测 + CDP URL 获取）
 ├── toutiao_uploader.py       # 头条号图片上传模块
 ├── hot_topic_generator.py    # 热点文章自动生成（头条热榜 + LLM 两轮生成）
+├── test_concurrent_publish.py# 并发发布功能测试
 ├── users.yaml                # 多用户配置文件
 ├── requirements.txt          # Python 依赖
 ├── .env                      # 环境变量（API Key，勿提交）
 ├── .env.example              # 环境变量模板
 ├── .gitignore                # Git 忽略规则
-├── auth.json                 # 头条号登录态（自动生成，勿提交）
-├── toutiao_auth.json         # 头条号自动登录态（自动生成，勿提交）
-├── chrome_profile/           # 头条号 Edge 用户数据目录
-├── chrome_profile_toutiao/   # 头条号自动登录 Edge 用户数据目录
-├── doubao/
+│
+├── browser_test/             # 远程浏览器 Cookie 采集模块
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── config.py             # 平台配置（头条号/搜狐号等）
+│   ├── cookie_store.py       # Cookie 持久化与验证
+│   ├── remote_login.py       # 远程登录 CLI（本地 Chrome + Cloudflare Tunnel）
+│   └── viewer.py             # CDP screencast 实时查看器
+│
+├── platforms/                # 平台配置模块
+│   ├── __init__.py
+│   ├── base.py               # 平台配置基类
+│   ├── toutiao.py            # 头条号平台配置
+│   └── sohu.py               # 搜狐号平台配置
+│
+├── users/                    # 多用户数据目录
+│   ├── user1/auth.json       # 用户1 登录态
+│   ├── user2/auth.json       # 用户2 登录态
+│   └── user3/auth.json       # 用户3 登录态
+│
+├── doubao/                   # 豆包自动化测试模块
 │   ├── doubao_tester.py      # 豆包循环问答主程序
-│   ├── browser_session.py    # 豆包浏览器会话管理（含反检测机制）
-│   ├── questions.py          # 测试问题库（11 类，125 题）
+│   ├── browser_session.py    # 豆包浏览器会话管理
+│   ├── questions.py          # 测试问题库
 │   ├── storage.py            # JSONL 数据存储
-│   ├── human_behavior.py     # 人类行为模拟（随机延迟）
-│   ├── start_edge.bat        # 手动启动 Edge 脚本（方案 B，推荐）
-│   └── data/                 # 问答记录存储目录
-├── docs/
+│   ├── human_behavior.py     # 人类行为模拟
+│   └── start_edge.bat        # 手动启动 Edge 脚本
+│
+├── docs/                     # 项目文档
 │   ├── 技术方案.md
 │   └── 项目原理.md
-├── result/                   # 发布结果记录
-├── test_perper/              # 测试文章和图片
-└── venv/                     # Python 虚拟环境
+│
+├── test_perper/              # 文章素材目录（gitignore）
+└── result/                   # 发布结果记录（gitignore）
 ```
 
 ## 命令行参数

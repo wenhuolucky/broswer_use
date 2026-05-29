@@ -120,22 +120,26 @@ def generate_human_trajectory(
     return points
 
 
-async def execute_drag(page, trajectory: list) -> None:
-    if not trajectory:
-        return
+async def execute_drag(page, frame, start_x: float, start_y: float, distance: int) -> None:
+    """
+    使用 page.mouse 拖拽滑块，确保浏览器窗口激活。
+    """
+    # 先聚焦页面确保窗口激活
+    await page.bring_to_front()
+    await asyncio.sleep(0.5)
 
-    start_x, start_y = trajectory[0]
+    # 使用 page.mouse 拖拽
     await page.mouse.move(start_x, start_y)
-    await asyncio.sleep(random.uniform(0.2, 0.5))
+    await asyncio.sleep(0.3)
     await page.mouse.down()
-    await asyncio.sleep(random.uniform(0.1, 0.2))
+    await asyncio.sleep(0.1)
 
-    total = len(trajectory)
-    for i, (x, y) in enumerate(trajectory):
-        await page.mouse.move(x, y)
-        progress = i / max(total - 1, 1)
-        delay = 15 + 35 * math.sin(progress * math.pi)
-        await asyncio.sleep(delay / 1000.0)
+    # 分步移动
+    steps = 20
+    for i in range(1, steps + 1):
+        x = start_x + (distance * i / steps)
+        await page.mouse.move(x, start_y)
+        await asyncio.sleep(0.05)
 
-    await asyncio.sleep(random.uniform(0.1, 0.3))
+    await asyncio.sleep(0.2)
     await page.mouse.up()

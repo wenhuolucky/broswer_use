@@ -251,29 +251,29 @@ async def solve_captcha_in_frame(page, captcha_frame):
             if not handle_box:
                 raise RuntimeError("无法获取滑块按钮位置")
 
-            # 4. 获取 iframe 偏移量
-            iframe_el = await page.query_selector('iframe')
-            if not iframe_el:
-                raise RuntimeError("未找到验证码 iframe")
-            iframe_box = await iframe_el.bounding_box()
-            if not iframe_box:
-                raise RuntimeError("无法获取 iframe 位置")
-
-            # 滑块在页面中的绝对坐标
-            abs_start_x = iframe_box["x"] + handle_box["x"] + handle_box["width"] / 2
-            abs_start_y = iframe_box["y"] + handle_box["y"] + handle_box["height"] / 2
-
+            # 4. 计算拖拽距离
             track_width = track_box["width"]
             drag_distance = int(track_width * slider_percent / 100.0)
             print(f"    滑块轨道宽度: {track_width:.0f}px")
-            print(f"    按钮起始: iframe内x={handle_box['x'] + handle_box['width']/2:.0f}, 页面x={abs_start_x:.0f}")
             print(f"    计算拖拽距离: {drag_distance}px ({slider_percent:.0f}% × {track_width:.0f}px)")
 
-            # 5. 生成并执行拖拽轨迹
-            trajectory = generate_human_trajectory(
-                int(abs_start_x), int(abs_start_y), drag_distance
-            )
-            await execute_drag(page, trajectory)
+            # 5. 在 iframe 内执行拖拽
+            # 滑块起始位置（iframe 内坐标）
+            slider_start_x = handle_box["x"] + handle_box["width"] / 2
+            slider_start_y = handle_box["y"] + handle_box["height"] / 2
+
+            # 获取 iframe 在页面中的偏移量
+            iframe_el = await page.query_selector('iframe')
+            iframe_box = await iframe_el.bounding_box()
+
+            # 计算页面绝对坐标
+            abs_start_x = iframe_box["x"] + slider_start_x
+            abs_start_y = iframe_box["y"] + slider_start_y
+
+            print(f"    iframe偏移: ({iframe_box['x']:.0f}, {iframe_box['y']:.0f})")
+            print(f"    页面绝对坐标: ({abs_start_x:.0f}, {abs_start_y:.0f})")
+
+            await execute_drag(page, captcha_frame, abs_start_x, abs_start_y, drag_distance)
 
             # 6. 等待验证结果
             await asyncio.sleep(3.0)
