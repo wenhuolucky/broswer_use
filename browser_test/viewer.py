@@ -1,6 +1,6 @@
 """
 远程浏览器查看器 — 通过 CDP screencast 提供实时浏览器画面和操作
-使用 CDP Input.dispatchMouseEvent 直接发送用户输入，低延迟
+优化: 低延迟传输 (binary ws + Blob 渲染 + 帧节流 + 低画质) + 登录自动检测
 """
 import asyncio
 import json
@@ -15,12 +15,8 @@ if _venv_site.exists() and str(_venv_site) not in sys.path:
 from playwright.async_api import async_playwright
 from aiohttp import web
 
-import base64
-from PIL import Image
-import io
 
-
-# ── HTML 查看器 ──
+# ── 二进制传输 + Blob 渲染 ──
 VIEWER_HTML = """<!DOCTYPE html>
 <html>
 <head>
@@ -37,22 +33,22 @@ VIEWER_HTML = """<!DOCTYPE html>
   .viewer { flex: 1; display: flex; justify-content: center; align-items: flex-start; overflow: auto; background: #010409; position: relative; }
   #screen { display: block; image-rendering: auto; }
   #overlay { position: absolute; top: 0; left: 50%; transform: translateX(-50%); cursor: crosshair; }
-  #status { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 16px; color: #8b949e; pointer-events: none; text-align: center; }
+  #status { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 16px; color: #8b949e; pointer-events: none; }
   .status-ok { color: #3fb950 !important; }
   .status-err { color: #f85149 !important; }
 </style>
 </head>
 <body>
 <div class="toolbar">
-  <button id="btnBack" title="后退">&#8592;</button>
-  <button id="btnFwd" title="前进">&#8594;</button>
-  <button id="btnReload" title="刷新">&#8635;</button>
+  <button id="btnBack">&#8592;</button>
+  <button id="btnFwd">&#8594;</button>
+  <button id="btnReload">&#8635;</button>
   <input id="urlBar" type="text" placeholder="输入网址后按回车...">
 </div>
 <div class="viewer" id="viewerArea">
   <div id="status">正在连接...</div>
   <div id="overlay" style="display:none">
-    <img id="screen" style="display:block">
+    <img id="screen">
   </div>
 </div>
 <script>
@@ -62,69 +58,53 @@ const img = document.getElementById('screen');
 const overlay = document.getElementById('overlay');
 const status = document.getElementById('status');
 const urlBar = document.getElementById('urlBar');
+let devW = 960, devH = 640, blobUrl = null;
 
-// 设备 viewport 尺寸（Chrome 实际的 CSS 像素）
-let devW = 1280, devH = 900;
-
+ws.binaryType = 'arraybuffer';
 ws.onopen = () => { status.textContent = '已连接，等待画面...'; status.className = 'status-ok'; };
 ws.onclose = () => { status.textContent = '连接已断开'; status.className = 'status-err'; overlay.style.display = 'none'; };
-ws.onerror = () => { status.textContent = 'WebSocket 连接失败'; status.className = 'status-err'; };
+ws.onerror = () => { status.textContent = 'WebSocket 错误'; status.className = 'status-err'; };
 
 ws.onmessage = (e) => {
-  const msg = JSON.parse(e.data);
-  if (msg.type === 'frame') {
-    img.src = 'data:image/jpeg;base64,' + msg.data;
-    if (msg.dw) devW = msg.dw;
-    if (msg.dh) devH = msg.dh;
-    // 等图片加载后再设置 overlay 尺寸
-    img.onload = () => {
-      overlay.style.width = img.naturalWidth + 'px';
-      overlay.style.height = img.naturalHeight + 'px';
-    };
+  if (e.data instanceof ArrayBuffer) {
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
+    blobUrl = URL.createObjectURL(new Blob([e.data], { type: 'image/jpeg' }));
+    img.src = blobUrl;
     overlay.style.display = 'block';
     status.style.display = 'none';
-    if (msg.url) urlBar.value = msg.url;
+    return;
   }
-  if (msg.type === 'url') urlBar.value = msg.url;
+  try {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'url') urlBar.value = msg.url;
+    if (msg.type === 'init') { devW = msg.w || 960; devH = msg.h || 640; }
+  } catch(_) {}
 };
 
 function send(type, data) { if (ws.readyState === 1) ws.send(JSON.stringify({ type, ...data })); }
 
-// 坐标转换: 屏幕点击 → 图片像素 → 设备 CSS 像素
 function toDevice(e) {
   const r = overlay.getBoundingClientRect();
-  const sx = e.clientX - r.left;
-  const sy = e.clientY - r.top;
-  // 映射到图片实际像素
-  const imgX = sx * img.naturalWidth / r.width;
-  const imgY = sy * img.naturalHeight / r.height;
-  // 映射到设备 CSS 像素（screencast 图片已经是设备 CSS 像素的 1:1 映射，因为 deviceScaleFactor=1）
   return {
-    x: Math.round(imgX * devW / img.naturalWidth),
-    y: Math.round(imgY * devH / img.naturalHeight),
+    x: Math.round((e.clientX - r.left) * devW / r.width),
+    y: Math.round((e.clientY - r.top) * devH / r.height),
   };
 }
 
 overlay.addEventListener('mousedown', (e) => {
   const p = toDevice(e);
-  send('mouseDown', { x: p.x, y: p.y, button: e.button === 2 ? 'right' : 'left' });
+  if (e.button === 0) send('mouseDown', { x: p.x, y: p.y });
+  else { e.preventDefault(); send('mouseRight', { x: p.x, y: p.y }); }
 });
-overlay.addEventListener('mouseup', (e) => {
-  const p = toDevice(e);
-  send('mouseUp', { x: p.x, y: p.y, button: e.button === 2 ? 'right' : 'left' });
-});
+overlay.addEventListener('mouseup', (e) => { const p = toDevice(e); send('mouseUp', { x: p.x, y: p.y }); });
 overlay.addEventListener('contextmenu', e => e.preventDefault());
-overlay.addEventListener('wheel', (e) => {
-  const p = toDevice(e);
-  send('wheel', { x: p.x, y: p.y, dx: -e.deltaX, dy: -e.deltaY });
-  e.preventDefault();
-}, { passive: false });
+overlay.addEventListener('wheel', (e) => { const p = toDevice(e); send('wheel', { x: p.x, y: p.y, dx: -e.deltaX, dy: -e.deltaY }); e.preventDefault(); }, { passive: false });
 
-// 键盘事件
 document.addEventListener('keydown', (e) => {
   if (e.target === urlBar) return;
-  e.preventDefault();
-  send('key', { text: e.key });
+  if (e.key.length === 1 || e.key === 'Enter' || e.key === 'Backspace' || e.key === 'Tab' || e.key === 'Escape' || e.key === 'Delete' || e.key.startsWith('Arrow')) {
+    e.preventDefault(); send('key', { text: e.key, code: e.code });
+  }
 });
 urlBar.addEventListener('keydown', (e) => { if (e.key === 'Enter') { send('navigate', { url: urlBar.value }); e.preventDefault(); } });
 
@@ -137,13 +117,21 @@ document.getElementById('btnReload').onclick = () => send('reload');
 """
 
 
-async def run_viewer_server(cdp_port: int, http_port: int = 8888, target_url: str = None):
-    """启动远程浏览器查看器
+async def run_viewer_server(
+    cdp_port: int, http_port: int = 8888,
+    target_url: str = None, login_detect_url: str = None,
+    login_event: asyncio.Event = None,
+    disconnect_event: asyncio.Event = None,
+):
+    """启动远程浏览器查看器（低延迟模式）
 
     Args:
         cdp_port: Chrome CDP 调试端口
         http_port: 查看器 HTTP 服务端口
         target_url: 启动后自动导航到此 URL
+        login_detect_url: 登录页 URL 前缀（如 /auth/page/login）
+        login_event: 登录检测 Event，URL 离开 login_detect_url 时触发
+        disconnect_event: 断开检测 Event，WebSocket 断开时触发
     """
     pw = await async_playwright().start()
     browser = await pw.chromium.connect_over_cdp(f"http://localhost:{cdp_port}")
@@ -156,8 +144,12 @@ async def run_viewer_server(cdp_port: int, http_port: int = 8888, target_url: st
         except:
             pass
 
-    # CDP session for screencast + input
     cdp = await page.context.new_cdp_session(page)
+
+    # 获取实际设备尺寸
+    viewport = await page.evaluate('() => ({ w: window.innerWidth, h: window.innerHeight })')
+    dev_w = viewport.get('w', 960)
+    dev_h = viewport.get('h', 640)
 
     app = web.Application()
 
@@ -168,54 +160,80 @@ async def run_viewer_server(cdp_port: int, http_port: int = 8888, target_url: st
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
 
-        # Get actual device viewport dimensions
-        viewport = await page.evaluate('() => ({ w: window.innerWidth, h: window.innerHeight })')
-        dev_w = viewport.get('w', 1280)
-        dev_h = viewport.get('h', 900)
+        # 发送初始化消息
+        await ws.send_json({'type': 'init', 'w': dev_w, 'h': dev_h})
 
-        # Start screencast
+        # 低画质 screencast
         await cdp.send('Page.startScreencast', {
             'format': 'jpeg',
-            'quality': 75,
-            'maxWidth': 1280,
-            'maxHeight': 900,
+            'quality': 50,
+            'maxWidth': 960,
+            'maxHeight': 640,
         })
 
         screencasting = True
+        last_frame_time = 0
+        FRAME_INTERVAL = 0.1
 
         async def on_frame(params):
-            nonlocal screencasting
+            nonlocal screencasting, last_frame_time
+            now = asyncio.get_event_loop().time()
+            if now - last_frame_time < FRAME_INTERVAL:
+                try:
+                    await cdp.send('Page.screencastFrameAck', {'sessionId': params['sessionId']})
+                except:
+                    pass
+                return
             if not screencasting or ws.closed:
                 return
             try:
-                await ws.send_json({
-                    'type': 'frame',
-                    'data': params['data'],
-                    'dw': dev_w,
-                    'dh': dev_h,
-                })
+                import base64
+                raw = base64.b64decode(params['data'])
+                await ws.send_bytes(raw)
+                last_frame_time = now
                 await cdp.send('Page.screencastFrameAck', {'sessionId': params['sessionId']})
             except:
                 screencasting = False
 
         cdp.on('Page.screencastFrame', on_frame)
 
-        # Track URL
+        # URL 变化追踪 + 登录检测
+        has_login_detected = False
+        was_on_login_page = login_detect_url is not None
+
         async def on_navigated(frame):
+            nonlocal has_login_detected, was_on_login_page
+            url = frame.url
             if not ws.closed:
                 try:
-                    await ws.send_json({'type': 'url', 'url': frame.url})
+                    await ws.send_json({'type': 'url', 'url': url})
                 except:
                     pass
+
+            # 登录检测：从登录页跳转到非登录页
+            if login_detect_url and login_event and not has_login_detected:
+                if login_detect_url in url:
+                    was_on_login_page = True
+                elif was_on_login_page:
+                    # 用户从登录页跳转到了其他页面 = 登录成功
+                    has_login_detected = True
+                    login_event.set()
+
         page.on('framenavigated', on_navigated)
 
-        # Send initial URL
+        # 发送初始 URL
         try:
-            await ws.send_json({'type': 'url', 'url': page.url})
+            init_url = page.url
+            await ws.send_json({'type': 'url', 'url': init_url})
+
+            # 检测初始 URL 是否已经是非登录页（用户可能已经在后台）
+            if login_detect_url and login_event and login_detect_url not in init_url:
+                has_login_detected = True
+                login_event.set()
         except:
             pass
 
-        # Handle user input
+        # 等待 WebSocket 连接断开
         async for message in ws:
             if message.type == 1:
                 try:
@@ -225,69 +243,39 @@ async def run_viewer_server(cdp_port: int, http_port: int = 8888, target_url: st
                     if dtype in ('mouseDown', 'mouseUp'):
                         action = 'mousePressed' if dtype == 'mouseDown' else 'mouseReleased'
                         await cdp.send('Input.dispatchMouseEvent', {
-                            'type': action,
-                            'x': data['x'],
-                            'y': data['y'],
-                            'button': data.get('button', 'left'),
-                            'clickCount': 1,
+                            'type': action, 'x': data['x'], 'y': data['y'],
+                            'button': data.get('button', 'left'), 'clickCount': 1,
                         })
-
                     elif dtype == 'mouseRight':
                         await cdp.send('Input.dispatchMouseEvent', {
-                            'type': 'mousePressed',
-                            'x': data['x'],
-                            'y': data['y'],
-                            'button': 'right',
-                            'clickCount': 1,
+                            'type': 'mousePressed', 'x': data['x'], 'y': data['y'],
+                            'button': 'right', 'clickCount': 1,
                         })
                         await cdp.send('Input.dispatchMouseEvent', {
-                            'type': 'mouseReleased',
-                            'x': data['x'],
-                            'y': data['y'],
-                            'button': 'right',
-                            'clickCount': 1,
+                            'type': 'mouseReleased', 'x': data['x'], 'y': data['y'],
+                            'button': 'right', 'clickCount': 1,
                         })
-
                     elif dtype == 'wheel':
                         await cdp.send('Input.dispatchMouseEvent', {
-                            'type': 'mouseWheel',
-                            'x': data['x'],
-                            'y': data['y'],
-                            'deltaX': -data.get('dx', 0),
-                            'deltaY': -data.get('dy', 0),
+                            'type': 'mouseWheel', 'x': data['x'], 'y': data['y'],
+                            'deltaX': -data.get('dx', 0), 'deltaY': -data.get('dy', 0),
                         })
-
                     elif dtype == 'key':
                         text = data['text']
                         if len(text) == 1:
-                            await cdp.send('Input.dispatchKeyEvent', {
-                                'type': 'rawKeyDown',
-                                'text': text,
-                            })
-                            await cdp.send('Input.dispatchKeyEvent', {
-                                'type': 'char',
-                                'text': text,
-                            })
-                            await cdp.send('Input.dispatchKeyEvent', {
-                                'type': 'keyUp',
-                                'text': text,
-                            })
+                            await cdp.send('Input.dispatchKeyEvent', {'type': 'rawKeyDown', 'text': text})
+                            await cdp.send('Input.dispatchKeyEvent', {'type': 'char', 'text': text})
+                            await cdp.send('Input.dispatchKeyEvent', {'type': 'keyUp', 'text': text})
                         elif text in ('Enter', 'Backspace', 'Tab', 'Escape', 'Delete'):
-                            km = {'Enter': 'Enter', 'Backspace': 'Backspace', 'Tab': 'Tab', 'Escape': 'Escape', 'Delete': 'Delete'}
-                            await cdp.send('Input.dispatchKeyEvent', {
-                                'type': 'rawKeyDown', 'key': km[text], 'code': km[text],
-                            })
-                            await cdp.send('Input.dispatchKeyEvent', {
-                                'type': 'keyUp', 'key': km[text], 'code': km[text],
-                            })
+                            for t in ('rawKeyDown', 'keyUp'):
+                                await cdp.send('Input.dispatchKeyEvent', {
+                                    'type': t, 'key': text, 'code': text,
+                                })
                         elif text.startswith('Arrow'):
-                            await cdp.send('Input.dispatchKeyEvent', {
-                                'type': 'rawKeyDown', 'key': text, 'code': text,
-                            })
-                            await cdp.send('Input.dispatchKeyEvent', {
-                                'type': 'keyUp', 'key': text, 'code': text,
-                            })
-
+                            for t in ('rawKeyDown', 'keyUp'):
+                                await cdp.send('Input.dispatchKeyEvent', {
+                                    'type': t, 'key': text, 'code': text,
+                                })
                     elif dtype == 'navigate':
                         await page.goto(data['url'], timeout=30000, wait_until='domcontentloaded')
                     elif dtype == 'goBack':
@@ -298,6 +286,10 @@ async def run_viewer_server(cdp_port: int, http_port: int = 8888, target_url: st
                         await page.reload()
                 except Exception as e:
                     print(f'操作错误: {e}')
+
+        # WebSocket 连接已断开（用户关闭页面）
+        if disconnect_event:
+            disconnect_event.set()
 
         screencasting = False
         try:
@@ -314,8 +306,8 @@ async def run_viewer_server(cdp_port: int, http_port: int = 8888, target_url: st
     site = web.TCPSite(runner, '0.0.0.0', http_port)
     await site.start()
 
-    print(f"[查看器] 已启动: http://localhost:{http_port}")
-    return runner, pw, browser, cdp
+    print(f"[查看器] 已启动: http://localhost:{http_port} (低延迟模式: quality=50, 960x640, ~10fps)")
+    return runner, pw, browser, cdp, page
 
 
 if __name__ == '__main__':

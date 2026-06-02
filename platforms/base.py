@@ -19,7 +19,8 @@ class PlatformConfig:
     def get_agent_prompt(self, title: str, content: str,
                          cover_instruction: str,
                          body_image_instruction: str,
-                         is_markdown: bool) -> str:
+                         is_markdown: bool,
+                         rich_html: str = None) -> str:
         """生成 Agent 任务 prompt，子类可覆盖以定制平台特定流程"""
         raise NotImplementedError(f"平台 {self.name} 未实现 get_agent_prompt()")
 

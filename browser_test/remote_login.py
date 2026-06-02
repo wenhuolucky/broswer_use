@@ -216,8 +216,9 @@ async def extract_cookies(cdp_port: int) -> list:
 
 
 async def cmd_save(platform_name: str, cdp_port: int = CDP_PORT,
-                   viewer_port: int = VIEWER_PORT, output_path: Path = None):
-    """执行远程登录采集流程"""
+                   viewer_port: int = VIEWER_PORT, output_path: Path = None,
+                   keep_alive_minutes: int = 10):
+    """执行远程登录采集流程（自动检测登录 + 保持连接）"""
     platform = get_platform(platform_name)
     if output_path is None:
         output_path = get_default_auth_file(platform_name)
@@ -226,46 +227,63 @@ async def cmd_save(platform_name: str, cdp_port: int = CDP_PORT,
     tunnel_proc = None
     viewer_runner = None
 
+    # 登录检测 Event
+    login_event = asyncio.Event()
+    # 断开检测 Event（用户关闭查看器页面）
+    disconnect_event = asyncio.Event()
+
     try:
         # 1. 启动 Chrome
         chrome_proc = await launch_chrome(cdp_port)
 
-        # 2. 启动查看器 + 导航
+        # 2. 启动查看器 + 导航（启用登录检测）
         from browser_test.viewer import run_viewer_server
-        print(f"\n[2/5] 正在启动查看器并导航到 {platform.name}...")
-        viewer_runner, pw, browser, cdp = await run_viewer_server(
-            cdp_port, viewer_port, platform.home_url
+        print(f"\n[1/4] 正在启动查看器并导航到 {platform.name}...")
+        login_detect_url = platform.home_url + "/auth/page/login"
+        viewer_runner, pw, browser, cdp, page = await run_viewer_server(
+            cdp_port, viewer_port, login_detect_url,
+            login_detect_url=login_detect_url,
+            login_event=login_event,
+            disconnect_event=disconnect_event,
         )
 
         # 3. 启动 Cloudflare Tunnel
-        print(f"\n[3/5] 正在创建 Tunnel...")
+        print(f"\n[2/4] 正在创建 Tunnel...")
         tunnel_proc, tunnel_url = await start_cloudflared_tunnel(viewer_port)
 
         print(f"\n{'='*60}")
-        print(f"[4/5] 远程用户访问链接:")
+        print(f"[3/4] 远程用户访问链接:")
         print(f"")
         print(f"  >>> {tunnel_url} <<<")
         print(f"")
         print(f"{'='*60}")
         print(f"\n将以上链接发送给远程用户。")
         print(f"用户在网页中可以看到实时浏览器画面并进行操作。")
+        print(f"\n💡 提示: 请使用头条 App 扫码登录，不要使用手机号验证码登录。")
+        print(f"   手机号登录会触发滑块验证码，远程操作无法拖动滑块。")
+        print(f"   扫码登录地址: {platform.home_url}/auth/page/login")
         print()
 
-        # 4. 等待用户完成登录
-        print("[5/5] 等待用户完成登录...")
-        print("         （按 Enter 继续，或输入 quit 取消）")
-        try:
-            loop = asyncio.get_event_loop()
-            user_input = await loop.run_in_executor(None, lambda: input(">>> "))
-            if user_input.strip().lower() in ("quit", "q", "exit", "cancel"):
-                print("操作已取消。")
-                return
-        except (EOFError, KeyboardInterrupt):
-            print("\n用户中断。")
+        # 4. 等待自动检测登录
+        print("[4/4] 等待用户登录...（检测到登录成功将自动提取 cookies）")
+
+        done, pending = await asyncio.wait(
+            [
+                asyncio.create_task(login_event.wait()),
+                asyncio.create_task(asyncio.sleep(keep_alive_minutes * 60)),  # 超时保护
+            ],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+
+        if not login_event.is_set():
+            print("\n超时，未检测到登录成功。")
             return
 
+        print(f"\n✅ 检测到登录成功！正在提取 cookies...")
+
         # 提取 cookies
-        print("\n正在提取 cookies...")
         cookies = await extract_cookies(cdp_port)
 
         if not cookies:
@@ -282,6 +300,32 @@ async def cmd_save(platform_name: str, cdp_port: int = CDP_PORT,
         else:
             print(f"警告: 未检测到 {platform.name} 的域名 cookie，登录可能未成功")
 
+        # 5. 保持连接，直到用户关闭页面或超时
+        print(f"\n📌 保持连接中... 您可以继续操作浏览器")
+        print(f"   关闭查看器页面或 {keep_alive_minutes} 分钟后自动断开")
+
+        done_tasks, _ = await asyncio.wait(
+            [
+                asyncio.create_task(disconnect_event.wait()),
+                asyncio.create_task(asyncio.sleep(keep_alive_minutes * 60)),
+            ],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        # 取消未完成的 task
+        for t in done_tasks:
+            pass  # already completed
+        for t in _:
+            t.cancel()
+
+        if disconnect_event.is_set():
+            print(f"\n🔌 检测到用户关闭页面，正在断开连接")
+        else:
+            print(f"\n⏰ {keep_alive_minutes} 分钟已到，自动断开连接")
+
+    except asyncio.CancelledError:
+        print("\n操作已取消。")
+    except KeyboardInterrupt:
+        print("\n用户中断。")
     finally:
         # 清理
         if viewer_runner:
@@ -398,6 +442,7 @@ def main():
     parser.add_argument("--viewer-port", type=int, default=VIEWER_PORT, help="查看器端口 (默认 8888)")
     parser.add_argument("--verify", type=str, metavar="AUTH_FILE", help="验证已保存的 Cookie")
     parser.add_argument("--output", type=str, metavar="OUTPUT_FILE", help="Cookie 保存路径")
+    parser.add_argument("--keep-alive", type=int, default=10, metavar="MINUTES", help="登录成功后保持连接分钟数 (默认 10)")
 
     args = parser.parse_args()
 
@@ -405,7 +450,7 @@ def main():
         asyncio.run(cmd_verify(args.platform, Path(args.verify), args.cdp_port))
     else:
         output_path = Path(args.output) if args.output else None
-        asyncio.run(cmd_save(args.platform, args.cdp_port, args.viewer_port, output_path))
+        asyncio.run(cmd_save(args.platform, args.cdp_port, args.viewer_port, output_path, args.keep_alive))
 
 
 if __name__ == "__main__":

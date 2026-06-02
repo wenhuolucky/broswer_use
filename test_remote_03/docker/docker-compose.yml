@@ -1,0 +1,42 @@
+version: "3.8"
+
+# 多用户远程浏览器 — 每用户独立容器
+# 端口映射对照:
+#   user1: noVNC=6081, CDP=9227
+#   user2: noVNC=6082, CDP=9237
+#   user3: noVNC=6083, CDP=9247
+
+x-common: &common
+  build: .
+  shm_size: "2gb"
+  environment:
+    - TZ=Asia/Shanghai
+  restart: unless-stopped
+
+services:
+  user1:
+    <<: *common
+    container_name: novnc-user1
+    ports:
+      - "6081:6080"
+      - "9227:9222"
+    volumes:
+      - ../output/user1:/output
+
+  user2:
+    <<: *common
+    container_name: novnc-user2
+    ports:
+      - "6082:6080"
+      - "9237:9222"
+    volumes:
+      - ../output/user2:/output
+
+  user3:
+    <<: *common
+    container_name: novnc-user3
+    ports:
+      - "6083:6080"
+      - "9247:9222"
+    volumes:
+      - ../output/user3:/output

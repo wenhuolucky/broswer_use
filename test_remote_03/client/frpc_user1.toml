@@ -1,0 +1,29 @@
+# FRP 客户端配置 — user1
+# 使用前请修改 serverAddr 和 auth.token
+
+serverAddr = "x.x.x.x"
+serverPort = 7000
+
+auth.method = "token"
+auth.token = "your_secure_token_here"
+
+# 日志
+log.to = "./frpc_user1.log"
+log.level = "info"
+log.maxDays = 3
+
+# user1 的 noVNC 端口映射
+[[proxies]]
+name = "user1-noVNC"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 6081
+remotePort = 6801
+
+# user1 的 CDP 端口映射
+[[proxies]]
+name = "user1-CDP"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 9227
+remotePort = 6901

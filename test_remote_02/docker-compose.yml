@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  novnc-browser:
+    build: .
+    container_name: novnc-browser
+    ports:
+      - "6080:6080"
+      - "9222:9222"
+    environment:
+      - TZ=Asia/Shanghai
+    shm_size: "2gb"
+    restart: unless-stopped
+    # 映射 cookie 输出目录（可选）
+    volumes:
+      - ./output:/output
