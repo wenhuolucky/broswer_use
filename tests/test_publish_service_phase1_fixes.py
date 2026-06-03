@@ -3,7 +3,7 @@ import json
 import logging
 from types import SimpleNamespace
 
-from publish_service.publish_service import LLMTokenTracker, PublishService
+from api.publish.publish_service import LLMTokenTracker, PublishService
 
 
 class DummyHistory:

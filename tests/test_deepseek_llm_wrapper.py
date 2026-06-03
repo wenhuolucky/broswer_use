@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from pydantic import BaseModel
 
-from publish_service.deepseek_llm import extract_json_payload, parse_structured_completion
+from api.publish.deepseek_llm import extract_json_payload, parse_structured_completion
 
 
 class SampleOutput(BaseModel):

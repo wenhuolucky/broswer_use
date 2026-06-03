@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from publish_docker.app.server import app
+from api.publish_docker.app.server import app
 
 
 def test_health_exposes_worker_and_queue_state():
