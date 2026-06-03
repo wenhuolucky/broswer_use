@@ -783,9 +783,9 @@ class PublishService:
         articles_url = "https://mp.toutiao.com/profile_v4/graphic/articles"
         if logger:
             logger.info(f"[PublishGuard] navigating to articles page: {articles_url}")
-        # 用 Playwright 原生 goto 替代 window.location.href，确保 SPA 完整重新渲染
-        await page.goto(articles_url, wait_until="domcontentloaded", timeout=15000)
-        await asyncio.sleep(2)
+        # 用 page.goto 强制完整加载（不用 window.location.href 避免 React Router 拦截）
+        await page.goto(articles_url)
+        await asyncio.sleep(3)
 
         # 等待 SPA 渲染完成：等至少一个 .article-card-bone 出现
         if logger:
@@ -977,9 +977,9 @@ class PublishService:
                 return ""
 
             articles_url = "https://mp.toutiao.com/profile_v4/graphic/articles"
-            # 用 Playwright 原生 goto 强制完整加载
-            await page.goto(articles_url, wait_until="domcontentloaded", timeout=15000)
-            await asyncio.sleep(2)
+            # 用 page.goto 强制完整加载
+            await page.goto(articles_url)
+            await asyncio.sleep(3)
 
             # 同样等待 SPA 渲染
             if logger:
