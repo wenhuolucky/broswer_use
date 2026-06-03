@@ -811,14 +811,12 @@ class PublishService:
                 const titleLinks = document.querySelectorAll('.article-card-bone .title-wrap .title[href]');
                 if (titleLinks.length) {
                     const first = titleLinks[0];
-                    first.click();
-                    return { clicked: true, text: (first.innerText || first.textContent || '').trim(), href: first.href || '' };
+                    return { text: (first.innerText || first.textContent || '').trim(), href: first.href || '' };
                 }
                 // 次选：任意 .title[href]
                 const genericTitle = document.querySelector('.title[href]');
                 if (genericTitle) {
-                    genericTitle.click();
-                    return { clicked: true, text: (genericTitle.innerText || genericTitle.textContent || '').trim(), href: genericTitle.href || '' };
+                    return { text: (genericTitle.innerText || genericTitle.textContent || '').trim(), href: genericTitle.href || '' };
                 }
                 // 兜底：遍历所有 /item/ 链接
                 const anchors = Array.from(document.querySelectorAll('a[href]'));
@@ -826,11 +824,10 @@ class PublishService:
                     const href = anchor.href || '';
                     const text = (anchor.innerText || anchor.textContent || '').trim();
                     if (href.includes('/item/') && text) {
-                        anchor.click();
-                        return { clicked: true, text, href };
+                        return { text, href };
                     }
                 }
-                return { clicked: false, text: '', href: '' };
+                return { text: '', href: '' };
             }"""
         )
 
@@ -850,11 +847,6 @@ class PublishService:
                 )
             return {"matched": False, "article_url": "", "detail_title": ""}
 
-        if not first_article.get("clicked"):
-            if logger:
-                logger.info("[PublishGuard] no /item/ article entry found on articles list page")
-            return {"matched": False, "article_url": "", "detail_title": ""}
-
         selected_href = str(first_article.get("href", "") or "").strip()
         selected_text = str(first_article.get("text", "") or "").strip()
         if logger:
@@ -863,6 +855,35 @@ class PublishService:
                 f"href={selected_href} | text={selected_text}"
             )
 
+        if not selected_href:
+            if logger:
+                logger.info("[PublishGuard] no /item/ article entry found on articles list page")
+            return {"matched": False, "article_url": "", "detail_title": ""}
+
+        # 关键：文章列表页的链接带有 target="_blank"，点击会打开新标签页，
+        # 当前页 URL 不会跳转。所以直接从 href 提取文章 URL，不再依赖页面跳转。
+        if "/item/" in selected_href:
+            normalized_expected = (title or "").strip()
+            normalized_actual = selected_text
+            matched = bool(
+                normalized_expected and normalized_actual and (
+                    normalized_expected == normalized_actual
+                    or normalized_expected in normalized_actual
+                    or normalized_actual in normalized_expected
+                )
+            )
+            if logger:
+                logger.info(
+                    "[PublishGuard] article URL extracted from href: "
+                    f"expected={normalized_expected} | actual={normalized_actual} | matched={matched} | url={selected_href}"
+                )
+            return {
+                "matched": matched,
+                "article_url": selected_href if matched else "",
+                "detail_title": normalized_actual,
+            }
+
+        # 如果不是 /item/ 链接（例如 preview 页面），走原来的导航逻辑
         await asyncio.sleep(2)
         initial_detail_url = await session.get_current_page_url()
         detail_url = initial_detail_url
