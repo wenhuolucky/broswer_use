@@ -783,12 +783,14 @@ class PublishService:
         articles_url = "https://mp.toutiao.com/profile_v4/graphic/articles"
         if logger:
             logger.info(f"[PublishGuard] navigating to articles page: {articles_url}")
-        await self._navigate_page(page, articles_url)
+        # 用 Playwright 原生 goto 替代 window.location.href，确保 SPA 完整重新渲染
+        await page.goto(articles_url, wait_until="domcontentloaded", timeout=15000)
+        await asyncio.sleep(2)
 
         # 等待 SPA 渲染完成：等至少一个 .article-card-bone 出现
         if logger:
             logger.info("[PublishGuard] waiting for articles list SPA to render...")
-        for i in range(12):
+        for i in range(15):
             article_count = await page.evaluate("() => document.querySelectorAll('.article-card-bone').length")
             if isinstance(article_count, int) and article_count > 0:
                 if logger:
@@ -797,7 +799,7 @@ class PublishService:
             await asyncio.sleep(1)
         else:
             if logger:
-                logger.warning("[PublishGuard] SPA did not render any .article-card-bone within 12s")
+                logger.warning("[PublishGuard] SPA did not render any .article-card-bone within 15s")
 
         # 刷新一次确保最新数据
         await self._reload_page(page, logger)
@@ -975,12 +977,14 @@ class PublishService:
                 return ""
 
             articles_url = "https://mp.toutiao.com/profile_v4/graphic/articles"
-            await self._navigate_page(page, articles_url)
+            # 用 Playwright 原生 goto 强制完整加载
+            await page.goto(articles_url, wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(2)
 
             # 同样等待 SPA 渲染
             if logger:
                 logger.info("[PublishGuard] fallback: waiting for SPA to render...")
-            for i in range(12):
+            for i in range(15):
                 count = await page.evaluate("() => document.querySelectorAll('.article-card-bone').length")
                 if isinstance(count, int) and count > 0:
                     if logger:
@@ -989,7 +993,7 @@ class PublishService:
                 await asyncio.sleep(1)
             else:
                 if logger:
-                    logger.warning("[PublishGuard] fallback: SPA did not render within 12s")
+                    logger.warning("[PublishGuard] fallback: SPA did not render within 15s")
 
             # 收集所有 /item/ 链接（三层优先级）
             all_items = await page.evaluate(
