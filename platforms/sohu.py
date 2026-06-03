@@ -18,41 +18,11 @@ class SohuPlatform(PlatformConfig):
     def get_agent_prompt(self, title: str, content: str,
                          cover_instruction: str,
                          body_image_instruction: str,
-                         is_markdown: bool,
-                         rich_html: str = None) -> str:
-        if is_markdown and rich_html:
-            return self._rich_html_ready_prompt(title, content, cover_instruction, body_image_instruction, rich_html)
-        elif is_markdown:
+                         is_markdown: bool) -> str:
+        if is_markdown:
             return self._markdown_prompt(title, content, cover_instruction, body_image_instruction)
         else:
             return self._plain_text_prompt(title, content, cover_instruction, body_image_instruction)
-
-    def _rich_html_ready_prompt(self, title, content, cover_instruction, body_image_instruction, rich_html):
-        """当 Markdown 已通过 Python 转换为 HTML 时使用。Agent 通过 execute_script 直接注入 HTML 到编辑器"""
-        return f"""请按顺序完成以下步骤来发布一篇文章到搜狐号：
-
-【背景】Markdown 内容已通过 Python 转换为 HTML 富文本。Agent 需要通过浏览器执行 JavaScript 将其注入到编辑器。
-
-1. 导航到搜狐号后台: {self.home_url}
-2. 确认已登录后台。
-3. 找到发布/写文章的入口，进入文章编辑页面。
-4. 找到标题输入框，输入标题: "{title}"
-5. 找到正文编辑区域。
-6. **注入富文本 HTML**：
-   使用 evaluate 执行 JavaScript：
-   ```javascript
-   const editor = document.querySelector('[contenteditable="true"]');
-   if (editor) {{
-     editor.focus();
-     editor.innerHTML = `{rich_html}`;
-     editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
-   }}
-   ```
-7. 等待编辑器渲染，确认内容已正确显示。
-8. {cover_instruction.strip()}
-9. 找到发布按钮，点击发布。
-10. 调用 done 动作时，返回 JSON: {{"success": true/false, "account_name": "账号名", "article_url": "", "failure_reason": "失败原因（若失败）"}}
-"""
 
     def _markdown_prompt(self, title, content, cover_instruction, body_image_instruction):
         return f"""请按顺序完成以下步骤来发布一篇文章到搜狐号：

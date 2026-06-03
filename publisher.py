@@ -982,7 +982,7 @@ async def main():
                 title=args.title,
                 content=body,
                 image_paths=image_paths if image_paths else None,
-                platform=current_platform,
+                platform=platform,
             )
             write_result(result)
             _mark_published(result, getattr(args, '_hot_article_dir', None))
