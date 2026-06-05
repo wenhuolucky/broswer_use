@@ -262,7 +262,12 @@ def _find_browser_path() -> str:
     for path in candidates:
         if os.path.exists(path):
             return path
-    playwright_bundles = sorted(glob.glob("/ms-playwright/chromium-*/chrome-linux/chrome"))
+    playwright_bundles = sorted(
+        glob.glob("/ms-playwright/chromium-*/chrome-linux/chrome")
+        + glob.glob("/ms-playwright/chromium-*/chrome-linux64/chrome")
+        + glob.glob("/root/.cache/ms-playwright/chromium-*/chrome-linux/chrome")
+        + glob.glob("/root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome")
+    )
     for path in playwright_bundles:
         if os.path.exists(path):
             return path

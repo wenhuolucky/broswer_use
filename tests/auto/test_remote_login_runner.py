@@ -240,14 +240,14 @@ def test_remote_login_runner_prefers_container_browser_path_from_environment(mon
 
 def test_remote_login_runner_finds_playwright_chromium_bundle(monkeypatch):
     paths = {
-        "/ms-playwright/chromium-1000/chrome-linux/chrome",
+        "/ms-playwright/chromium-1000/chrome-linux64/chrome",
     }
     monkeypatch.delenv("BROWSER_EXECUTABLE_PATH", raising=False)
     monkeypatch.setattr(os.path, "exists", lambda path: path in paths)
     monkeypatch.setattr(remote_login_runner.glob, "glob", lambda pattern: list(paths))
     monkeypatch.setattr(remote_login_runner.shutil, "which", lambda _name: None)
 
-    assert remote_login_runner._find_browser_path() == "/ms-playwright/chromium-1000/chrome-linux/chrome"
+    assert remote_login_runner._find_browser_path() == "/ms-playwright/chromium-1000/chrome-linux64/chrome"
 
 
 def test_remote_login_runner_finds_cloudflared_from_environment(monkeypatch):
