@@ -53,6 +53,13 @@ class AutoToutiaoPublishService(PublishService):
                     f"href={selected_href} | text={selected_text}"
                 )
 
+            if self._is_preview_article_url(selected_href):
+                return {
+                    "matched": True,
+                    "article_url": selected_href,
+                    "detail_title": selected_text,
+                }
+
             await page.goto(selected_href)
             await asyncio.sleep(2)
             detail_url = await session.get_current_page_url()
@@ -87,7 +94,7 @@ class AutoToutiaoPublishService(PublishService):
     async def _wait_for_article_entries(self, page, logger, attempt: int) -> int:
         if logger:
             logger.info(
-                "[PublishGuard] waiting for .article-card or /item/ links to render... "
+                "[PublishGuard] waiting for .article-card, /item/, or preview links to render... "
                 f"attempt={attempt}"
             )
         for _ in range(20):
@@ -95,7 +102,8 @@ class AutoToutiaoPublishService(PublishService):
                 """() => {
                     const cards = document.querySelectorAll('.article-card').length;
                     const itemLinks = document.querySelectorAll('a[href*="toutiao.com/item/"], a[href*="/item/"]').length;
-                    return Math.max(cards, itemLinks);
+                    const previewLinks = document.querySelectorAll('a[href*="/profile_v4/graphic/preview"][href*="pgc_id="]').length;
+                    return Math.max(cards, itemLinks, previewLinks);
                 }"""
             )
             if isinstance(article_count, int) and article_count > 0:
@@ -108,7 +116,7 @@ class AutoToutiaoPublishService(PublishService):
             await asyncio.sleep(1)
         if logger:
             logger.warning(
-                "[PublishGuard] work manage did not render .article-card or /item/ links within 20s "
+                "[PublishGuard] work manage did not render .article-card, /item/, or preview links within 20s "
                 f"| attempt={attempt}"
             )
         return 0
@@ -135,6 +143,8 @@ class AutoToutiaoPublishService(PublishService):
                 const cards = Array.from(document.querySelectorAll('.article-card'));
                 for (const card of cards) {
                     const link =
+                        card.querySelector('a.title[href*="/profile_v4/graphic/preview"][href*="pgc_id="]') ||
+                        card.querySelector('a[href*="/profile_v4/graphic/preview"][href*="pgc_id="]') ||
                         card.querySelector('a.image[href*="toutiao.com/item/"]') ||
                         card.querySelector('a[href*="toutiao.com/item/"]') ||
                         card.querySelector('a[href*="/item/"]');
@@ -143,7 +153,9 @@ class AutoToutiaoPublishService(PublishService):
                 }
                 if (items.length) return items;
 
-                const anchors = Array.from(document.querySelectorAll('a[href*="toutiao.com/item/"], a[href*="/item/"]'));
+                const anchors = Array.from(document.querySelectorAll(
+                    'a[href*="/profile_v4/graphic/preview"][href*="pgc_id="], a[href*="toutiao.com/item/"], a[href*="/item/"]'
+                ));
                 for (const anchor of anchors) {
                     const href = anchor.href || '';
                     const text = (anchor.innerText || anchor.textContent || '').trim();
@@ -180,7 +192,7 @@ class AutoToutiaoPublishService(PublishService):
         )
         if not dict_items:
             logger.warning(
-                "[PublishGuard] no toutiao /item/ links found on work manage page "
+                "[PublishGuard] no toutiao article or preview links found on work manage page "
                 f"| attempt={attempt}"
             )
             return
@@ -235,6 +247,9 @@ class AutoToutiaoPublishService(PublishService):
             if self._title_matches(normalized_title, item_text):
                 return item
         return {}
+
+    def _is_preview_article_url(self, url: str) -> bool:
+        return "/profile_v4/graphic/preview" in (url or "") and "pgc_id=" in (url or "")
 
     def _title_matches(self, expected: str, actual: str) -> bool:
         return bool(expected and actual and (

@@ -133,3 +133,46 @@ def test_open_latest_article_does_not_open_first_candidate_when_title_never_matc
 
     assert page.goto_urls == ["https://mp.toutiao.com/profile_v4/graphic/articles"]
     assert result == {"matched": False, "article_url": "", "detail_title": ""}
+
+
+def test_open_latest_article_accepts_review_preview_link_without_detail_navigation():
+    service = AutoToutiaoPublishService()
+    preview_url = "https://mp.toutiao.com/profile_v4/graphic/preview?pgc_id=7647837808618488362"
+    page = PageStub([
+        1,
+        [{
+            "href": preview_url,
+            "text": "浣犲ソ鍟?03",
+        }],
+    ])
+    session = SessionStub(
+        page,
+        ["https://mp.toutiao.com/profile_v4/graphic/articles"],
+    )
+
+    result = asyncio.run(service._open_latest_article_from_articles_page(session, "浣犲ソ鍟?03", None))
+
+    assert page.goto_urls == ["https://mp.toutiao.com/profile_v4/graphic/articles"]
+    assert result == {
+        "matched": True,
+        "article_url": preview_url,
+        "detail_title": "浣犲ソ鍟?03",
+    }
+
+
+def test_extract_article_candidates_includes_review_preview_selectors():
+    service = AutoToutiaoPublishService()
+    captured_scripts = []
+
+    def capture_script(script, *args):
+        captured_scripts.append(script)
+        return []
+
+    page = PageStub([capture_script])
+
+    items = asyncio.run(service._extract_article_candidates(page, None))
+
+    assert items == []
+    script = captured_scripts[0]
+    assert "/profile_v4/graphic/preview" in script
+    assert "pgc_id=" in script
