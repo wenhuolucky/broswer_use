@@ -33,3 +33,11 @@ def test_auto_dockerfile_uses_python_311_compatible_playwright_image():
 
     assert "mcr.microsoft.com/playwright/python:v1.50.0-noble" in dockerfile
     assert "v1.50.0-jammy" not in dockerfile
+
+
+def test_auto_entrypoint_starts_xvfb_without_wrapping_uvicorn():
+    entrypoint = Path("docker/auto-entrypoint.sh").read_text(encoding="utf-8")
+
+    assert "Xvfb ${DISPLAY}" in entrypoint
+    assert "exec python -m uvicorn auto.server:app" in entrypoint
+    assert "exec xvfb-run" not in entrypoint
