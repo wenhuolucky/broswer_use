@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 
 def test_auto_settings_allow_runtime_directories_from_environment(monkeypatch, tmp_path):
@@ -25,3 +26,10 @@ def test_auto_settings_allow_runtime_directories_from_environment(monkeypatch, t
     monkeypatch.delenv("AUTO_REMOTE_PROFILE_DIR")
     monkeypatch.delenv("REMOTE_LOGIN_TIMEOUT_SECONDS")
     importlib.reload(settings)
+
+
+def test_auto_dockerfile_uses_python_311_compatible_playwright_image():
+    dockerfile = Path("Dockerfile.auto").read_text(encoding="utf-8")
+
+    assert "mcr.microsoft.com/playwright/python:v1.50.0-noble" in dockerfile
+    assert "v1.50.0-jammy" not in dockerfile
