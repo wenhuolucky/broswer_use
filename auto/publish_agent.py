@@ -53,43 +53,60 @@ class PublishAgent:
             return await self._publish_with_cookie(job.job_id, request)
 
         logger.info("Cookie 不存在或无效，准备启动远程登录")
+        return await self._start_remote_login(job.job_id, request, "Cookie 不存在或无效")
+
+    async def _start_remote_login(
+        self,
+        job_id: str,
+        request: AutoPublishRequest,
+        reason: str,
+        mark_cookie_refresh_attempted: bool = False,
+    ) -> AutoPublishResponse:
+        logger, _ = setup_job_logger(job_id, self.log_dir)
+        job = self.job_store.get(job_id)
+        log_file_path = job.log_file_path if job else ""
         self.job_store.update(job.job_id, status=STATUS_STARTING_REMOTE_LOGIN)
+        if mark_cookie_refresh_attempted:
+            payload = dict(job.payload)
+            payload["cookie_refresh_attempted"] = True
+            self.job_store.update(job_id, payload=payload)
         if self.remote_runner is None:
             self.remote_runner = RemoteLoginRunner(
                 save_cookie=self.cookie_store.save,
                 on_cookie_ready=self._resume_for_remote_session,
-                logger_factory=lambda _session_id, job_id=job.job_id: setup_job_logger(job_id, self.log_dir)[0],
+                logger_factory=lambda _session_id, job_id=job_id: setup_job_logger(job_id, self.log_dir)[0],
             )
         try:
             session = await self.remote_runner.start(request.platform, request.user_id)
         except Exception as exc:
             logger.exception("远程登录启动失败: %s", exc)
-            self.job_store.update(job.job_id, status=STATUS_FAILED, error=str(exc))
+            self.job_store.update(job_id, status=STATUS_FAILED, error=str(exc))
             return AutoPublishResponse(
                 code=500,
-                job_id=job.job_id,
+                job_id=job_id,
                 status=STATUS_FAILED,
                 message=f"远程登录启动失败: {exc}",
-                log_file_path=str(log_path),
+                log_file_path=log_file_path,
             )
         self.job_store.update(
-            job.job_id,
+            job_id,
             status=STATUS_WAITING_COOKIE,
             login_url=session.login_url,
             remote_session_id=session.session_id,
         )
         logger.info(
-            "远程登录已启动 session_id=%s login_url=%s",
+            "远程登录已启动 reason=%s session_id=%s login_url=%s",
+            reason,
             session.session_id,
             session.login_url,
         )
         return AutoPublishResponse(
             code=202,
-            job_id=job.job_id,
+            job_id=job_id,
             status=STATUS_WAITING_COOKIE,
             message="请打开 login_url 完成登录，登录成功后系统可继续发文",
             login_url=session.login_url,
-            log_file_path=str(log_path),
+            log_file_path=log_file_path,
         )
 
     async def _publish_with_cookie(self, job_id: str, request: AutoPublishRequest) -> AutoPublishResponse:
@@ -109,6 +126,14 @@ class PublishAgent:
             )
         except Exception as exc:
             logger.exception("自动化发文服务异常: %s", exc)
+            if self._looks_like_login_required({"failure_reason": str(exc)}) and not self._cookie_refresh_attempted(job):
+                logger.info("自动化发文异常疑似 Cookie 失效，切换远程登录")
+                return await self._start_remote_login(
+                    job_id,
+                    request,
+                    "自动化发文异常疑似 Cookie 失效",
+                    mark_cookie_refresh_attempted=True,
+                )
             self.job_store.update(job_id, status=STATUS_FAILED, error=str(exc))
             return AutoPublishResponse(
                 code=500,
@@ -119,6 +144,14 @@ class PublishAgent:
             )
 
         status = STATUS_SUCCEEDED if result.get("success") else STATUS_FAILED
+        if status == STATUS_FAILED and self._looks_like_login_required(result) and not self._cookie_refresh_attempted(job):
+            logger.info("检测到 Cookie 可能失效，切换远程登录 failure_reason=%s", result.get("failure_reason", ""))
+            return await self._start_remote_login(
+                job_id,
+                request,
+                "自动化发文检测到 Cookie 失效",
+                mark_cookie_refresh_attempted=True,
+            )
         self.job_store.update(job_id, status=status, result=result, error=result.get("failure_reason", ""))
         logger.info(
             "自动化发文结束 status=%s success=%s article_url=%s failure_reason=%s",
@@ -164,3 +197,26 @@ class PublishAgent:
         if job is None:
             return
         await self.resume_after_cookie(job.job_id, cookies)
+
+    def _cookie_refresh_attempted(self, job) -> bool:
+        return bool(job and (job.payload or {}).get("cookie_refresh_attempted"))
+
+    def _looks_like_login_required(self, result: dict) -> bool:
+        if result.get("login_required") is True:
+            return True
+        text = " ".join(
+            str(result.get(key, "") or "")
+            for key in ("failure_reason", "message", "error", "page_url", "url")
+        ).lower()
+        markers = (
+            "未登录",
+            "登录",
+            "登陆",
+            "cookie 无效",
+            "cookie失效",
+            "cookie 已失效",
+            "cookie已失效",
+            "login",
+            "auth/page/login",
+        )
+        return any(marker.lower() in text for marker in markers)

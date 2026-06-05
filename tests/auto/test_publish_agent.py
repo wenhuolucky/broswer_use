@@ -164,3 +164,94 @@ async def test_publish_agent_resumes_after_remote_cookie_completion():
     assert saved == [("toutiao", "user1", [{"name": "sid", "value": "1", "domain": ".toutiao.com"}])]
     assert resumed.status == "succeeded"
     assert resumed.result["article_url"] == "https://toutiao.com/resumed"
+
+
+@pytest.mark.asyncio
+async def test_publish_agent_starts_remote_login_when_existing_cookie_is_rejected():
+    class CookieStoreStub:
+        def has_valid_cookie(self, platform, user_id):
+            return True
+
+        def load_storage_state_text(self, platform, user_id):
+            return '{"cookies":[{"domain":".toutiao.com"}]}'
+
+    class PublishAdapterStub:
+        async def publish(self, **kwargs):
+            return {
+                "success": False,
+                "login_required": True,
+                "failure_reason": "账号未登录，Cookie 已失效",
+            }
+
+    class RemoteRunnerStub:
+        async def start(self, platform, user_id):
+            class Session:
+                session_id = "session-1"
+                login_url = "https://login.example"
+
+            return Session()
+
+    agent = PublishAgent(
+        job_store=JobStore(),
+        cookie_store=CookieStoreStub(),
+        publish_adapter=PublishAdapterStub(),
+        remote_runner=RemoteRunnerStub(),
+    )
+
+    response = await agent.submit(AutoPublishRequest(
+        user_id="user1",
+        platform="toutiao",
+        title="title",
+        content="content",
+    ))
+
+    assert response.status == "waiting_cookie"
+    assert response.login_url == "https://login.example"
+    job = agent.job_store.get(response.job_id)
+    assert job.status == "waiting_cookie"
+    assert job.remote_session_id == "session-1"
+    assert job.payload["cookie_refresh_attempted"] is True
+
+
+@pytest.mark.asyncio
+async def test_publish_agent_does_not_loop_remote_login_after_cookie_refresh_attempt():
+    class CookieStoreStub:
+        def has_valid_cookie(self, platform, user_id):
+            return True
+
+        def load_storage_state_text(self, platform, user_id):
+            return '{"cookies":[{"domain":".toutiao.com"}]}'
+
+    class PublishAdapterStub:
+        async def publish(self, **kwargs):
+            return {
+                "success": False,
+                "failure_reason": "当前页面仍然未登录",
+            }
+
+    class RemoteRunnerStub:
+        async def start(self, platform, user_id):
+            raise AssertionError("remote login should not start again")
+
+    agent = PublishAgent(
+        job_store=JobStore(),
+        cookie_store=CookieStoreStub(),
+        publish_adapter=PublishAdapterStub(),
+        remote_runner=RemoteRunnerStub(),
+    )
+    job = agent.job_store.create({
+        "user_id": "user1",
+        "platform": "toutiao",
+        "title": "title",
+        "content": "content",
+        "cover_image_url": None,
+        "cookie_refresh_attempted": True,
+    })
+
+    response = await agent._publish_with_cookie(
+        job.job_id,
+        AutoPublishRequest(user_id="user1", platform="toutiao", title="title", content="content"),
+    )
+
+    assert response.status == "failed"
+    assert response.message == "当前页面仍然未登录"
