@@ -3,7 +3,9 @@
 """
 
 import json
+import glob
 import os
+import shutil
 import time
 import urllib.request
 from pathlib import Path
@@ -15,9 +17,9 @@ def get_edge_path() -> str:
     获取 Edge 浏览器可执行文件路径。
     优先级：.env 配置 > 常见安装路径。
     """
-    env_path = os.getenv("BROWSER_EXECUTABLE_PATH")
-    if env_path and Path(env_path).exists():
-        return env_path
+    configured = _get_configured_browser_path()
+    if configured:
+        return configured
 
     candidates = [
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -33,23 +35,60 @@ def get_edge_path() -> str:
     )
 
 
+def _get_configured_browser_path() -> str | None:
+    env_path = os.getenv("BROWSER_EXECUTABLE_PATH")
+    if env_path and Path(env_path).exists():
+        return env_path
+    return None
+
+
+def _get_playwright_browser_path() -> str | None:
+    candidates = sorted(
+        glob.glob("/ms-playwright/chromium-*/chrome-linux/chrome")
+        + glob.glob("/ms-playwright/chromium-*/chrome-linux64/chrome")
+        + glob.glob("/root/.cache/ms-playwright/chromium-*/chrome-linux/chrome")
+        + glob.glob("/root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome")
+    )
+    for path in candidates:
+        if Path(path).exists():
+            return path
+    return None
+
+
 def get_chrome_path() -> str:
     """
     获取 Chrome 浏览器可执行文件路径。
     优先级：.env 配置 > 常见安装路径。
     """
-    env_path = os.getenv("BROWSER_EXECUTABLE_PATH")
-    if env_path and Path(env_path).exists():
-        return env_path
+    configured = _get_configured_browser_path()
+    if configured:
+        return configured
+
+    playwright_path = _get_playwright_browser_path()
+    if playwright_path:
+        return playwright_path
 
     candidates = [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
     ]
     for p in candidates:
         if Path(p).exists():
             return str(p)
+    found = (
+        shutil.which("chromium")
+        or shutil.which("chromium-browser")
+        or shutil.which("google-chrome")
+        or shutil.which("google-chrome-stable")
+        or shutil.which("chrome")
+    )
+    if found:
+        return found
 
     raise FileNotFoundError(
         "找不到 Chrome 浏览器。请在 .env 中设置 BROWSER_EXECUTABLE_PATH，"

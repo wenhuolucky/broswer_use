@@ -379,7 +379,12 @@ class PublishService:
             headless=False,
             executable_path=get_browser_path(),
             viewport={"width": 1440, "height": 1000},
-            args=[f"--remote-debugging-port={cdp_port}"],
+            args=[
+                f"--remote-debugging-port={cdp_port}",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
         )
         try:
             await context.grant_permissions(
