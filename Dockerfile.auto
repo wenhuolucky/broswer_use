@@ -1,0 +1,34 @@
+FROM mcr.microsoft.com/playwright/python:v1.50.0-jammy
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    AUTO_DATA_DIR=/app/auto/data \
+    AUTO_LOG_DIR=/app/auto/logs \
+    AUTO_REMOTE_PROFILE_DIR=/app/auto/data/remote_profiles \
+    CLOUDFLARED_PATH=/usr/local/bin/cloudflared \
+    REMOTE_LOGIN_TIMEOUT_SECONDS=600
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+    -o /usr/local/bin/cloudflared \
+    && chmod +x /usr/local/bin/cloudflared
+
+COPY requirements.txt .
+RUN python -m pip install -U pip \
+    && pip install -r requirements.txt \
+    && python -m playwright install chromium
+
+COPY . .
+COPY docker/auto-entrypoint.sh /app/docker/auto-entrypoint.sh
+RUN chmod +x /app/docker/auto-entrypoint.sh \
+    && mkdir -p /app/auto/data /app/auto/logs /app/api/logs
+
+EXPOSE 19000
+
+ENTRYPOINT ["/app/docker/auto-entrypoint.sh"]

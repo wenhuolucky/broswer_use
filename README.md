@@ -124,6 +124,85 @@ python -m uvicorn auto.server:app --host 127.0.0.1 --port 19000
 python -m uvicorn auto.server:app --host 127.0.0.1 --port 19001
 ```
 
+## Docker 部署
+
+第一版 Docker 部署采用单容器、单 worker、volume 持久化、Cloudflare quick tunnel。不要把 `uvicorn` worker 数量调大，因为当前 job 和远程登录 session 仍是内存态，多 worker 会导致任务查询或 `savecookie` 找不到对应 session。
+
+### 1. 准备环境变量
+
+复制并编辑 `.env`：
+
+```bash
+cp .env.example .env
+```
+
+至少配置：
+
+```text
+DEEPSEEK_API_KEY=你的 DeepSeek Key
+```
+
+### 2. 构建镜像
+
+```bash
+docker build -f Dockerfile.auto -t browser-use-auto:latest .
+```
+
+### 3. 启动服务
+
+```bash
+docker compose -f docker-compose.auto.yml up -d
+```
+
+服务端口：
+
+```text
+http://127.0.0.1:19000
+```
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:19000/api/v1/auto/health
+```
+
+查看日志：
+
+```bash
+docker compose -f docker-compose.auto.yml logs -f auto
+```
+
+停止服务：
+
+```bash
+docker compose -f docker-compose.auto.yml down
+```
+
+### 4. 持久化目录
+
+`docker-compose.auto.yml` 会将运行期数据挂载到本地：
+
+```text
+runtime/auto-data  -> /app/auto/data
+runtime/auto-logs  -> /app/auto/logs
+runtime/api-logs   -> /app/api/logs
+```
+
+其中：
+
+- `runtime/auto-data/cookies/` 保存用户 Cookie
+- `runtime/auto-data/remote_profiles/` 保存远程登录临时浏览器 profile
+- `runtime/auto-logs/jobs/` 保存 auto job 日志
+- `runtime/api-logs/requests/` 保存原发文服务请求日志
+
+### 5. Docker 运行约束
+
+- 镜像内使用 Playwright Python 基础镜像，并安装 `cloudflared`。
+- 容器内优先使用 `BROWSER_EXECUTABLE_PATH`，未配置时会自动查找 Playwright 镜像内置 Chromium 或系统 Chrome/Chromium。
+- 服务通过 `xvfb-run` 启动，支持远程登录时的浏览器画面。
+- compose 已配置 `shm_size: "1gb"`，避免 Chromium 因 `/dev/shm` 太小不稳定。
+- 生产公网部署前建议给接口加鉴权，或只允许内网访问。
+
 ## 自动化流程
 
 ```text

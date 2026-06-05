@@ -1,8 +1,12 @@
 import asyncio
+import os
+import subprocess
+import sys
 
 import pytest
 
 from auto.logging_config import setup_job_logger
+import auto.remote_cookie.remote_login_runner as remote_login_runner
 from auto.remote_cookie.remote_login_runner import RemoteLoginRunner
 
 
@@ -225,3 +229,58 @@ async def test_remote_login_runner_fails_when_disconnect_event_is_missing(tmp_pa
     text = log_path.read_text(encoding="utf-8")
     assert session.status == "failed"
     assert "remote login watcher missing disconnect event" in text
+
+
+def test_remote_login_runner_prefers_container_browser_path_from_environment(monkeypatch):
+    monkeypatch.setenv("BROWSER_EXECUTABLE_PATH", "/usr/bin/chromium")
+    monkeypatch.setattr(os.path, "exists", lambda path: path == "/usr/bin/chromium")
+
+    assert remote_login_runner._find_browser_path() == "/usr/bin/chromium"
+
+
+def test_remote_login_runner_finds_playwright_chromium_bundle(monkeypatch):
+    paths = {
+        "/ms-playwright/chromium-1000/chrome-linux/chrome",
+    }
+    monkeypatch.delenv("BROWSER_EXECUTABLE_PATH", raising=False)
+    monkeypatch.setattr(os.path, "exists", lambda path: path in paths)
+    monkeypatch.setattr(remote_login_runner.glob, "glob", lambda pattern: list(paths))
+    monkeypatch.setattr(remote_login_runner.shutil, "which", lambda _name: None)
+
+    assert remote_login_runner._find_browser_path() == "/ms-playwright/chromium-1000/chrome-linux/chrome"
+
+
+def test_remote_login_runner_finds_cloudflared_from_environment(monkeypatch):
+    monkeypatch.setenv("CLOUDFLARED_PATH", "/usr/local/bin/cloudflared")
+    monkeypatch.setattr(os.path, "exists", lambda path: path == "/usr/local/bin/cloudflared")
+
+    assert remote_login_runner._find_cloudflared_path() == "/usr/local/bin/cloudflared"
+
+
+@pytest.mark.asyncio
+async def test_launch_chrome_uses_container_safe_flags(monkeypatch, tmp_path):
+    launched = {}
+
+    class Proc:
+        pass
+
+    def popen(args, **kwargs):
+        launched["args"] = args
+        launched["kwargs"] = kwargs
+        return Proc()
+
+    monkeypatch.setattr(remote_login_runner, "REMOTE_PROFILE_DIR", tmp_path)
+    monkeypatch.setattr(remote_login_runner, "_find_browser_path", lambda: "/usr/bin/chromium")
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(asyncio, "sleep", lambda _seconds: _immediate())
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    await remote_login_runner._launch_chrome(9222, "session-1")
+
+    assert launched["args"][0] == "/usr/bin/chromium"
+    assert "--no-sandbox" in launched["args"]
+    assert "--disable-dev-shm-usage" in launched["args"]
+
+
+async def _immediate():
+    return None

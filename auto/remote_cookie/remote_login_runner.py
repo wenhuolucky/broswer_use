@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import glob
 import os
 import re
 import shutil
@@ -244,27 +245,50 @@ def _find_free_port() -> int:
 
 
 def _find_browser_path() -> str:
+    configured = os.getenv("BROWSER_EXECUTABLE_PATH")
+    if configured and os.path.exists(configured):
+        return configured
     candidates = [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
     ]
     for path in candidates:
         if os.path.exists(path):
             return path
-    found = shutil.which("chrome") or shutil.which("msedge")
+    playwright_bundles = sorted(glob.glob("/ms-playwright/chromium-*/chrome-linux/chrome"))
+    for path in playwright_bundles:
+        if os.path.exists(path):
+            return path
+    found = (
+        shutil.which("chromium")
+        or shutil.which("chromium-browser")
+        or shutil.which("google-chrome")
+        or shutil.which("google-chrome-stable")
+        or shutil.which("chrome")
+        or shutil.which("msedge")
+    )
     if found:
         return found
     raise RuntimeError("未找到 Chrome 或 Edge 浏览器")
 
 
 def _find_cloudflared_path() -> str:
+    configured = os.getenv("CLOUDFLARED_PATH")
+    if configured and os.path.exists(configured):
+        return configured
     candidates = [
         r"C:\Program Files\Cloudflare\cloudflared.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\cloudflared\cloudflared.exe"),
         os.path.expandvars(r"%LOCALAPPDATA%\local\bin\cloudflared.exe"),
+        "/usr/local/bin/cloudflared",
+        "/usr/bin/cloudflared",
     ]
     winget_dir = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Packages")
     if os.path.exists(winget_dir):
@@ -296,6 +320,9 @@ async def _launch_chrome(cdp_port: int, session_id: str) -> subprocess.Popen:
             "--no-default-browser-check",
             "--disable-blink-features=AutomationControlled",
             "--disable-default-apps",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
             "--new-window",
             "about:blank",
         ],
