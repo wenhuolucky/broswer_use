@@ -1,6 +1,0 @@
-# 运行时输出
-output/
-
-# Python cache
-__pycache__/
-*.pyc

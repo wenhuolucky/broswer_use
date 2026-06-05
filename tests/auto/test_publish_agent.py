@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from auto.job_store import JobStore
@@ -6,7 +8,10 @@ from auto.publish_agent import PublishAgent
 
 
 @pytest.mark.asyncio
-async def test_publish_agent_uses_existing_cookie_and_publishes():
+async def test_publish_agent_creates_job_and_publishes_existing_cookie_in_background():
+    publish_started = asyncio.Event()
+    publish_can_finish = asyncio.Event()
+
     class CookieStoreStub:
         def has_valid_cookie(self, platform, user_id):
             return True
@@ -16,6 +21,8 @@ async def test_publish_agent_uses_existing_cookie_and_publishes():
 
     class PublishAdapterStub:
         async def publish(self, **kwargs):
+            publish_started.set()
+            await publish_can_finish.wait()
             return {"success": True, "article_url": "https://toutiao.com/a"}
 
     agent = PublishAgent(
@@ -25,15 +32,36 @@ async def test_publish_agent_uses_existing_cookie_and_publishes():
         remote_runner=None,
     )
 
-    response = await agent.submit(AutoPublishRequest(
-        user_id="user1",
-        platform="toutiao",
-        title="title",
-        content="content",
-    ))
+    response = await asyncio.wait_for(
+        agent.submit(AutoPublishRequest(
+            user_id="user1",
+            platform="toutiao",
+            title="title",
+            content="content",
+        )),
+        timeout=0.2,
+    )
 
-    assert response.status == "succeeded"
-    assert response.result["article_url"] == "https://toutiao.com/a"
+    assert response.code == 200
+    assert response.data["task_status"] == "running"
+    assert response.data["job_id"]
+    assert response.data["query_url"] == f"/api/v1/auto/jobs/{response.data['job_id']}"
+    assert response.data["login_url"] == ""
+    assert response.data["remote_session_id"] == ""
+    assert response.data["log_file_path"].endswith(f"{response.data['job_id']}.log")
+
+    await asyncio.wait_for(publish_started.wait(), timeout=1)
+    job = agent.job_store.get(response.data["job_id"])
+    assert job.status == "publishing"
+
+    publish_can_finish.set()
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        job = agent.job_store.get(response.data["job_id"])
+        if job.status == "succeeded":
+            break
+    assert job.status == "succeeded"
+    assert job.result["article_url"] == "https://toutiao.com/a"
 
 
 @pytest.mark.asyncio
@@ -64,9 +92,12 @@ async def test_publish_agent_starts_remote_login_when_cookie_missing():
         content="content",
     ))
 
-    assert response.status == "waiting_cookie"
-    assert response.login_url == "https://login.example"
-    job = agent.job_store.get(response.job_id)
+    assert response.code == 200
+    assert response.data["task_status"] == "login_required"
+    assert response.data["login_url"] == "https://login.example"
+    assert response.data["remote_session_id"] == "session-1"
+    assert response.data["query_url"] == f"/api/v1/auto/jobs/{response.data['job_id']}"
+    job = agent.job_store.get(response.data["job_id"])
     assert job.remote_session_id == "session-1"
 
 
@@ -99,9 +130,9 @@ async def test_publish_agent_writes_job_log_for_cookie_missing(tmp_path):
         content="content",
     ))
 
-    job = agent.job_store.get(response.job_id)
-    log_path = tmp_path / "jobs" / f"{response.job_id}.log"
-    assert response.log_file_path == str(log_path)
+    job = agent.job_store.get(response.data["job_id"])
+    log_path = tmp_path / "jobs" / f"{response.data['job_id']}.log"
+    assert response.data["log_file_path"] == str(log_path)
     assert job.log_file_path == str(log_path)
     text = log_path.read_text(encoding="utf-8")
     assert "收到自动发文请求" in text
@@ -157,7 +188,7 @@ async def test_publish_agent_resumes_after_remote_cookie_completion():
     ))
 
     resumed = await agent.resume_after_cookie(
-        first.job_id,
+        first.data["job_id"],
         [{"name": "sid", "value": "1", "domain": ".toutiao.com"}],
     )
 
@@ -205,9 +236,13 @@ async def test_publish_agent_starts_remote_login_when_existing_cookie_is_rejecte
         content="content",
     ))
 
-    assert response.status == "waiting_cookie"
-    assert response.login_url == "https://login.example"
-    job = agent.job_store.get(response.job_id)
+    assert response.data["task_status"] == "running"
+    job = agent.job_store.get(response.data["job_id"])
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        job = agent.job_store.get(response.data["job_id"])
+        if job.status == "waiting_cookie":
+            break
     assert job.status == "waiting_cookie"
     assert job.remote_session_id == "session-1"
     assert job.payload["cookie_refresh_attempted"] is True

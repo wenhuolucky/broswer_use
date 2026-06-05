@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from auto.adapters.publish_service import PublishServiceAdapter
 from auto.cookie_store import CookieStore
 from auto.job_store import JobStore
@@ -7,6 +9,7 @@ from auto.logging_config import setup_job_logger
 from auto.models import (
     AutoPublishRequest,
     AutoPublishResponse,
+    AutoTaskCreateResponse,
     STATUS_CHECKING_COOKIE,
     STATUS_FAILED,
     STATUS_PUBLISHING,
@@ -34,8 +37,9 @@ class PublishAgent:
         self.publish_adapter = publish_adapter or PublishServiceAdapter()
         self.remote_runner = remote_runner
         self.log_dir = log_dir or LOG_DIR
+        self._background_tasks: set[asyncio.Task] = set()
 
-    async def submit(self, request: AutoPublishRequest) -> AutoPublishResponse:
+    async def submit(self, request: AutoPublishRequest) -> AutoTaskCreateResponse:
         job = self.job_store.create(request.model_dump())
         logger, log_path = setup_job_logger(job.job_id, self.log_dir)
         self.job_store.update(job.job_id, log_file_path=str(log_path))
@@ -49,11 +53,75 @@ class PublishAgent:
         self.job_store.update(job.job_id, status=STATUS_CHECKING_COOKIE)
 
         if self.cookie_store.has_valid_cookie(request.platform, request.user_id):
-            logger.info("Cookie 存在且有效，直接进入发文流程")
-            return await self._publish_with_cookie(job.job_id, request)
+            logger.info("Cookie 存在且有效，创建后台发布任务")
+            self._schedule_publish(job.job_id, request)
+            return self._task_response(
+                job.job_id,
+                "running",
+                "任务创建成功，发布任务正在后台执行",
+                log_file_path=str(log_path),
+            )
 
         logger.info("Cookie 不存在或无效，准备启动远程登录")
-        return await self._start_remote_login(job.job_id, request, "Cookie 不存在或无效")
+        login_response = await self._start_remote_login(job.job_id, request, "Cookie 不存在或无效")
+        if login_response.code >= 500:
+            return self._task_response(
+                job.job_id,
+                "failed",
+                "任务创建失败",
+                code=500,
+                log_file_path=str(log_path),
+                reason=login_response.message,
+            )
+
+        current_job = self.job_store.get(job.job_id)
+        return self._task_response(
+            job.job_id,
+            "login_required",
+            "任务创建成功，需要用户登录",
+            login_url=current_job.login_url if current_job else "",
+            remote_session_id=current_job.remote_session_id if current_job else "",
+            log_file_path=current_job.log_file_path if current_job else str(log_path),
+        )
+
+    def _schedule_publish(self, job_id: str, request: AutoPublishRequest) -> None:
+        task = asyncio.create_task(self._publish_with_cookie(job_id, request))
+        self._background_tasks.add(task)
+        task.add_done_callback(lambda done_task, job_id=job_id: self._on_background_publish_done(job_id, done_task))
+
+    def _on_background_publish_done(self, job_id: str, task: asyncio.Task) -> None:
+        self._background_tasks.discard(task)
+        logger, _ = setup_job_logger(job_id, self.log_dir)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.warning("后台发布任务已取消")
+        except Exception as exc:
+            logger.exception("后台发布任务异常退出: %s", exc)
+            self.job_store.update(job_id, status=STATUS_FAILED, error=str(exc))
+
+    def _task_response(
+        self,
+        job_id: str,
+        task_status: str,
+        message: str,
+        code: int = 200,
+        login_url: str = "",
+        remote_session_id: str = "",
+        log_file_path: str = "",
+        reason: str = "",
+    ) -> AutoTaskCreateResponse:
+        data = {
+            "job_id": job_id,
+            "task_status": task_status,
+            "query_url": f"/api/v1/auto/jobs/{job_id}",
+            "login_url": login_url,
+            "remote_session_id": remote_session_id,
+            "log_file_path": log_file_path,
+        }
+        if reason:
+            data["reason"] = reason
+        return AutoTaskCreateResponse(code=code, message=message, data=data)
 
     async def _start_remote_login(
         self,
@@ -213,9 +281,9 @@ class PublishAgent:
             "登录",
             "登陆",
             "cookie 无效",
+            "cookie无效",
+            "cookie 失效",
             "cookie失效",
-            "cookie 已失效",
-            "cookie已失效",
             "login",
             "auth/page/login",
         )

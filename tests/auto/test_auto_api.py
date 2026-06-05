@@ -38,7 +38,7 @@ def test_auto_api_exposes_remote_cookie_completion_route():
     assert "/api/v1/auto/jobs/{job_id}/cookies" in paths
 
 
-def test_auto_publish_response_is_unchanged():
+def test_auto_publish_returns_task_creation_contract():
     class Job:
         job_id = "job-1"
         status = "waiting_cookie"
@@ -64,13 +64,16 @@ def test_auto_publish_response_is_unchanged():
 
                 def model_dump(self):
                     return {
-                        "code": 202,
-                        "job_id": "job-1",
-                        "status": "waiting_cookie",
-                        "message": "",
-                        "login_url": "https://login.example",
-                        "log_file_path": "auto/logs/jobs/job-1.log",
-                        "result": {},
+                        "code": 200,
+                        "message": "任务创建成功，需要用户登录",
+                        "data": {
+                            "job_id": "job-1",
+                            "task_status": "login_required",
+                            "query_url": "/api/v1/auto/jobs/job-1",
+                            "login_url": "https://login.example",
+                            "remote_session_id": "session-1",
+                            "log_file_path": "auto/logs/jobs/job-1.log",
+                        },
                     }
 
             return Response()
@@ -88,7 +91,18 @@ def test_auto_publish_response_is_unchanged():
 
         assert response.status_code == 200
         payload = response.json()
-        assert payload["log_file_path"].endswith(f"{payload['job_id']}.log")
+        assert payload == {
+            "code": 200,
+            "message": "任务创建成功，需要用户登录",
+            "data": {
+                "job_id": "job-1",
+                "task_status": "login_required",
+                "query_url": "/api/v1/auto/jobs/job-1",
+                "login_url": "https://login.example",
+                "remote_session_id": "session-1",
+                "log_file_path": "auto/logs/jobs/job-1.log",
+            },
+        }
     finally:
         auto_api.agent = original_agent
 

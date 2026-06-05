@@ -1,9 +1,0 @@
-output/
-__pycache__/
-*.pyc
-frpc
-frps
-frpc.exe
-frps.exe
-*.log
-.env

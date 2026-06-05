@@ -412,11 +412,10 @@ title-matched article URL not found after retries
 
 ## 旧入口说明
 
-项目仍保留原始自动发文、Docker 发文、远程 Cookie 工具等模块：
+项目仍保留 `auto` 依赖的原始发文和远程查看器模块：
 
-- `api/publish/`：原 FastAPI 发文服务
-- `api/publish_docker/`：Docker 封装发文服务
-- `tools/browser_test/`：远程浏览器查看和 Cookie 获取工具
-- `src/`：平台、浏览器、上传、发布基础逻辑
+- `api/publish/`：原发文核心服务，`auto` 会复用其中的 `PublishService`
+- `tools/browser_test/`：远程浏览器查看器，`auto` 远程登录会复用 `viewer.py`
+- `src/`：平台、浏览器和头条基础逻辑
 
 当前推荐新开发和调试优先使用 `auto/`，因为它已经把远程登录、Cookie 保存、Cookie 注入和自动化发文串成一个统一流程。

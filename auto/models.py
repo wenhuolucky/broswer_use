@@ -36,6 +36,12 @@ class AutoPublishResponse(BaseModel):
     result: dict[str, Any] = Field(default_factory=dict)
 
 
+class AutoTaskCreateResponse(BaseModel):
+    code: int = 200
+    message: str = ""
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
 class CompleteCookieRequest(BaseModel):
     cookies: list[dict[str, Any]] = Field(..., min_length=1, description="远程登录后提取到的 cookies")
 
