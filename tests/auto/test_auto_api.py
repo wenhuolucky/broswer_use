@@ -36,6 +36,50 @@ def test_auto_api_exposes_remote_cookie_completion_route():
     paths = app.openapi()["paths"]
 
     assert "/api/v1/auto/jobs/{job_id}/cookies" in paths
+    assert "/api/v1/auto/savecookie/{job_id}" in paths
+
+
+def test_auto_savecookie_route_returns_agent_response():
+    class Agent:
+        async def save_remote_cookie(self, job_id):
+            class Response:
+                def model_dump(self):
+                    return {
+                        "code": 200,
+                        "job_id": job_id,
+                        "status": "succeeded",
+                        "message": "Cookie 保存成功，发布任务已继续执行",
+                        "login_url": "",
+                        "log_file_path": "auto/logs/jobs/job-1.log",
+                        "result": {
+                            "cookie_count": 1,
+                            "query_url": f"/api/v1/auto/jobs/{job_id}",
+                        },
+                    }
+
+            return Response()
+
+    original_agent = auto_api.agent
+    auto_api.agent = Agent()
+    client = TestClient(app)
+    try:
+        response = client.post("/api/v1/auto/savecookie/job-1")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "code": 200,
+            "job_id": "job-1",
+            "status": "succeeded",
+            "message": "Cookie 保存成功，发布任务已继续执行",
+            "login_url": "",
+            "log_file_path": "auto/logs/jobs/job-1.log",
+            "result": {
+                "cookie_count": 1,
+                "query_url": "/api/v1/auto/jobs/job-1",
+            },
+        }
+    finally:
+        auto_api.agent = original_agent
 
 
 def test_auto_publish_returns_task_creation_contract():

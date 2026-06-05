@@ -260,6 +260,86 @@ class PublishAgent:
         logger.info("远程 Cookie 已保存且验证通过，继续发文")
         return await self._publish_with_cookie(job_id, request)
 
+    async def save_remote_cookie(self, job_id: str) -> AutoPublishResponse:
+        job = self.job_store.get(job_id)
+        if job is None:
+            return AutoPublishResponse(code=404, job_id=job_id, status=STATUS_FAILED, message="job not found")
+
+        logger, _ = setup_job_logger(job_id, self.log_dir)
+        if job.status in {STATUS_PUBLISHING, STATUS_SUCCEEDED}:
+            logger.info("手动保存 Cookie 跳过：job 已经进入发布流程 status=%s", job.status)
+            return AutoPublishResponse(
+                code=409,
+                job_id=job_id,
+                status=job.status,
+                message="cookie already saved",
+                log_file_path=job.log_file_path,
+            )
+        if not job.remote_session_id:
+            logger.warning("手动保存 Cookie 失败：job 没有关联远程登录 session")
+            return AutoPublishResponse(
+                code=409,
+                job_id=job_id,
+                status=job.status,
+                message="job has no remote login session",
+                log_file_path=job.log_file_path,
+            )
+        if self.remote_runner is None:
+            logger.warning("手动保存 Cookie 失败：远程登录 runner 不存在")
+            return AutoPublishResponse(
+                code=409,
+                job_id=job_id,
+                status=job.status,
+                message="remote login runner not available",
+                log_file_path=job.log_file_path,
+            )
+
+        logger.info("收到手动保存 Cookie 请求 remote_session_id=%s", job.remote_session_id)
+        try:
+            cookies = await self.remote_runner.save_session_cookies(job.remote_session_id)
+        except KeyError:
+            logger.exception("手动保存 Cookie 失败：远程登录 session 不存在")
+            return AutoPublishResponse(
+                code=404,
+                job_id=job_id,
+                status=STATUS_FAILED,
+                message="remote login session not found",
+                log_file_path=job.log_file_path,
+            )
+        except Exception as exc:
+            logger.exception("手动保存 Cookie 失败: %s", exc)
+            self.job_store.update(job_id, status=STATUS_FAILED, error=str(exc))
+            return AutoPublishResponse(
+                code=500,
+                job_id=job_id,
+                status=STATUS_FAILED,
+                message=str(exc),
+                log_file_path=job.log_file_path,
+            )
+
+        current_job = self.job_store.get(job_id)
+        if not cookies:
+            logger.info("手动保存 Cookie 跳过：session 已完成")
+            return AutoPublishResponse(
+                code=409,
+                job_id=job_id,
+                status=current_job.status if current_job else job.status,
+                message="cookie already saved",
+                log_file_path=job.log_file_path,
+            )
+        logger.info("手动保存 Cookie 成功 cookie_count=%s", len(cookies))
+        return AutoPublishResponse(
+            code=200,
+            job_id=job_id,
+            status=current_job.status if current_job else job.status,
+            message="Cookie 保存成功，发布任务已继续执行",
+            log_file_path=current_job.log_file_path if current_job else job.log_file_path,
+            result={
+                "cookie_count": len(cookies),
+                "query_url": f"/api/v1/auto/jobs/{job_id}",
+            },
+        )
+
     async def _resume_for_remote_session(self, session_id: str, cookies: list[dict]) -> None:
         job = self.job_store.find_by_remote_session(session_id)
         if job is None:

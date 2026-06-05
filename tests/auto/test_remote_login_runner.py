@@ -31,6 +31,67 @@ async def test_remote_login_runner_starts_and_completes_session(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_remote_login_runner_completes_session_only_once(tmp_path):
+    ready = []
+
+    async def starter(platform, user_id, session_id):
+        return f"https://login.example/{platform}/{user_id}/{session_id}"
+
+    runner = RemoteLoginRunner(
+        starter=starter,
+        on_cookie_ready=lambda session_id, cookies: _ready(ready, session_id, cookies),
+    )
+    session = await runner.start("toutiao", "user1")
+    cookies = [{"name": "uid_tt", "value": "1", "domain": ".toutiao.com"}]
+
+    first = await runner.complete_with_cookies(session.session_id, cookies)
+    second = await runner.complete_with_cookies(session.session_id, cookies)
+
+    assert first is True
+    assert second is False
+    assert ready == [(session.session_id, cookies)]
+
+
+@pytest.mark.asyncio
+async def test_remote_login_runner_manual_save_prevents_watcher_duplicate(tmp_path):
+    logger, _log_path = setup_job_logger("job-manual-cookie-save", tmp_path)
+    ready = []
+
+    class Event:
+        def __init__(self):
+            self._set = False
+
+        async def wait(self):
+            return True
+
+        def is_set(self):
+            return self._set
+
+        def set(self):
+            self._set = True
+
+    async def extractor(_cdp_port):
+        return [{"name": "uid_tt", "value": "1", "domain": ".toutiao.com"}]
+
+    runner = RemoteLoginRunner(
+        starter=lambda platform, user_id, session_id: _url(platform, user_id, session_id),
+        on_cookie_ready=lambda session_id, cookies: _ready(ready, session_id, cookies),
+        logger_factory=lambda _session_id: logger,
+        cookie_extractor=extractor,
+    )
+    session = await runner.start("toutiao", "user1")
+    session.disconnect_event = Event()
+    session.cdp_port = 9222
+
+    cookies = await runner.save_session_cookies(session.session_id)
+    await runner._watch_login(session)
+
+    assert cookies == [{"name": "uid_tt", "value": "1", "domain": ".toutiao.com"}]
+    assert session.status == "completed"
+    assert ready == [(session.session_id, cookies)]
+
+
+@pytest.mark.asyncio
 async def test_remote_login_runner_writes_watcher_state_to_job_log(tmp_path):
     logger, log_path = setup_job_logger("job-1", tmp_path)
     cookies = [{"name": "uid_tt", "value": "1", "domain": ".toutiao.com"}]

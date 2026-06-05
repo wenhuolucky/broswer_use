@@ -198,6 +198,73 @@ async def test_publish_agent_resumes_after_remote_cookie_completion():
 
 
 @pytest.mark.asyncio
+async def test_publish_agent_save_remote_cookie_continues_publish_once():
+    saved = []
+    publish_calls = 0
+
+    class CookieStoreStub:
+        def __init__(self):
+            self.ready = False
+
+        def has_valid_cookie(self, platform, user_id):
+            return self.ready
+
+        def save(self, platform, user_id, cookies):
+            saved.append((platform, user_id, cookies))
+            self.ready = True
+
+        def load_storage_state_text(self, platform, user_id):
+            return '{"cookies":[{"domain":".toutiao.com"}]}'
+
+    class RemoteRunnerStub:
+        def __init__(self):
+            self.session_id = "session-1"
+
+        async def start(self, platform, user_id):
+            class Session:
+                session_id = "session-1"
+                login_url = "https://login.example"
+
+            return Session()
+
+        async def save_session_cookies(self, session_id):
+            assert session_id == self.session_id
+            cookies = [{"name": "uid_tt", "value": "1", "domain": ".toutiao.com"}]
+            await agent._resume_for_remote_session(session_id, cookies)
+            return cookies
+
+    class PublishAdapterStub:
+        async def publish(self, **kwargs):
+            nonlocal publish_calls
+            publish_calls += 1
+            return {"success": True, "article_url": "https://toutiao.com/manual-save"}
+
+    cookie_store = CookieStoreStub()
+    agent = PublishAgent(
+        job_store=JobStore(),
+        cookie_store=cookie_store,
+        publish_adapter=PublishAdapterStub(),
+        remote_runner=RemoteRunnerStub(),
+    )
+    first = await agent.submit(AutoPublishRequest(
+        user_id="user1",
+        platform="toutiao",
+        title="title",
+        content="content",
+    ))
+
+    response = await agent.save_remote_cookie(first.data["job_id"])
+    duplicate = await agent.save_remote_cookie(first.data["job_id"])
+
+    assert response.code == 200
+    assert response.status == "succeeded"
+    assert response.result["cookie_count"] == 1
+    assert duplicate.code == 409
+    assert publish_calls == 1
+    assert saved == [("toutiao", "user1", [{"name": "uid_tt", "value": "1", "domain": ".toutiao.com"}])]
+
+
+@pytest.mark.asyncio
 async def test_publish_agent_starts_remote_login_when_existing_cookie_is_rejected():
     class CookieStoreStub:
         def has_valid_cookie(self, platform, user_id):

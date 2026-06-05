@@ -1,37 +1,40 @@
 # browser-use 自动化发文服务
 
-本项目基于 `browser-use`、`Playwright`、`FastAPI` 和 LLM，实现头条号自动化发文。当前重点入口是 `auto/` 服务：调用方只需要提交一次发文请求，系统会自动判断用户 Cookie 是否存在；如果没有 Cookie，会启动远程登录服务获取 Cookie，然后继续完成自动化发文。
+本项目基于 `browser-use`、`Playwright`、`FastAPI` 和 LLM，实现头条号自动化发文。当前推荐入口是 `auto/` 服务：调用方只需要提交一次发文任务，系统会自动判断用户 Cookie 是否存在；如果没有 Cookie 或 Cookie 失效，会启动远程登录服务获取 Cookie，然后继续完成自动化发文。
 
 ## 核心能力
 
-- `auto` 一体化发文接口：`POST /api/v1/auto/publish`
+- 一体化发文入口：`POST /api/v1/auto/publish`
+- 任务查询入口：`GET /api/v1/auto/jobs/{job_id}`
+- 主动保存远程登录 Cookie：`POST /api/v1/auto/savecookie/{job_id}`
 - `user_id` 隔离 Cookie：每个用户单独保存登录态
-- Cookie 存在时：直接注入 Cookie 并执行自动发文
-- Cookie 不存在时：自动启动远程登录链接，用户登录后保存 Cookie，再继续发文
-- 每个任务独立日志：便于定位登录、Cookie、发文、文章 URL 获取问题
-- 复用原有发文能力，但 `auto/` 内部做隔离封装，尽量不影响原代码
+- Cookie 存在时：创建后台发文任务，接口立即返回 `job_id`
+- Cookie 不存在或失效时：返回远程登录链接，用户登录后继续原任务
+- 远程登录支持两种 Cookie 保存触发方式：关闭远程连接自动保存，或调用 `savecookie` 主动保存
+- 已做幂等保护：同一个远程登录 session 不会因为重复触发而重复发文
+- 每个任务都有独立日志，便于定位登录、Cookie、发文、文章 URL 获取问题
 
 ## 目录结构
 
 ```text
 browser-use/
-├── auto/                         # 当前重点：登录 + Cookie + 发文一体化服务
-│   ├── api.py                    # /api/v1/auto 路由
-│   ├── server.py                 # FastAPI app 入口
-│   ├── publish_agent.py          # 自动判断 Cookie、远程登录、发文编排
-│   ├── cookie_store.py           # 按 platform/user_id 保存 Cookie
-│   ├── job_store.py              # 任务状态管理
-│   ├── logging_config.py         # 每个 job 单独日志
-│   ├── adapters/                 # 对原发文服务的适配与覆盖
-│   ├── remote_cookie/            # 远程登录和 Cookie 获取
-│   ├── data/                     # 运行期 Cookie/Profile，已 gitignore
-│   └── logs/                     # 运行期日志，已 gitignore
-├── api/publish/                  # 原自动发文服务
-├── tools/browser_test/           # 原远程浏览器查看和 Cookie 获取工具
-├── src/                          # 平台、浏览器、发布相关基础代码
-├── tests/auto/                   # auto 服务测试
-├── requirements.txt
-└── .env.example
+├─ auto/                         # 登录 + Cookie + 发文一体化服务
+│  ├─ api.py                     # /api/v1/auto 路由
+│  ├─ server.py                  # FastAPI app 入口
+│  ├─ publish_agent.py           # Cookie 判断、远程登录、发文编排
+│  ├─ cookie_store.py            # 按 platform/user_id 保存 Cookie
+│  ├─ job_store.py               # 任务状态管理
+│  ├─ logging_config.py          # 每个 job 独立日志
+│  ├─ adapters/                  # 对原发文能力的适配
+│  ├─ remote_cookie/             # 远程登录和 Cookie 获取
+│  ├─ data/                      # 运行期 Cookie/Profile，已 gitignore
+│  └─ logs/                      # 运行期日志，已 gitignore
+├─ api/publish/                  # 原自动发文核心服务
+├─ tools/browser_test/           # 远程浏览器查看器和 Cookie 获取工具
+├─ src/                          # 平台、浏览器、发文相关基础代码
+├─ tests/auto/                   # auto 服务测试
+├─ requirements.txt
+└─ .env.example
 ```
 
 ## 环境安装
@@ -74,13 +77,13 @@ python -m playwright install chromium
 
 ### 5. 安装 cloudflared
 
-`auto` 远程获取 Cookie 依赖 Cloudflare Tunnel。Windows 可使用：
+`auto` 远程获取 Cookie 依赖 Cloudflare Tunnel。Windows 可以使用：
 
 ```powershell
 winget install Cloudflare.cloudflared
 ```
 
-安装后确认可用：
+确认可用：
 
 ```powershell
 cloudflared --version
@@ -121,19 +124,20 @@ python -m uvicorn auto.server:app --host 127.0.0.1 --port 19000
 python -m uvicorn auto.server:app --host 127.0.0.1 --port 19001
 ```
 
-## auto 自动化流程
-
-### 总流程
+## 自动化流程
 
 ```text
-调用 /api/v1/auto/publish
+调用 POST /api/v1/auto/publish
+        |
+        v
+创建 job，立即返回 job_id 和 query_url
         |
         v
 检查 auto/data/cookies/{platform}/{user_id}.json
         |
-        +-- Cookie 有效 --> 注入 Cookie --> 调用自动化发文 --> 返回发布结果
+        +-- Cookie 存在 --> 后台注入 Cookie 并执行自动化发文
         |
-        +-- Cookie 缺失/无效 --> 启动本地浏览器 + 远程查看器 + Cloudflare Tunnel
+        +-- Cookie 缺失/失效 --> 启动本地浏览器 + 远程查看器 + Cloudflare Tunnel
                                 |
                                 v
                             返回 login_url
@@ -141,28 +145,28 @@ python -m uvicorn auto.server:app --host 127.0.0.1 --port 19001
                                 v
                             用户远程扫码登录头条
                                 |
-                                v
-                            用户关闭远程浏览器/查看器
+                                +-- 方式 1：用户关闭远程连接，系统自动提取并保存 Cookie
                                 |
-                                v
-                            系统提取 Cookie 并保存
-                                |
-                                v
-                            自动继续发文
+                                +-- 方式 2：调用 POST /api/v1/auto/savecookie/{job_id} 主动提取并保存 Cookie
+                                                |
+                                                v
+                                      保存 Cookie 后继续原发文任务
 ```
 
-### 关键规则
+关键规则：
 
 - `user_id` 必传，用于区分不同用户 Cookie。
-- 默认平台是 `toutiao`。
-- 如果用户 Cookie 已存在且有效，请求会同步进入发文流程。
-- 如果用户 Cookie 不存在，请求会返回 `waiting_cookie` 和 `login_url`。
-- 远程登录完成后，关闭远程浏览器/查看器会触发 Cookie 提取。
-- Cookie 保存成功后，系统自动继续执行原来的发文任务。
+- `POST /api/v1/auto/publish` 是任务创建接口，只表示请求已被服务接收并创建 job。
+- 真实任务进度和发布结果通过 `GET /api/v1/auto/jobs/{job_id}` 查询。
+- 如果用户 Cookie 已存在，`publish` 返回 `task_status=running`，后台继续发文。
+- 如果用户 Cookie 不存在，`publish` 返回 `task_status=login_required` 和 `login_url`。
+- 远程登录完成后，关闭远程连接会自动提取 Cookie。
+- 也可以调用 `POST /api/v1/auto/savecookie/{job_id}` 主动触发 Cookie 提取，不必等待用户关闭远程连接。
+- `savecookie` 和关闭远程连接共用同一套保存逻辑，已做幂等保护，不会重复发文。
 
 ## API 使用
 
-### 1. 发起自动发文
+### 1. 创建发文任务
 
 ```powershell
 $body = @{
@@ -190,41 +194,43 @@ Invoke-RestMethod `
 | `content` | 是 | 文章正文 |
 | `cover_image_url` | 否 | 封面图片 URL |
 
-### 2. Cookie 已存在时的返回
+Cookie 已存在时，返回示例：
 
 ```json
 {
   "code": 200,
-  "job_id": "xxxx",
-  "status": "succeeded",
-  "message": "",
-  "login_url": "",
-  "log_file_path": "C:\\program001\\browser_use_demo4\\browser-use\\auto\\logs\\jobs\\xxxx.log",
-  "result": {
-    "success": true,
-    "article_url": "https://www.toutiao.com/item/...",
-    "article_title": "测试标题"
+  "message": "任务创建成功，发布任务正在后台执行",
+  "data": {
+    "job_id": "xxxx",
+    "task_status": "running",
+    "query_url": "/api/v1/auto/jobs/xxxx",
+    "login_url": "",
+    "remote_session_id": "",
+    "log_file_path": "C:\\program001\\browser_use_demo4\\browser-use\\auto\\logs\\jobs\\xxxx.log"
   }
 }
 ```
 
-### 3. Cookie 不存在时的返回
+需要用户登录时，返回示例：
 
 ```json
 {
-  "code": 202,
-  "job_id": "xxxx",
-  "status": "waiting_cookie",
-  "message": "请打开 login_url 完成登录，登录成功后系统可继续发文",
-  "login_url": "https://xxxxx.trycloudflare.com",
-  "log_file_path": "C:\\program001\\browser_use_demo4\\browser-use\\auto\\logs\\jobs\\xxxx.log",
-  "result": {}
+  "code": 200,
+  "message": "任务创建成功，需要用户登录",
+  "data": {
+    "job_id": "xxxx",
+    "task_status": "login_required",
+    "query_url": "/api/v1/auto/jobs/xxxx",
+    "login_url": "https://xxxxx.trycloudflare.com",
+    "remote_session_id": "session-xxxx",
+    "log_file_path": "C:\\program001\\browser_use_demo4\\browser-use\\auto\\logs\\jobs\\xxxx.log"
+  }
 }
 ```
 
-此时把 `login_url` 发给登录用户。用户打开链接后可以看到本地浏览器画面，在头条后台扫码登录。登录完成后关闭远程窗口，服务会提取 Cookie、保存 Cookie，并继续执行发文。
+创建失败时，`code=500`，并在 `data.reason` 中返回失败原因。
 
-### 4. 查询任务状态
+### 2. 查询任务状态
 
 ```powershell
 Invoke-RestMethod `
@@ -232,17 +238,77 @@ Invoke-RestMethod `
   -Uri "http://127.0.0.1:19000/api/v1/auto/jobs/{job_id}"
 ```
 
-返回中重点看：
+常见返回：
 
-- `status`：任务状态
-- `login_url`：远程登录入口
-- `log_file_path`：当前任务日志
-- `result.article_url`：发布成功后的文章 URL
-- `error`：失败原因
+| code | task_status | 说明 |
+|---:|---|---|
+| `200` | `published` | 发布成功 |
+| `202` | `running` | 后台执行中 |
+| `401` | `login_required` | 需要用户登录，返回 `login_url` |
+| `404` | `not_found` | job 不存在 |
+| `408` | `expired` | 预留：远程登录 session 过期 |
+| `410` | `closed` | 预留：远程登录 session 已关闭 |
+| `500` | `failed` | 发布失败 |
+| `503` | `query_failed` | 查询任务状态失败 |
 
-### 5. 手动提交 Cookie 回调
+发布成功时，`data` 会包含文章信息：
 
-一般不需要手动调用。只有调试时才使用：
+```json
+{
+  "code": 200,
+  "task_status": "published",
+  "message": "文章发布成功",
+  "data": {
+    "job_id": "xxxx",
+    "user_id": "user1",
+    "platform": "toutiao",
+    "title": "测试标题",
+    "cover_image_url": "https://example.com/cover.jpg",
+    "article_url": "https://www.toutiao.com/item/...",
+    "publish_result": {
+      "success": true,
+      "account_name": "",
+      "platform_user_id": "",
+      "article_title": "测试标题",
+      "publish_signal": "",
+      "operation_time": ""
+    }
+  }
+}
+```
+
+### 3. 主动保存远程登录 Cookie
+
+当 `/publish` 返回 `login_url` 后，用户完成扫码登录。如果不想等用户关闭远程连接，可以调用：
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:19000/api/v1/auto/savecookie/{job_id}"
+```
+
+成功返回：
+
+```json
+{
+  "code": 200,
+  "job_id": "xxxx",
+  "status": "succeeded",
+  "message": "Cookie 保存成功，发布任务已继续执行",
+  "login_url": "",
+  "log_file_path": "C:\\program001\\browser_use_demo4\\browser-use\\auto\\logs\\jobs\\xxxx.log",
+  "result": {
+    "cookie_count": 8,
+    "query_url": "/api/v1/auto/jobs/xxxx"
+  }
+}
+```
+
+重复调用或任务已经进入发布流程时，返回 `code=409`，不会重复保存或重复发文。
+
+### 4. 手动提交 Cookie 回调
+
+一般不需要手动调用。仅调试时使用：
 
 ```powershell
 Invoke-RestMethod `
@@ -266,7 +332,8 @@ auto/logs/jobs/{job_id}.log
 - Cookie 是否存在
 - 是否启动远程登录
 - 远程登录链接
-- Cookie 保存结果
+- 手动或自动保存 Cookie 的结果
+- 是否继续进入发文流程
 - 发文服务调用结果
 
 ### 原发文服务日志
@@ -313,12 +380,14 @@ https://mp.toutiao.com/profile_v4/graphic/articles
 - 提取候选文章标题和 URL
 - 每轮日志打印候选数量、前几条标题、URL
 - 只有标题匹配时才打开详情页确认
-- 标题不匹配时不会再打开第一个旧文章
+- 标题不匹配时不会再误打开第一篇旧文章
+- 返回前会规范化头条文章 URL
 
-这部分实现位于：
+实现位置：
 
 ```text
 auto/adapters/toutiao_publish_service.py
+auto/url_utils.py
 ```
 
 ## 测试
@@ -332,20 +401,14 @@ auto/adapters/toutiao_publish_service.py
 当前预期：
 
 ```text
-25 passed
-```
-
-也可以只测试文章 URL 获取逻辑：
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest tests\auto\test_toutiao_publish_service.py -q
+45 passed
 ```
 
 ## 常见问题
 
 ### 1. `/docs` 打不开
 
-确认服务端口是否正确。例如服务启动在 `19000`，访问：
+确认服务端口是否正确。例如服务启动在 `19000`：
 
 ```text
 http://127.0.0.1:19000/docs
@@ -357,7 +420,7 @@ http://127.0.0.1:19000/docs
 WinError 10048
 ```
 
-说明端口已有服务在使用。换端口启动：
+说明端口已有服务在使用，换端口启动：
 
 ```powershell
 python -m uvicorn auto.server:app --host 127.0.0.1 --port 19001
@@ -383,11 +446,20 @@ auto/logs/jobs/{job_id}.log
 重点看：
 
 - 是否检测到远程查看器关闭
+- 是否调用了 `savecookie`
 - 是否提取到 Cookie
 - Cookie 是否通过头条域名和登录态校验
-- 是否进入 `开始调用自动化发文服务`
+- 是否进入“开始调用自动化发文服务”
 
-### 4. 发布成功但没有文章 URL
+### 4. 调用 `savecookie` 后担心重复发文
+
+当前已做幂等保护：
+
+- 同一个远程登录 session 完成一次后，再次完成会被跳过。
+- job 已进入 `publishing` 或 `succeeded` 后，再调用 `savecookie` 会返回 `409 cookie already saved`。
+- 如果先调用 `savecookie`，随后用户又关闭远程连接，watcher 会检测到 session 已完成，不会再次提取 Cookie 或再次发文。
+
+### 5. 发布成功但没有文章 URL
 
 检查：
 
@@ -406,9 +478,9 @@ title-matched article URL not found after retries
 
 如果候选列表里没有新文章，通常是作品管理页同步延迟、筛选页不对，或文章仍在审核。
 
-### 5. 触发验证码或登录异常
+### 6. 触发验证码或登录异常
 
-头条建议用 App 扫码登录。手机号验证码登录容易触发滑块，远程操作不稳定。
+头条建议使用 App 扫码登录。手机号验证码登录容易触发滑块，远程操作不稳定。
 
 ## 旧入口说明
 
@@ -418,4 +490,4 @@ title-matched article URL not found after retries
 - `tools/browser_test/`：远程浏览器查看器，`auto` 远程登录会复用 `viewer.py`
 - `src/`：平台、浏览器和头条基础逻辑
 
-当前推荐新开发和调试优先使用 `auto/`，因为它已经把远程登录、Cookie 保存、Cookie 注入和自动化发文串成一个统一流程。
+当前推荐新开发和调试优先使用 `auto/`，因为它已经把远程登录、Cookie 保存、Cookie 注入和自动化发文串成统一流程。

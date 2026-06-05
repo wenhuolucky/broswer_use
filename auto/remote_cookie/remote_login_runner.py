@@ -84,13 +84,27 @@ class RemoteLoginRunner:
     def get(self, session_id: str) -> RemoteLoginSession | None:
         return self._sessions.get(session_id)
 
-    async def complete_with_cookies(self, session_id: str, cookies: list[dict]) -> None:
+    async def complete_with_cookies(self, session_id: str, cookies: list[dict]) -> bool:
         session = self._sessions[session_id]
+        if session.status == "completed":
+            return False
         if self._save_cookie:
             self._save_cookie(session.platform, session.user_id, cookies)
         session.status = "completed"
         if self._on_cookie_ready:
             await self._on_cookie_ready(session_id, cookies)
+        return True
+
+    async def save_session_cookies(self, session_id: str) -> list[dict]:
+        session = self._sessions[session_id]
+        if session.status == "completed":
+            return []
+        cookies = await self._cookie_extractor(session.cdp_port)
+        if not _has_platform_cookie(session.platform, cookies):
+            session.status = "failed"
+            raise RuntimeError("remote cookie invalid")
+        await self.complete_with_cookies(session_id, cookies)
+        return cookies
 
     async def _start_real_session(self, platform: str, user_id: str, session_id: str) -> RemoteLoginSession:
         cdp_port = _find_free_port()
@@ -151,6 +165,12 @@ class RemoteLoginRunner:
             )
             for task in pending:
                 task.cancel()
+            if session.status == "completed":
+                logger.info(
+                    "remote login watcher skipped cookie extraction because session already completed session_id=%s",
+                    session.session_id,
+                )
+                return
             if not session.disconnect_event.is_set():
                 session.status = "timeout"
                 logger.warning("远程登录 watcher 等待远程查看器关闭超时 session_id=%s", session.session_id)

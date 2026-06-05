@@ -57,6 +57,11 @@ async def complete_cookies(job_id: str, request: CompleteCookieRequest):
     return (await agent.resume_after_cookie(job_id, request.cookies)).model_dump()
 
 
+@router.post("/savecookie/{job_id}")
+async def save_cookie(job_id: str):
+    return (await agent.save_remote_cookie(job_id)).model_dump()
+
+
 def _format_job_response(job):
     status = job.status
     if status in {
