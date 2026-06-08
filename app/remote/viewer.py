@@ -15,6 +15,8 @@ if _venv_site.exists() and str(_venv_site) not in sys.path:
 from playwright.async_api import async_playwright
 from aiohttp import web
 
+from app.remote.display_config import get_remote_viewer_screencast_options
+
 
 # ── 二进制传输 + Blob 渲染 ──
 VIEWER_HTML = """<!DOCTYPE html>
@@ -163,13 +165,8 @@ async def run_viewer_server(
         # 发送初始化消息
         await ws.send_json({'type': 'init', 'w': dev_w, 'h': dev_h})
 
-        # 低画质 screencast
-        await cdp.send('Page.startScreencast', {
-            'format': 'jpeg',
-            'quality': 50,
-            'maxWidth': 960,
-            'maxHeight': 640,
-        })
+        screencast_options = get_remote_viewer_screencast_options()
+        await cdp.send('Page.startScreencast', screencast_options)
 
         screencasting = True
         last_frame_time = 0
@@ -306,10 +303,14 @@ async def run_viewer_server(
     site = web.TCPSite(runner, '0.0.0.0', http_port)
     await site.start()
 
-    print(f"[查看器] 已启动: http://localhost:{http_port} (低延迟模式: quality=50, 960x640, ~10fps)")
+    options = get_remote_viewer_screencast_options()
+    print(
+        "[查看器] 已启动: "
+        f"http://localhost:{http_port} "
+        f"(quality={options['quality']}, {options['maxWidth']}x{options['maxHeight']}, ~10fps)"
+    )
     return runner, pw, browser, cdp, page
 
 
 if __name__ == '__main__':
     print("remote_viewer is used internally by the publish service")
-

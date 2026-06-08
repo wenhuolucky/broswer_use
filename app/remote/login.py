@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from app.core.config import REMOTE_LOGIN_TIMEOUT_SECONDS, REMOTE_PROFILE_DIR
+from app.remote.display_config import get_remote_browser_window_size
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TOOLS_DIR = PROJECT_ROOT / "tools"
@@ -320,11 +321,13 @@ async def _launch_chrome(cdp_port: int, session_id: str) -> subprocess.Popen:
     if profile_dir.exists():
         shutil.rmtree(profile_dir, ignore_errors=True)
     profile_dir.mkdir(parents=True, exist_ok=True)
+    window_width, window_height = get_remote_browser_window_size()
     proc = subprocess.Popen(
         [
             _find_browser_path(),
             f"--remote-debugging-port={cdp_port}",
             f"--user-data-dir={profile_dir}",
+            f"--window-size={window_width},{window_height}",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-blink-features=AutomationControlled",

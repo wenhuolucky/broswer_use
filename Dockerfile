@@ -7,7 +7,12 @@ ENV PYTHONUNBUFFERED=1 \
     APP_LOG_DIR=/app/logs \
     APP_REMOTE_PROFILE_DIR=/app/data/remote_profiles \
     CLOUDFLARED_PATH=/usr/local/bin/cloudflared \
-    REMOTE_LOGIN_TIMEOUT_SECONDS=600
+    REMOTE_LOGIN_TIMEOUT_SECONDS=600 \
+    REMOTE_BROWSER_WINDOW_WIDTH=1440 \
+    REMOTE_BROWSER_WINDOW_HEIGHT=900 \
+    REMOTE_VIEWER_MAX_WIDTH=1440 \
+    REMOTE_VIEWER_MAX_HEIGHT=900 \
+    REMOTE_VIEWER_JPEG_QUALITY=85
 
 WORKDIR /app
 
@@ -30,4 +35,4 @@ RUN mkdir -p /app/data /app/logs
 
 EXPOSE 19000
 
-CMD ["sh", "-c", "Xvfb ${DISPLAY:-:99} -screen 0 1280x1024x24 -nolisten tcp & export DISPLAY=${DISPLAY:-:99}; exec python -m uvicorn app.server:app --host 0.0.0.0 --port 19000 --workers 1"]
+CMD ["sh", "-c", "Xvfb ${DISPLAY:-:99} -screen 0 ${XVFB_SCREEN:-1920x1080x24} -nolisten tcp & export DISPLAY=${DISPLAY:-:99}; exec python -m uvicorn app.server:app --host 0.0.0.0 --port 19000 --workers 1"]
