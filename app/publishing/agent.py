@@ -12,8 +12,10 @@ from app.jobs.models import (
     AutoTaskCreateResponse,
     LoginRequest,
     STATUS_CHECKING_COOKIE,
+    STATUS_COOKIE_READY,
     STATUS_FAILED,
     STATUS_PUBLISHING,
+    STATUS_QUEUED,
     STATUS_STARTING_REMOTE_LOGIN,
     STATUS_SUCCEEDED,
     STATUS_WAITING_COOKIE,
@@ -131,6 +133,35 @@ class PublishAgent:
         except Exception as exc:
             logger.exception("后台发布任务异常退出: %s", exc)
             self.job_store.update(job_id, status=STATUS_FAILED, error=str(exc))
+
+    def close_stale_running_jobs_after_restart(self) -> int:
+        stale_statuses = {
+            STATUS_QUEUED,
+            STATUS_CHECKING_COOKIE,
+            STATUS_COOKIE_READY,
+            STATUS_STARTING_REMOTE_LOGIN,
+            STATUS_WAITING_COOKIE,
+            STATUS_PUBLISHING,
+        }
+        stale_jobs = self.job_store.list_by_statuses(stale_statuses)
+        reason = "服务已重启，运行中的浏览器会话和实时查看页面已失效，请重新创建发布任务"
+        for job in stale_jobs:
+            logger, _ = setup_job_logger(job.job_id, self.log_dir)
+            logger.warning(
+                "服务启动时关闭遗留任务 status=%s live_url=%s remote_session_id=%s",
+                job.status,
+                job.live_url,
+                job.remote_session_id,
+            )
+            self.job_store.update(
+                job.job_id,
+                status=STATUS_FAILED,
+                error=reason,
+                live_url="",
+                login_url="",
+                remote_session_id="",
+            )
+        return len(stale_jobs)
 
     def _task_response(
         self,

@@ -75,6 +75,20 @@ class JobStore:
             job_id = self._remote_session_index.get(session_id)
             return self._jobs.get(job_id) if job_id else None
 
+    def list_by_statuses(self, statuses: set[str]) -> list[Job]:
+        if self._redis:
+            jobs: list[Job] = []
+            for key in self._redis.scan_iter(match=f"{self.key_prefix}:jobs:*"):
+                raw = self._redis.get(key)
+                if not raw:
+                    continue
+                job = self._deserialize_job(raw)
+                if job.status in statuses:
+                    jobs.append(job)
+            return jobs
+        with self._lock:
+            return [job for job in self._jobs.values() if job.status in statuses]
+
     def _connect_redis(self, redis_url: str):
         try:
             from redis import Redis
