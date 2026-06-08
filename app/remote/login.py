@@ -353,7 +353,7 @@ async def _launch_chrome(cdp_port: int, session_id: str) -> subprocess.Popen:
 
 async def _start_cloudflared_tunnel(local_port: int) -> tuple[subprocess.Popen, str]:
     proc = subprocess.Popen(
-        [_find_cloudflared_path(), "tunnel", "--url", f"http://localhost:{local_port}", "--no-autoupdate"],
+        [_find_cloudflared_path(), "tunnel", "--url", f"http://127.0.0.1:{local_port}", "--no-autoupdate"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -361,14 +361,17 @@ async def _start_cloudflared_tunnel(local_port: int) -> tuple[subprocess.Popen, 
         errors="replace",
         creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
     )
+    recent_output: list[str] = []
     try:
         while True:
             if proc.poll() is not None:
-                raise RuntimeError(f"cloudflared 异常退出 (code={proc.poll()})")
+                detail = "\n".join(recent_output[-10:])
+                raise RuntimeError(f"cloudflared exited unexpectedly (code={proc.poll()}): {detail}".rstrip())
             line = proc.stdout.readline()
             if not line:
                 await asyncio.sleep(0.1)
                 continue
+            recent_output.append(line.strip())
             match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
             if match:
                 return proc, match.group(0)
