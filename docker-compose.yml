@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     image: browser-publish-service:latest
     container_name: browser-publish-service
+    network_mode: host
     env_file:
       - .env
     environment:
