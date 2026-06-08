@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import uuid
+import urllib.request
 from dataclasses import dataclass
 from logging import LoggerAdapter
 from pathlib import Path
@@ -97,7 +98,7 @@ class RemoteLoginRunner:
             await self._on_cookie_ready(session_id, cookies)
         return True
 
-    async def save_session_cookies(self, session_id: str) -> list[dict]:
+    async def save_session_cookies(self, session_id: str, notify: bool = True) -> list[dict]:
         session = self._sessions[session_id]
         if session.status == "completed":
             return []
@@ -105,7 +106,12 @@ class RemoteLoginRunner:
         if not _has_platform_cookie(session.platform, cookies):
             session.status = "failed"
             raise RuntimeError("remote cookie invalid")
-        await self.complete_with_cookies(session_id, cookies)
+        if notify:
+            await self.complete_with_cookies(session_id, cookies)
+        else:
+            if self._save_cookie:
+                self._save_cookie(session.platform, session.user_id, cookies)
+            session.status = "completed"
         await self.cleanup(session_id)
         return cookies
 
@@ -341,7 +347,7 @@ async def _launch_chrome(cdp_port: int, session_id: str) -> subprocess.Popen:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    await asyncio.sleep(2)
+    await _wait_for_cdp(cdp_port, proc)
     return proc
 
 
@@ -377,7 +383,7 @@ async def _extract_cookies(cdp_port: int) -> list[dict]:
     pw = await async_playwright().start()
     try:
         browser = await asyncio.wait_for(
-            pw.chromium.connect_over_cdp(f"http://localhost:{cdp_port}"),
+            pw.chromium.connect_over_cdp(_cdp_http_url(cdp_port)),
             timeout=15,
         )
         context = browser.contexts[0]
@@ -394,6 +400,26 @@ def _login_url_for(platform: str) -> str:
     if platform == "sohu":
         return "https://mp.sohu.com"
     raise ValueError(f"未知平台: {platform}")
+
+
+def _cdp_http_url(cdp_port: int) -> str:
+    return f"http://127.0.0.1:{cdp_port}"
+
+
+async def _wait_for_cdp(cdp_port: int, proc: subprocess.Popen, timeout_seconds: float = 10.0) -> None:
+    deadline = asyncio.get_event_loop().time() + timeout_seconds
+    url = f"{_cdp_http_url(cdp_port)}/json/version"
+    last_error: Exception | None = None
+    while asyncio.get_event_loop().time() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(f"Chrome exited before CDP became ready (code={proc.poll()})")
+        try:
+            await asyncio.to_thread(lambda: urllib.request.urlopen(url, timeout=1).close())
+            return
+        except Exception as exc:
+            last_error = exc
+            await asyncio.sleep(0.2)
+    raise RuntimeError(f"Chrome CDP did not become ready at {_cdp_http_url(cdp_port)}: {last_error}")
 
 
 def _has_platform_cookie(platform: str, cookies: list[dict]) -> bool:

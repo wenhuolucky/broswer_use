@@ -136,7 +136,7 @@ def get_cdp_url(cdp_port: int, max_retries: int = 10) -> str:
     ws_url = None
     for _ in range(max_retries):
         try:
-            resp = urllib.request.urlopen(f"http://localhost:{cdp_port}/json", timeout=3)
+            resp = urllib.request.urlopen(f"http://127.0.0.1:{cdp_port}/json", timeout=3)
             pages = json.loads(resp.read())
             if pages:
                 ws_url = pages[0].get("webSocketDebuggerUrl")
@@ -147,6 +147,6 @@ def get_cdp_url(cdp_port: int, max_retries: int = 10) -> str:
         time.sleep(0.5)
 
     if not ws_url:
-        raise RuntimeError(f"无法从浏览器 (localhost:{cdp_port}) 获取 CDP URL")
+        raise RuntimeError(f"无法从浏览器 (127.0.0.1:{cdp_port}) 获取 CDP URL")
 
     return ws_url

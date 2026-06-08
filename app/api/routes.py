@@ -93,7 +93,7 @@ def _format_job_response(job):
             task_status="login_required",
             message="需要用户登录或 Cookie 已失效",
             job_id=job.job_id,
-            extra_data={"login_url": job.login_url, "live_url": job.live_url},
+            extra_data={"live_url": job.live_url or job.login_url},
         )
     if status == STATUS_SUCCEEDED:
         if (job.payload or {}).get("job_type") == "login_only":
