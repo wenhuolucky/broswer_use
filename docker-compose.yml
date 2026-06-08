@@ -1,0 +1,24 @@
+services:
+  publish:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: browser-publish-service:latest
+    container_name: browser-publish-service
+    env_file:
+      - .env
+    environment:
+      APP_DATA_DIR: /app/data
+      APP_LOG_DIR: /app/logs
+      APP_REMOTE_PROFILE_DIR: /app/data/remote_profiles
+      CLOUDFLARED_PATH: /usr/local/bin/cloudflared
+      REDIS_URL: ${REDIS_URL:-}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-browser_use:publish}
+      REDIS_JOB_TTL_SECONDS: ${REDIS_JOB_TTL_SECONDS:-86400}
+      TZ: Asia/Shanghai
+    ports:
+      - "8000:19000"
+    volumes:
+      - .:/app
+    shm_size: "64gb"
+    restart: unless-stopped

@@ -6,12 +6,8 @@ __pycache__
 .mypy_cache
 .ruff_cache
 .env
-auto/data
-auto/logs
-api/logs
-src/chrome_profile
-src/chrome_profile_toutiao
-chrome_profile
+data
+logs
 runtime
-Dockerfile*
-docker-compose*.yml
+.idea
+tests

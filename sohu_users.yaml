@@ -1,8 +1,0 @@
-default_user_id: "sohu_user1"
-
-users:
-  - user_id: "sohu_user1"
-    name: "搜狐用户1"
-    auth_file: "users/sohu_user1/auth.json"
-    chrome_profile: "users/sohu_user1/chrome_profile"
-    cdp_port: 9327
