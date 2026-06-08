@@ -10,6 +10,7 @@ from app.jobs.models import (
     AutoPublishRequest,
     AutoPublishResponse,
     AutoTaskCreateResponse,
+    LoginRequest,
     STATUS_CHECKING_COOKIE,
     STATUS_FAILED,
     STATUS_PUBLISHING,
@@ -84,6 +85,35 @@ class PublishAgent:
             log_file_path=current_job.log_file_path if current_job else str(log_path),
         )
 
+    async def start_login_only(self, request: LoginRequest) -> AutoTaskCreateResponse:
+        payload = request.model_dump()
+        payload["job_type"] = "login_only"
+        job = self.job_store.create(payload)
+        logger, log_path = setup_job_logger(job.job_id, self.log_dir)
+        self.job_store.update(job.job_id, log_file_path=str(log_path))
+        logger.info("收到仅登录请求 user_id=%s platform=%s", request.user_id, request.platform)
+
+        login_response = await self._start_remote_login(job.job_id, request, "login_only")
+        if login_response.code >= 500:
+            return self._task_response(
+                job.job_id,
+                "failed",
+                "登录任务创建失败",
+                code=500,
+                log_file_path=str(log_path),
+                reason=login_response.message,
+            )
+
+        current_job = self.job_store.get(job.job_id)
+        return self._task_response(
+            job.job_id,
+            "login_required",
+            "登录任务创建成功，需要用户登录",
+            login_url=current_job.login_url if current_job else "",
+            remote_session_id=current_job.remote_session_id if current_job else "",
+            log_file_path=current_job.log_file_path if current_job else str(log_path),
+        )
+
     def _schedule_publish(self, job_id: str, request: AutoPublishRequest) -> None:
         task = asyncio.create_task(self._publish_with_cookie(job_id, request))
         self._background_tasks.add(task)
@@ -126,7 +156,7 @@ class PublishAgent:
     async def _start_remote_login(
         self,
         job_id: str,
-        request: AutoPublishRequest,
+        request: AutoPublishRequest | LoginRequest,
         reason: str,
         mark_cookie_refresh_attempted: bool = False,
     ) -> AutoPublishResponse:
@@ -243,7 +273,8 @@ class PublishAgent:
             return AutoPublishResponse(code=404, job_id=job_id, status=STATUS_FAILED, message="job not found")
 
         logger, _ = setup_job_logger(job_id, self.log_dir)
-        request = AutoPublishRequest(**job.payload)
+        is_login_only = (job.payload or {}).get("job_type") == "login_only"
+        request = LoginRequest(**job.payload) if is_login_only else AutoPublishRequest(**job.payload)
         logger.info("收到远程登录 Cookie 回调 cookie_count=%s", len(cookies))
         self.cookie_store.save(request.platform, request.user_id, cookies)
         if not self.cookie_store.has_valid_cookie(request.platform, request.user_id):
@@ -258,6 +289,24 @@ class PublishAgent:
             )
 
         logger.info("远程 Cookie 已保存且验证通过，继续发文")
+        if is_login_only:
+            result = {
+                "success": True,
+                "login_only": True,
+                "cookie_ready": True,
+                "cookie_count": len(cookies),
+            }
+            self.job_store.update(job_id, status=STATUS_SUCCEEDED, result=result, error="")
+            logger.info("仅登录任务 Cookie 保存完成，不执行发文")
+            return AutoPublishResponse(
+                code=200,
+                job_id=job_id,
+                status=STATUS_SUCCEEDED,
+                message="登录 Cookie 保存成功",
+                log_file_path=job.log_file_path,
+                result=result,
+            )
+
         return await self._publish_with_cookie(job_id, request)
 
     async def save_remote_cookie(self, job_id: str) -> AutoPublishResponse:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-from app.jobs.models import AutoPublishRequest
+from app.core.auth import require_api_token
+from app.jobs.models import AutoPublishRequest, LoginRequest
 from app.jobs.models import (
     STATUS_CHECKING_COOKIE,
     STATUS_COOKIE_READY,
@@ -26,12 +27,23 @@ async def health():
 
 
 @router.post("/publish")
-async def publish(request: AutoPublishRequest):
+async def publish(request: AutoPublishRequest, auth_error: dict | None = Depends(require_api_token)):
+    if auth_error:
+        return auth_error
     return (await agent.submit(request)).model_dump()
 
 
+@router.post("/login")
+async def login(request: LoginRequest, auth_error: dict | None = Depends(require_api_token)):
+    if auth_error:
+        return auth_error
+    return (await agent.start_login_only(request)).model_dump()
+
+
 @router.get("/jobs/{job_id}")
-async def get_job(job_id: str):
+async def get_job(job_id: str, auth_error: dict | None = Depends(require_api_token)):
+    if auth_error:
+        return auth_error
     try:
         job = agent.job_store.get(job_id)
     except Exception:
@@ -53,7 +65,9 @@ async def get_job(job_id: str):
 
 
 @router.post("/savecookie/{job_id}")
-async def save_cookie(job_id: str):
+async def save_cookie(job_id: str, auth_error: dict | None = Depends(require_api_token)):
+    if auth_error:
+        return auth_error
     return (await agent.save_remote_cookie(job_id)).model_dump()
 
 
@@ -81,6 +95,20 @@ def _format_job_response(job):
             extra_data={"login_url": job.login_url},
         )
     if status == STATUS_SUCCEEDED:
+        if (job.payload or {}).get("job_type") == "login_only":
+            payload = job.payload or {}
+            result = job.result or {}
+            return _job_response(
+                code=200,
+                task_status="login_succeeded",
+                message="登录 Cookie 保存成功",
+                job_id=job.job_id,
+                extra_data={
+                    "user_id": str(payload.get("user_id", "") or ""),
+                    "platform": str(payload.get("platform", "") or ""),
+                    "cookie_ready": bool(result.get("cookie_ready", False)),
+                },
+            )
         data = _published_job_data(job)
         article_url = data["article_url"]
         return _job_response(

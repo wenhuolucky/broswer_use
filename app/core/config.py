@@ -21,3 +21,5 @@ REMOTE_LOGIN_TIMEOUT_SECONDS = int(os.getenv("REMOTE_LOGIN_TIMEOUT_SECONDS", "60
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 REDIS_KEY_PREFIX = os.getenv("REDIS_KEY_PREFIX", "browser_use:publish").strip() or "browser_use:publish"
 REDIS_JOB_TTL_SECONDS = int(os.getenv("REDIS_JOB_TTL_SECONDS", "86400"))
+
+PUBLISH_API_TOKEN = os.getenv("PUBLISH_API_TOKEN", "").strip()

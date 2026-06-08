@@ -26,6 +26,11 @@ class AutoPublishRequest(BaseModel):
     cover_image_url: str | None = Field(default=None, description="封面图片 URL")
 
 
+class LoginRequest(BaseModel):
+    user_id: str = Field(..., min_length=1, description="User ID for cookie isolation")
+    platform: str = Field(default="toutiao", min_length=1, description="Login platform")
+
+
 class AutoPublishResponse(BaseModel):
     code: int = 202
     job_id: str
