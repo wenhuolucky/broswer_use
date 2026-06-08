@@ -18,6 +18,10 @@ from aiohttp import web
 from app.remote.display_config import get_remote_viewer_screencast_options
 
 
+def _cdp_http_url(cdp_port: int) -> str:
+    return f"http://127.0.0.1:{cdp_port}"
+
+
 # ── 二进制传输 + Blob 渲染 ──
 VIEWER_HTML = """<!DOCTYPE html>
 <html>
@@ -136,7 +140,7 @@ async def run_viewer_server(
         disconnect_event: 断开检测 Event，WebSocket 断开时触发
     """
     pw = await async_playwright().start()
-    browser = await pw.chromium.connect_over_cdp(f"http://localhost:{cdp_port}")
+    browser = await pw.chromium.connect_over_cdp(_cdp_http_url(cdp_port))
     ctx = browser.contexts[0]
     page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
