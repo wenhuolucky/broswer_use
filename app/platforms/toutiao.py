@@ -28,6 +28,18 @@ class ToutiaoPlatform(PlatformConfig):
             return self._markdown_prompt(title, content, cover_instruction)
         return self._plain_text_prompt(title, content, cover_instruction)
 
+    def _agent_recovery_rules(self) -> str:
+        return """Agent 执行规则：
+- 你是自主 Agent，不是固定 workflow。遇到轻微、可恢复的问题时，可以自己判断并恢复，例如按钮暂时不可点、弹窗遮挡、页面加载慢、输入框未聚焦、分类未选择、预览弹窗未出现等。
+- 同一个可恢复问题最多尝试 2 次。第 2 次仍然失败时，停止并调用 done 返回失败 JSON，不要继续循环。
+- 遇到不可恢复问题时不要重试，立即调用 done 返回失败 JSON。不可恢复问题包括：账号被禁言、账号异常、账号无发布权限、登录失效、需要重新登录、验证码/风控验证、内容违规/审核拦截、平台明确提示禁止发布、网络长时间不可用。
+- 如果页面异常回到首页、登录页、发布页初始状态，且没有明确的“发布成功/提交成功/文章已发布”证据，不要认为已经发布成功；先尝试恢复到当前步骤，最多 2 次，仍无法确认则返回失败。
+- 不要因为已经点击“确认发布”就直接认为成功。只有看到明确成功提示、文章管理页出现同标题文章、或拿到有效文章 URL，才返回 success=true。
+- 如果看到明确失败提示，failure_reason 必须尽量使用页面原文；如果没有页面原文，再用简短中文总结原因。
+- done 返回必须是合法 JSON 字符串，格式为：
+  {"success": false, "account_name": "已读取到则填写", "article_url": "", "failure_reason": "失败原因"}
+"""
+
     def _rich_html_ready_prompt(self, title: str, cover_instruction: str, rich_html: str) -> str:
         html_length = len(rich_html)
         return f"""请按顺序完成以下步骤，在头条号发布一篇文章。
@@ -40,6 +52,8 @@ class ToutiaoPlatform(PlatformConfig):
 - 如果剪贴板写入失败，或者 Ctrl+V 后正文完全没有粘贴进去，可以返回失败。
 - 如果富文本结构不完全理想，例如段落、列表、加粗、换行没有完全按预期渲染，不要长时间反复检查；记录现象后仍然继续执行发布。
 - 重点确认正文已经进入编辑器，标题正确，图片尽可能展示，然后继续发布。
+
+{self._agent_recovery_rules()}
 
 步骤：
 1. 打开头条号后台：{self.home_url}
@@ -85,7 +99,7 @@ async (htmlContent) => {{
 13. {cover_instruction.strip()}
 14. 检查分类等必填项。
 15. 点击“预览并发布”，再点击“确认发布”。
-16. 点击“确认发布”后立即调用 done，并返回合法 JSON 字符串：
+16. 点击“确认发布”后不要立即假定成功；等待并确认出现明确成功证据。确认成功后调用 done，并返回合法 JSON 字符串：
     {{"success": true, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": ""}}
 
 完整 HTML 长度：{html_length} 字符
@@ -102,6 +116,8 @@ async (htmlContent) => {{
 
 当前正文是 Markdown。优先使用系统已准备好的 HTML 富文本流程；如果运行时没有拿到富文本 HTML，再把正文作为普通文本处理。
 
+{self._agent_recovery_rules()}
+
 1. 打开头条号后台：{self.home_url}
 2. 确认当前账号已登录，并读取账号显示名记为 account_name。
 3. 打开文章发布页：{self.publish_url}
@@ -110,7 +126,7 @@ async (htmlContent) => {{
 6. {cover_instruction.strip()}
 7. 完成分类等必填项。
 8. 点击“预览并发布”，再点击“确认发布”。
-9. 调用 done，返回合法 JSON 字符串：
+9. 点击“确认发布”后不要立即假定成功；等待并确认出现明确成功证据。确认成功后调用 done，返回合法 JSON 字符串：
    {{"success": true, "account_name": "步骤2读到的账号名", "article_url": "", "failure_reason": ""}}
 
 正文长度：{content_length} 字符
@@ -119,6 +135,8 @@ async (htmlContent) => {{
 
     def _plain_text_prompt(self, title: str, content: str, cover_instruction: str) -> str:
         return f"""你在头条号后台操作。请按顺序发布文章：
+
+{self._agent_recovery_rules()}
 
 1. 打开 {self.home_url}
 2. 确认已登录，并读取账号显示名记为 account_name。
@@ -131,6 +149,6 @@ async (htmlContent) => {{
 6. {cover_instruction.strip()}
 7. 完成分类等必填项。
 8. 点击“预览并发布”，再点击“确认发布”。
-9. 调用 done，返回合法 JSON 字符串：
+9. 点击“确认发布”后不要立即假定成功；等待并确认出现明确成功证据。确认成功后调用 done，返回合法 JSON 字符串：
    {{"success": true, "account_name": "步骤2读到的账号名", "article_url": "", "failure_reason": ""}}
 """
