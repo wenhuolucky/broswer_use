@@ -36,7 +36,7 @@ class AutoPublishResponse(BaseModel):
     job_id: str
     status: str
     message: str = ""
-    login_url: str = ""
+    live_url: str = ""
     log_file_path: str = ""
     result: dict[str, Any] = Field(default_factory=dict)
 

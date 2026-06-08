@@ -97,7 +97,7 @@ class RemoteLoginRunner:
             await self._on_cookie_ready(session_id, cookies)
         return True
 
-    async def save_session_cookies(self, session_id: str) -> list[dict]:
+    async def save_session_cookies(self, session_id: str, notify: bool = True) -> list[dict]:
         session = self._sessions[session_id]
         if session.status == "completed":
             return []
@@ -105,7 +105,12 @@ class RemoteLoginRunner:
         if not _has_platform_cookie(session.platform, cookies):
             session.status = "failed"
             raise RuntimeError("remote cookie invalid")
-        await self.complete_with_cookies(session_id, cookies)
+        if notify:
+            await self.complete_with_cookies(session_id, cookies)
+        else:
+            if self._save_cookie:
+                self._save_cookie(session.platform, session.user_id, cookies)
+            session.status = "completed"
         await self.cleanup(session_id)
         return cookies
 

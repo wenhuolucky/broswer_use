@@ -82,6 +82,7 @@ class PublishAgent:
             "任务创建成功，需要用户登录",
             login_url=current_job.login_url if current_job else "",
             remote_session_id=current_job.remote_session_id if current_job else "",
+            live_url=current_job.live_url if current_job else "",
             log_file_path=current_job.log_file_path if current_job else str(log_path),
         )
 
@@ -111,6 +112,7 @@ class PublishAgent:
             "登录任务创建成功，需要用户登录",
             login_url=current_job.login_url if current_job else "",
             remote_session_id=current_job.remote_session_id if current_job else "",
+            live_url=current_job.live_url if current_job else "",
             log_file_path=current_job.log_file_path if current_job else str(log_path),
         )
 
@@ -146,9 +148,8 @@ class PublishAgent:
             "job_id": job_id,
             "task_status": task_status,
             "query_url": f"/api/v1/publish/jobs/{job_id}",
-            "login_url": login_url,
             "remote_session_id": remote_session_id,
-            "live_url": live_url,
+            "live_url": live_url or login_url,
             "log_file_path": log_file_path,
         }
         if reason:
@@ -192,6 +193,7 @@ class PublishAgent:
             job_id,
             status=STATUS_WAITING_COOKIE,
             login_url=session.login_url,
+            live_url=session.login_url,
             remote_session_id=session.session_id,
         )
         logger.info(
@@ -204,8 +206,8 @@ class PublishAgent:
             code=202,
             job_id=job_id,
             status=STATUS_WAITING_COOKIE,
-            message="请打开 login_url 完成登录，登录成功后系统可继续发文",
-            login_url=session.login_url,
+            message="请打开 live_url 完成登录，登录成功后系统可继续发文",
+            live_url=session.login_url,
             log_file_path=log_file_path,
         )
 
@@ -213,7 +215,7 @@ class PublishAgent:
         logger, _ = setup_job_logger(job_id, self.log_dir)
         job = self.job_store.get(job_id)
         log_file_path = job.log_file_path if job else ""
-        self.job_store.update(job_id, status=STATUS_PUBLISHING)
+        self.job_store.update(job_id, status=STATUS_PUBLISHING, live_url="")
         logger.info("开始调用自动化发文服务")
         cookie = self.cookie_store.load_storage_state_text(request.platform, request.user_id)
 
@@ -315,7 +317,19 @@ class PublishAgent:
                 result=result,
             )
 
-        return await self._publish_with_cookie(job_id, request)
+        self.job_store.update(job_id, status=STATUS_PUBLISHING, live_url="", error="")
+        self._schedule_publish(job_id, request)
+        return AutoPublishResponse(
+            code=200,
+            job_id=job_id,
+            status=STATUS_PUBLISHING,
+            message="Cookie 保存成功，发文任务已继续后台执行",
+            log_file_path=job.log_file_path,
+            result={
+                "cookie_count": len(cookies),
+                "query_url": f"/api/v1/publish/jobs/{job_id}",
+            },
+        )
 
     async def save_remote_cookie(self, job_id: str) -> AutoPublishResponse:
         job = self.job_store.get(job_id)
@@ -324,7 +338,7 @@ class PublishAgent:
 
         logger, _ = setup_job_logger(job_id, self.log_dir)
         if job.status in {STATUS_PUBLISHING, STATUS_SUCCEEDED}:
-            logger.info("手动保存 Cookie 跳过：job 已经进入发布流程 status=%s", job.status)
+            logger.info("Manual cookie save skipped because job already moved on status=%s", job.status)
             return AutoPublishResponse(
                 code=409,
                 job_id=job_id,
@@ -333,7 +347,7 @@ class PublishAgent:
                 log_file_path=job.log_file_path,
             )
         if not job.remote_session_id:
-            logger.warning("手动保存 Cookie 失败：job 没有关联远程登录 session")
+            logger.warning("Manual cookie save failed because job has no remote session")
             return AutoPublishResponse(
                 code=409,
                 job_id=job_id,
@@ -342,7 +356,7 @@ class PublishAgent:
                 log_file_path=job.log_file_path,
             )
         if self.remote_runner is None:
-            logger.warning("手动保存 Cookie 失败：远程登录 runner 不存在")
+            logger.warning("Manual cookie save failed because remote runner is unavailable")
             return AutoPublishResponse(
                 code=409,
                 job_id=job_id,
@@ -351,11 +365,11 @@ class PublishAgent:
                 log_file_path=job.log_file_path,
             )
 
-        logger.info("收到手动保存 Cookie 请求 remote_session_id=%s", job.remote_session_id)
+        logger.info("Received manual cookie save request remote_session_id=%s", job.remote_session_id)
         try:
-            cookies = await self.remote_runner.save_session_cookies(job.remote_session_id)
+            cookies = await self.remote_runner.save_session_cookies(job.remote_session_id, notify=False)
         except KeyError:
-            logger.exception("手动保存 Cookie 失败：远程登录 session 不存在")
+            logger.exception("Manual cookie save failed because remote session does not exist")
             return AutoPublishResponse(
                 code=404,
                 job_id=job_id,
@@ -364,7 +378,7 @@ class PublishAgent:
                 log_file_path=job.log_file_path,
             )
         except Exception as exc:
-            logger.exception("手动保存 Cookie 失败: %s", exc)
+            logger.exception("Manual cookie save failed: %s", exc)
             self.job_store.update(job_id, status=STATUS_FAILED, error=str(exc))
             return AutoPublishResponse(
                 code=500,
@@ -376,7 +390,7 @@ class PublishAgent:
 
         current_job = self.job_store.get(job_id)
         if not cookies:
-            logger.info("手动保存 Cookie 跳过：session 已完成")
+            logger.info("Manual cookie save skipped because session is already completed")
             return AutoPublishResponse(
                 code=409,
                 job_id=job_id,
@@ -384,17 +398,16 @@ class PublishAgent:
                 message="cookie already saved",
                 log_file_path=job.log_file_path,
             )
-        logger.info("手动保存 Cookie 成功 cookie_count=%s", len(cookies))
+
+        resume_response = await self.resume_after_cookie(job_id, cookies)
+        logger.info("Manual cookie save succeeded cookie_count=%s", len(cookies))
         return AutoPublishResponse(
             code=200,
             job_id=job_id,
-            status=current_job.status if current_job else job.status,
-            message="Cookie 保存成功，发布任务已继续执行",
-            log_file_path=current_job.log_file_path if current_job else job.log_file_path,
-            result={
-                "cookie_count": len(cookies),
-                "query_url": f"/api/v1/publish/jobs/{job_id}",
-            },
+            status=resume_response.status,
+            message=resume_response.message,
+            log_file_path=resume_response.log_file_path,
+            result=resume_response.result,
         )
 
     async def _resume_for_remote_session(self, session_id: str, cookies: list[dict]) -> None:
