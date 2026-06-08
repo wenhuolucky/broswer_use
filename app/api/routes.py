@@ -85,6 +85,7 @@ def _format_job_response(job):
             task_status="running",
             message="发布任务正在后台执行",
             job_id=job.job_id,
+            extra_data={"live_url": job.live_url},
         )
     if status == STATUS_WAITING_COOKIE:
         return _job_response(
@@ -92,7 +93,7 @@ def _format_job_response(job):
             task_status="login_required",
             message="需要用户登录或 Cookie 已失效",
             job_id=job.job_id,
-            extra_data={"login_url": job.login_url},
+            extra_data={"login_url": job.login_url, "live_url": job.live_url},
         )
     if status == STATUS_SUCCEEDED:
         if (job.payload or {}).get("job_type") == "login_only":
@@ -107,9 +108,11 @@ def _format_job_response(job):
                     "user_id": str(payload.get("user_id", "") or ""),
                     "platform": str(payload.get("platform", "") or ""),
                     "cookie_ready": bool(result.get("cookie_ready", False)),
+                    "live_url": job.live_url,
                 },
             )
         data = _published_job_data(job)
+        data["live_url"] = job.live_url
         article_url = data["article_url"]
         return _job_response(
             code=200,
@@ -124,6 +127,7 @@ def _format_job_response(job):
             task_status="expired",
             message="浏览器 session 已过期",
             job_id=job.job_id,
+            extra_data={"live_url": job.live_url},
         )
     if status == "closed":
         return _job_response(
@@ -138,7 +142,7 @@ def _format_job_response(job):
         task_status="failed",
         message="发布失败",
         job_id=job.job_id,
-        extra_data={"reason": reason},
+        extra_data={"reason": reason, "live_url": job.live_url},
     )
 
 

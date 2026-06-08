@@ -23,6 +23,7 @@ class PublishServiceAdapter:
         request_id: str,
         cover_image_url: str | None = None,
         cover_image_path: str | None = None,
+        on_live_url_ready=None,
     ) -> dict:
         return await self._publisher().publish(
             title=title,
@@ -31,4 +32,5 @@ class PublishServiceAdapter:
             request_id=request_id,
             cover_image_path=cover_image_path,
             cover_image_url=cover_image_url,
+            on_live_url_ready=on_live_url_ready,
         )

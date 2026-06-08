@@ -13,7 +13,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -92,6 +92,7 @@ class PublishService:
         request_id: str,
         cover_image_path: Optional[str] = None,
         cover_image_url: Optional[str] = None,
+        on_live_url_ready: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict:
         """Execute article publish."""
         logger = setup_request_logger(request_id)
@@ -207,6 +208,10 @@ class PublishService:
         session = None
         playwright = None
         temp_profile = None
+        viewer_runner = None
+        viewer_playwright = None
+        viewer_browser = None
+        tunnel_proc = None
         try:
             logger.info("[Step 6] 正在启动浏览器...")
             browser_start = asyncio.get_event_loop().time()
@@ -221,6 +226,21 @@ class PublishService:
 
             session = BrowserSession(cdp_url=get_cdp_url(EDGE_CDP_PORT))
             await session.connect()
+            if on_live_url_ready:
+                try:
+                    from app.remote.login import _find_free_port, _start_cloudflared_tunnel, _stop_process
+                    from app.remote.viewer import run_viewer_server
+
+                    viewer_port = _find_free_port()
+                    viewer_runner, viewer_playwright, viewer_browser, _viewer_cdp, _viewer_page = await run_viewer_server(
+                        EDGE_CDP_PORT,
+                        viewer_port,
+                    )
+                    tunnel_proc, live_url = await _start_cloudflared_tunnel(viewer_port)
+                    await on_live_url_ready(live_url)
+                    logger.info("[LiveViewer] 发布实时查看链接已启动: %s", live_url)
+                except Exception as exc:
+                    logger.warning("[LiveViewer] 发布实时查看链接启动失败: %s", exc, exc_info=True)
             browser_elapsed = asyncio.get_event_loop().time() - browser_start
             logger.info(f"[Step 6] 浏览器启动完成，耗时 {browser_elapsed:.2f}s")
 
@@ -246,6 +266,28 @@ class PublishService:
             if session:
                 await session.close()
                 logger.info("[Cleanup] BrowserSession 已关闭")
+            if viewer_runner:
+                try:
+                    await viewer_runner.cleanup()
+                    logger.info("[Cleanup] Live viewer 已关闭")
+                except Exception:
+                    pass
+            if viewer_browser:
+                try:
+                    await viewer_browser.close()
+                except Exception:
+                    pass
+            if viewer_playwright:
+                try:
+                    await viewer_playwright.stop()
+                except Exception:
+                    pass
+            if tunnel_proc and tunnel_proc.poll() is None:
+                try:
+                    _stop_process(tunnel_proc)
+                    logger.info("[Cleanup] Live tunnel 已关闭")
+                except Exception:
+                    pass
             if playwright:
                 await playwright.stop()
                 logger.info("[Cleanup] Playwright 已停止")
@@ -1277,4 +1319,3 @@ class PublishService:
         logger.info("=" * 60)
 
         return result
-

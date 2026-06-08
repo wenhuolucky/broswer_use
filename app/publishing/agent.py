@@ -138,6 +138,7 @@ class PublishAgent:
         code: int = 200,
         login_url: str = "",
         remote_session_id: str = "",
+        live_url: str = "",
         log_file_path: str = "",
         reason: str = "",
     ) -> AutoTaskCreateResponse:
@@ -147,6 +148,7 @@ class PublishAgent:
             "query_url": f"/api/v1/publish/jobs/{job_id}",
             "login_url": login_url,
             "remote_session_id": remote_session_id,
+            "live_url": live_url,
             "log_file_path": log_file_path,
         }
         if reason:
@@ -214,6 +216,11 @@ class PublishAgent:
         self.job_store.update(job_id, status=STATUS_PUBLISHING)
         logger.info("开始调用自动化发文服务")
         cookie = self.cookie_store.load_storage_state_text(request.platform, request.user_id)
+
+        async def on_live_url_ready(live_url: str) -> None:
+            self.job_store.update(job_id, live_url=live_url)
+            logger.info("发布实时查看链接已生成 live_url=%s", live_url)
+
         try:
             result = await self.publish_adapter.publish(
                 title=request.title,
@@ -221,6 +228,7 @@ class PublishAgent:
                 cookie=cookie,
                 request_id=job_id,
                 cover_image_url=request.cover_image_url,
+                on_live_url_ready=on_live_url_ready,
             )
         except Exception as exc:
             logger.exception("自动化发文服务异常: %s", exc)

@@ -56,6 +56,7 @@ class Job:
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     login_url: str = ""
     remote_session_id: str = ""
+    live_url: str = ""
     log_file_path: str = ""
     result: dict[str, Any] = field(default_factory=dict)
     error: str = ""
