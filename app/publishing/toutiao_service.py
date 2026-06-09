@@ -9,8 +9,12 @@ from app.publishing.service import PublishService
 class AutoToutiaoPublishService(PublishService):
     """Auto-layer Toutiao publish service overrides URL lookup only."""
 
-    article_lookup_attempts = 6
+    article_lookup_attempts = 3
     article_lookup_retry_delay_seconds = 5
+
+    def __init__(self):
+        super().__init__()
+        self._url_lookup_retry_delays = (0,)
 
     async def _open_latest_article_from_articles_page(self, session, title: str, logger) -> dict:
         page = await session.get_current_page()
