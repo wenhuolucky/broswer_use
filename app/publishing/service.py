@@ -22,6 +22,7 @@ if sys.platform == "win32":
 from app.core.runtime import EDGE_CDP_PORT, USER_DATA_DIR
 from app.cookies.normalize import normalize_cookie_list
 from app.core.request_logging import get_service_logger, setup_request_logger
+from app.utils.urls import normalize_toutiao_article_url
 
 
 class LLMTokenTracker:
@@ -981,6 +982,9 @@ class PublishService:
                         logger.warning("无法将最终结果解析为 JSON")
                     if history.is_successful():
                         result["success"] = True
+                    fallback_url = self._extract_article_url_from_text(str(final))
+                    if fallback_url:
+                        result["article_url"] = fallback_url
 
             if history.is_successful():
                 if logger:
@@ -1008,6 +1012,28 @@ class PublishService:
             result["failure_reason"] = detected_failure.get("matched_text", "") or detected_failure.get("signal", "")
 
         return result
+
+    def _extract_article_url_from_text(self, text: str) -> str:
+        urls = re.findall(r"https?://[^\s<>\"'，。；、)）\]]+", text or "")
+        for url in urls:
+            cleaned_url = url.rstrip(".,;:!?")
+            if self._looks_like_toutiao_article_url(cleaned_url):
+                return normalize_toutiao_article_url(cleaned_url)
+        return ""
+
+    @staticmethod
+    def _looks_like_toutiao_article_url(url: str) -> bool:
+        return bool(
+            url
+            and (
+                "toutiao.com/item/" in url
+                or "toutiao.com/article/" in url
+                or (
+                    "mp.toutiao.com/profile_v4/graphic/preview" in url
+                    and "pgc_id=" in url
+                )
+            )
+        )
 
     def _is_markdown_content(self, content: str) -> bool:
         indicators = [

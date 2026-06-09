@@ -36,6 +36,7 @@ class ToutiaoPlatform(PlatformConfig):
 - 必须调用工具 `get_published_article_url`，参数 title="{title}"。
 - 该工具会在内部最多查询 3 次作品列表。
 - 如果工具返回 found=true，必须用工具返回的 article_url 调用 done，并返回 success=true。
+- found=true 时 article_url 不允许为空，必须原样填写工具返回的 article_url。
 - 如果工具返回 found=false，必须用工具返回的 reason 调用 done，并返回 success=false。
 - 不要在工具返回 found=false 后继续反复查询。
 """
@@ -111,8 +112,8 @@ async (htmlContent) => {{
 13. {cover_instruction.strip()}
 14. 检查分类等必填项。
 15. 点击“预览并发布”，再点击“确认发布”。
-16. 点击“确认发布”后不要立即假定成功；等待并确认出现明确成功证据。确认成功后调用 done，并返回合法 JSON 字符串：
-    {{"success": true, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": ""}}
+16. 点击“确认发布”后不要立即假定成功；等待并确认出现明确成功证据。确认成功后调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
+    {{"success": true, "account_name": "步骤3读到的账号名", "article_url": "工具返回的 article_url", "failure_reason": ""}}
 
 完整 HTML 长度：{html_length} 字符
 
@@ -138,8 +139,8 @@ async (htmlContent) => {{
 6. {cover_instruction.strip()}
 7. 完成分类等必填项。
 8. 点击“预览并发布”，再点击“确认发布”。
-9. 点击“确认发布”后不要立即假定成功；等待并确认出现明确成功证据。确认成功后调用 done，返回合法 JSON 字符串：
-   {{"success": true, "account_name": "步骤2读到的账号名", "article_url": "", "failure_reason": ""}}
+9. 点击“确认发布”后不要立即假定成功；等待并确认出现明确成功证据。确认成功后调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
+   {{"success": true, "account_name": "步骤2读到的账号名", "article_url": "工具返回的 article_url", "failure_reason": ""}}
 
 正文长度：{content_length} 字符
 正文预览：{content_preview}
@@ -161,6 +162,6 @@ async (htmlContent) => {{
 6. {cover_instruction.strip()}
 7. 完成分类等必填项。
 8. 点击“预览并发布”，再点击“确认发布”。
-9. 点击“确认发布”后不要立即假定成功；等待并确认出现明确成功证据。确认成功后调用 done，返回合法 JSON 字符串：
-   {{"success": true, "account_name": "步骤2读到的账号名", "article_url": "", "failure_reason": ""}}
+9. 点击“确认发布”后不要立即假定成功；等待并确认出现明确成功证据。确认成功后调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
+   {{"success": true, "account_name": "步骤2读到的账号名", "article_url": "工具返回的 article_url", "failure_reason": ""}}
 """
