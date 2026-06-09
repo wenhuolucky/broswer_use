@@ -19,9 +19,10 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
-from app.core.runtime import EDGE_CDP_PORT, USER_DATA_DIR
+from app.core.runtime import USER_DATA_DIR
 from app.cookies.normalize import normalize_cookie_list
 from app.core.request_logging import get_service_logger, setup_request_logger
+from app.remote.login import _find_free_port
 from app.utils.urls import normalize_toutiao_article_url
 
 
@@ -59,6 +60,8 @@ class LLMTokenTracker:
 
 class PublishService:
     """Toutiao article publish service."""
+
+    _browser_launch_attempts = 3
 
     def __init__(self):
         self._service_logger = get_service_logger()
@@ -202,25 +205,29 @@ class PublishService:
         try:
             logger.info("[Step 6] 正在启动浏览器...")
             browser_start = asyncio.get_event_loop().time()
-            playwright, _, temp_profile = await self._launch_browser(
-                user_data_dir=USER_DATA_DIR,
-                cdp_port=EDGE_CDP_PORT,
+            playwright, _, temp_profile, publish_cdp_port = await self._launch_isolated_publish_browser(
                 auth_file=auth_file,
                 logger=logger,
             )
             from browser_use import BrowserSession
             from app.utils.browser import get_cdp_url
 
-            session = BrowserSession(cdp_url=get_cdp_url(EDGE_CDP_PORT))
+            logger.info("[BrowserSession] 连接发布浏览器 CDP: 127.0.0.1:%s", publish_cdp_port)
+            session = BrowserSession(cdp_url=get_cdp_url(publish_cdp_port))
             await session.connect()
             if on_live_url_ready:
                 try:
-                    from app.remote.login import _find_free_port, _start_cloudflared_tunnel, _stop_process
+                    from app.remote.login import _start_cloudflared_tunnel, _stop_process
                     from app.remote.viewer import run_viewer_server
 
                     viewer_port = _find_free_port()
+                    logger.info(
+                        "[LiveViewer] 绑定发布浏览器 CDP: %s viewer_port=%s",
+                        publish_cdp_port,
+                        viewer_port,
+                    )
                     viewer_runner, viewer_playwright, viewer_browser, _viewer_cdp, _viewer_page = await run_viewer_server(
-                        EDGE_CDP_PORT,
+                        publish_cdp_port,
                         viewer_port,
                     )
                     tunnel_proc, live_url = await _start_cloudflared_tunnel(viewer_port)
@@ -395,6 +402,50 @@ class PublishService:
             dont_force_structured_output=True,
             add_schema_to_system_prompt=True,
         )
+
+    async def _launch_isolated_publish_browser(self, auth_file, logger):
+        last_exc = None
+        for attempt in range(1, self._browser_launch_attempts + 1):
+            publish_cdp_port = _find_free_port()
+            logger.info(
+                "[Browser] 分配发布浏览器 CDP 端口 attempt=%s/%s cdp_port=%s",
+                attempt,
+                self._browser_launch_attempts,
+                publish_cdp_port,
+            )
+            try:
+                playwright, context, temp_profile = await self._launch_browser(
+                    user_data_dir=USER_DATA_DIR,
+                    cdp_port=publish_cdp_port,
+                    auth_file=auth_file,
+                    logger=logger,
+                )
+                return playwright, context, temp_profile, publish_cdp_port
+            except Exception as exc:
+                last_exc = exc
+                if not self._looks_like_port_conflict(exc) or attempt >= self._browser_launch_attempts:
+                    raise
+                logger.warning(
+                    "[Browser] 发布浏览器 CDP 端口可能被占用，准备重试 attempt=%s/%s cdp_port=%s error=%s",
+                    attempt,
+                    self._browser_launch_attempts,
+                    publish_cdp_port,
+                    exc,
+                )
+        raise last_exc or RuntimeError("发布浏览器启动失败")
+
+    @staticmethod
+    def _looks_like_port_conflict(exc: Exception) -> bool:
+        text = str(exc).lower()
+        markers = (
+            "address already in use",
+            "eaddrinuse",
+            "bind",
+            "port",
+            "cannot start http server",
+            "remote-debugging-port",
+        )
+        return any(marker in text for marker in markers)
 
     async def _launch_browser(self, user_data_dir, cdp_port, auth_file, logger):
         from app.utils.browser import get_browser_path
