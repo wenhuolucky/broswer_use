@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from logging import LoggerAdapter
 from pathlib import Path
 from typing import Awaitable, Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from app.core.config import REMOTE_PROFILE_DIR
 from app.remote.display_config import get_remote_browser_window_size
@@ -40,6 +40,11 @@ _remote_display_pool = DisplayPool(
     display_base=REMOTE_LOGIN_DISPLAY_BASE,
     port_base=REMOTE_LOGIN_KASMVNC_PORT_BASE,
 )
+
+REMOTE_LOGIN_ALLOWED_HOSTS = {
+    "toutiao": ("toutiao.com",),
+    "sohu": ("sohu.com",),
+}
 
 
 @dataclass
@@ -144,10 +149,12 @@ class RemoteLoginRunner:
                 screen=REMOTE_LOGIN_VNC_SCREEN,
                 www_dir=REMOTE_LOGIN_KASMVNC_WWW,
             )
-            chrome_proc = await _launch_chrome(cdp_port, session_id, display=slot.display)
             login_url = _login_url_for(platform)
+            chrome_proc = await _launch_chrome(cdp_port, session_id, display=slot.display, app_url=login_url)
             pw, browser, page = await _attach_browser(cdp_port, login_url)
+            _install_remote_navigation_guard(page, platform, login_url, self._logger(session_id))
             await page.goto(login_url, timeout=30000, wait_until="domcontentloaded")
+            await _enforce_remote_navigation_guard(page, platform, login_url, self._logger(session_id))
             tunnel_proc, tunnel_base_url = await _start_cloudflared_tunnel(REMOTE_LOGIN_SERVICE_PORT)
             return RemoteLoginSession(
                 session_id=session_id,
@@ -310,7 +317,12 @@ def _find_cloudflared_path() -> str:
     raise RuntimeError("未找到 cloudflared，请先安装 Cloudflare.cloudflared")
 
 
-async def _launch_chrome(cdp_port: int, session_id: str, display: str | None = None) -> subprocess.Popen:
+async def _launch_chrome(
+    cdp_port: int,
+    session_id: str,
+    display: str | None = None,
+    app_url: str = "about:blank",
+) -> subprocess.Popen:
     profile_dir = REMOTE_PROFILE_DIR / session_id
     if profile_dir.exists():
         shutil.rmtree(profile_dir, ignore_errors=True)
@@ -319,8 +331,33 @@ async def _launch_chrome(cdp_port: int, session_id: str, display: str | None = N
     env = os.environ.copy()
     if display:
         env["DISPLAY"] = display
-    args = [
-        _find_browser_path(),
+    args = _build_chrome_args(
+        browser_path=_find_browser_path(),
+        cdp_port=cdp_port,
+        profile_dir=profile_dir,
+        window_size=(window_width, window_height),
+        app_url=app_url,
+    )
+    proc = subprocess.Popen(
+        args,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    await _wait_for_cdp(cdp_port, proc)
+    return proc
+
+
+def _build_chrome_args(
+    browser_path: str,
+    cdp_port: int,
+    profile_dir: Path,
+    window_size: tuple[int, int],
+    app_url: str,
+) -> list[str]:
+    window_width, window_height = window_size
+    return [
+        browser_path,
         f"--remote-debugging-port={cdp_port}",
         f"--user-data-dir={profile_dir}",
         f"--window-size={window_width},{window_height}",
@@ -331,17 +368,8 @@ async def _launch_chrome(cdp_port: int, session_id: str, display: str | None = N
         "--no-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
-        "--new-window",
-        "about:blank",
+        f"--app={app_url}",
     ]
-    proc = subprocess.Popen(
-        args,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=env,
-    )
-    await _wait_for_cdp(cdp_port, proc)
-    return proc
 
 
 async def _attach_browser(cdp_port: int, login_url: str):
@@ -359,6 +387,46 @@ async def _attach_browser(cdp_port: int, login_url: str):
     except Exception:
         await pw.stop()
         raise
+
+
+def _install_remote_navigation_guard(page, platform: str, login_url: str, logger) -> None:
+    def on_frame_navigated(frame):
+        if getattr(frame, "parent_frame", None):
+            return
+        try:
+            asyncio.create_task(_enforce_remote_navigation_guard(page, platform, login_url, logger))
+        except RuntimeError:
+            pass
+
+    try:
+        page.on("framenavigated", on_frame_navigated)
+    except Exception as exc:
+        if logger:
+            logger.warning("远程登录 URL 守卫安装失败: %s", exc)
+
+
+async def _enforce_remote_navigation_guard(page, platform: str, login_url: str, logger) -> None:
+    current_url = str(getattr(page, "url", "") or "")
+    if _is_remote_login_url_allowed(platform, current_url):
+        return
+    if logger:
+        logger.warning("远程登录 URL 被拦截 platform=%s url=%s", platform, current_url)
+    await page.goto(login_url, timeout=30000, wait_until="domcontentloaded")
+
+
+def _is_remote_login_url_allowed(platform: str, url: str) -> bool:
+    if not url:
+        return True
+    if url.startswith(("about:", "chrome:", "devtools:")):
+        return True
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return True
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    allowed_hosts = REMOTE_LOGIN_ALLOWED_HOSTS.get(platform, ())
+    return any(host == allowed_host or host.endswith(f".{allowed_host}") for allowed_host in allowed_hosts)
 
 
 async def _start_cloudflared_tunnel(local_port: int) -> tuple[subprocess.Popen, str]:
