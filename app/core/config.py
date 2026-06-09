@@ -24,8 +24,6 @@ LOG_DIR = _project_path(os.getenv("APP_LOG_DIR"), PROJECT_ROOT / "logs")
 REMOTE_PROFILE_DIR = _project_path(os.getenv("APP_REMOTE_PROFILE_DIR"), DATA_DIR / "remote_profiles")
 
 DEFAULT_PLATFORM = "toutiao"
-REMOTE_LOGIN_TIMEOUT_SECONDS = int(os.getenv("REMOTE_LOGIN_TIMEOUT_SECONDS", "600"))
-
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 REDIS_KEY_PREFIX = os.getenv("REDIS_KEY_PREFIX", "browser_use:publish").strip() or "browser_use:publish"
 REDIS_JOB_TTL_SECONDS = int(os.getenv("REDIS_JOB_TTL_SECONDS", "86400"))

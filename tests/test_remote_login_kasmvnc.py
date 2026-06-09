@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from pathlib import Path
 
 
@@ -81,7 +82,7 @@ def test_remote_login_runner_starts_kasmvnc_cloudflared_session(monkeypatch, tmp
     monkeypatch.setattr(login, "_stop_process", lambda proc: events.append("tunnel_stop"))
     monkeypatch.setattr(login.uuid, "uuid4", lambda: "session-1")
 
-    runner = login.RemoteLoginRunner(timeout_seconds=1)
+    runner = login.RemoteLoginRunner()
 
     async def run():
         session = await runner.start("toutiao", "user1")
@@ -168,3 +169,18 @@ def test_remote_login_config_defaults_are_kasmvnc_cloudflared():
     assert login.REMOTE_LOGIN_KASMVNC_PORT_BASE == 6900
     assert login.REMOTE_LOGIN_KASMVNC_BIN == "Xvnc"
     assert login.REMOTE_LOGIN_VNC_SCREEN == "1440x900x24"
+
+
+def test_remote_login_module_no_longer_exposes_legacy_viewer_path():
+    import app.remote.login as login
+
+    assert not hasattr(login.RemoteLoginRunner, "_start_legacy_session")
+    assert not hasattr(login.RemoteLoginRunner, "_watch_login")
+    assert not hasattr(login, "_extract_cookies")
+    assert "viewer_runner" not in login.RemoteLoginSession.__dataclass_fields__
+    assert "login_event" not in login.RemoteLoginSession.__dataclass_fields__
+    assert "disconnect_event" not in login.RemoteLoginSession.__dataclass_fields__
+    params = inspect.signature(login.RemoteLoginRunner).parameters
+    assert "cookie_extractor" not in params
+    assert "poll_interval_seconds" not in params
+    assert "timeout_seconds" not in params
