@@ -34,7 +34,7 @@ RUN apt-get update \
         fonts-noto-color-emoji \
         libnss3 \
         libxss1 \
-        libasound2 \
+        libasound2t64 \
         libgbm1 \
         libxrandr2 \
         libxdamage1 \
