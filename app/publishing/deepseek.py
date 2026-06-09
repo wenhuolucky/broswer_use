@@ -68,7 +68,7 @@ def parse_structured_completion(response: ChatCompletion | Any, output_format: t
 
 
 @dataclass
-class DeepSeekChatOpenAILike(ChatOpenAI):
+class OpenAICompatibleChat(ChatOpenAI):
     @overload
     async def ainvoke(
         self, messages: list[BaseMessage], output_format: None = None, **kwargs: Any
@@ -148,3 +148,6 @@ class DeepSeekChatOpenAILike(ChatOpenAI):
             model_params.pop("frequency_penalty", None)
 
         return model_params
+
+
+DeepSeekChatOpenAILike = OpenAICompatibleChat

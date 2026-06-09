@@ -390,14 +390,24 @@ class PublishService:
     def _get_browser_llm(self):
         import os
 
-        from app.publishing.deepseek import DeepSeekChatOpenAILike
+        from app.publishing.deepseek import OpenAICompatibleChat
 
-        api_key = os.getenv("DEEPSEEK_API_KEY")
+        api_key = os.getenv("LLM_API_KEY", "").strip()
+        base_url = os.getenv("LLM_BASE_URL", "http://47.242.205.13:8110/v1").strip()
+        model = os.getenv("LLM_MODEL", "Qwen/Qwen3.5-397B-A17B").strip()
+
         if not api_key:
-            raise RuntimeError("DEEPSEEK_API_KEY is not set")
-        return DeepSeekChatOpenAILike(
-            model="deepseek-chat",
-            base_url="https://api.deepseek.com/v1",
+            api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+            if api_key:
+                base_url = "https://api.deepseek.com/v1"
+                model = "deepseek-chat"
+
+        if not api_key:
+            raise RuntimeError("LLM_API_KEY is not set")
+
+        return OpenAICompatibleChat(
+            model=model,
+            base_url=base_url,
             api_key=api_key,
             dont_force_structured_output=True,
             add_schema_to_system_prompt=True,

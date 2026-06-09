@@ -1,6 +1,6 @@
 # Browser Publish Service
 
-基于 FastAPI、Playwright、browser-use 和 DeepSeek 的自动发文服务。调用方提交发文任务后，服务会按 `user_id` 查找 Cookie；如果 Cookie 不存在或失效，会返回远程登录链接，用户登录后可调用保存 Cookie 接口继续原发文任务。
+基于 FastAPI、Playwright、browser-use 和 OpenAI-compatible LLM（默认 Qwen）的自动发文服务。调用方提交发文任务后，服务会按 `user_id` 查找 Cookie；如果 Cookie 不存在或失效，会返回远程登录链接，用户登录后可调用保存 Cookie 接口继续原发文任务。
 
 ## 目录结构
 
@@ -35,7 +35,9 @@ cp .env.example .env
 至少配置：
 
 ```text
-DEEPSEEK_API_KEY=your_key
+LLM_API_KEY=your_qwen_key
+LLM_BASE_URL=http://47.242.205.13:8110/v1
+LLM_MODEL=Qwen/Qwen3.5-397B-A17B
 ```
 
 ## Docker 启动
