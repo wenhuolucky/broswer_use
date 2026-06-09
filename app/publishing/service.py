@@ -722,41 +722,8 @@ class PublishService:
                 logger.warning(f"[PublishGuard] detect_publish_failure failed: {exc}")
             return {"failed": False, "signal": "", "page_url": "", "matched_text": ""}
 
-    async def _get_page_body_text(self, page) -> str:
-        return await page.evaluate(
-            """() => {
-                const bodyText = document.body ? (document.body.innerText || "") : "";
-                return bodyText.slice(0, 10000);
-            }"""
-        )
-
     async def _reload_page(self, page, logger) -> None:
         await page.evaluate("() => window.location.reload()")
-        await asyncio.sleep(2)
-
-    async def _lookup_article_link(self, page, title: str) -> dict | None:
-        return await page.evaluate(
-            """(articleTitle) => {
-                const anchors = Array.from(document.querySelectorAll('a[href]'));
-                for (const anchor of anchors) {
-                    const text = (anchor.innerText || anchor.textContent || '').trim();
-                    const href = anchor.href || '';
-                    if (text.includes(articleTitle) && href) {
-                        return { href, clicked: false };
-                    }
-                }
-                return null;
-            }""",
-            title,
-        )
-
-    async def _navigate_page(self, page, url: str) -> None:
-        await page.evaluate(
-            """(targetUrl) => {
-                window.location.href = targetUrl;
-            }""",
-            url,
-        )
         await asyncio.sleep(2)
 
     async def _open_latest_article_from_articles_page(self, session, title: str, logger) -> dict:
@@ -966,108 +933,6 @@ class PublishService:
             "attempts": len(self._url_lookup_retry_delays),
             "reason": last_reason,
         }
-
-    async def _try_find_article_url_fallback(self, session, title: str, logger) -> str:
-        """Fallback: find article on list page with relaxed matching."""
-        try:
-            page = await session.get_current_page()
-            if page is None:
-                return ""
-
-            articles_url = "https://mp.toutiao.com/profile_v4/graphic/articles"
-            # 用 page.goto 强制完整加载
-            await page.goto(articles_url)
-            await asyncio.sleep(3)
-
-            # 同样等待 SPA 渲染
-            if logger:
-                logger.info("[PublishGuard] fallback: waiting for SPA to render...")
-            for i in range(15):
-                count = await page.evaluate("() => document.querySelectorAll('.article-card-bone').length")
-                if isinstance(count, int) and count > 0:
-                    if logger:
-                        logger.info(f"[PublishGuard] fallback: SPA rendered {count} cards")
-                    break
-                await asyncio.sleep(1)
-            else:
-                if logger:
-                    logger.warning("[PublishGuard] fallback: SPA did not render within 15s")
-
-            # 收集所有 /item/ 链接（三层优先级）
-            all_items = await page.evaluate(
-                """() => {
-                    const items = [];
-                    // 1. 精准选择器
-                    const titleLinks = document.querySelectorAll('.article-card-bone .title-wrap .title[href]');
-                    for (const a of titleLinks) {
-                        const href = a.href || '';
-                        const text = (a.innerText || a.textContent || '').trim();
-                        if (href && text) items.push({ href, text });
-                    }
-                    if (items.length) return items;
-                    // 2. 次选
-                    const generic = document.querySelectorAll('.title[href]');
-                    for (const a of generic) {
-                        const href = a.href || '';
-                        const text = (a.innerText || a.textContent || '').trim();
-                        if (href && text) items.push({ href, text });
-                    }
-                    if (items.length) return items;
-                    // 3. 兜底：所有含 /item/ 的链接
-                    const anchors = Array.from(document.querySelectorAll('a[href]'));
-                    for (const a of anchors) {
-                        const href = a.href || '';
-                        const text = (a.innerText || a.textContent || '').trim();
-                        if (href.includes('/item/') && text) items.push({ href, text });
-                    }
-                    return items;
-                }"""
-            )
-
-            if not isinstance(all_items, list) or not all_items:
-                if logger:
-                    logger.warning("[PublishGuard] fallback: no /item/ links found on articles page")
-                return ""
-
-            normalized_title = (title or "").strip()
-
-            # 先尝试精确匹配
-            for item in all_items:
-                if isinstance(item, dict) and item.get("text", "").strip() == normalized_title:
-                    return item.get("href", "")
-
-            # 再尝试宽松匹配（双向子串包含）
-            for item in all_items:
-                if not isinstance(item, dict):
-                    continue
-                item_text = item.get("text", "").strip()
-                if not item_text:
-                    continue
-                if normalized_title in item_text or item_text in normalized_title:
-                    href = item.get("href", "")
-                    if logger:
-                        logger.info(
-                            f"[PublishGuard] fallback: fuzzy matched title='{normalized_title}' "
-                            f"vs found='{item_text}' → {href}"
-                        )
-                    return href
-
-            # 最后取第一个（最新发布的通常在最前面）
-            first = all_items[0] if all_items else {}
-            first_href = str(first.get("href", "")) if isinstance(first, dict) else ""
-            if first_href:
-                if logger:
-                    logger.info(
-                        f"[PublishGuard] fallback: no title match, using first item: "
-                        f"text='{first.get('text', '')}' → {first_href}"
-                    )
-                return first_href
-
-            return ""
-        except Exception as exc:
-            if logger:
-                logger.warning(f"[PublishGuard] fallback article lookup failed: {exc}")
-            return ""
 
     def _detect_publish_failure_from_state(self, page_url: str, page_text: str) -> dict:
         normalized_url = page_url or ""
