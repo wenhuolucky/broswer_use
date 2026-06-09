@@ -15,14 +15,31 @@ from dataclasses import dataclass
 from logging import LoggerAdapter
 from pathlib import Path
 from typing import Awaitable, Callable
+from urllib.parse import quote
 
 from app.core.config import REMOTE_LOGIN_TIMEOUT_SECONDS, REMOTE_PROFILE_DIR
 from app.remote.display_config import get_remote_browser_window_size
+from app.streaming import kasmvnc
+from app.streaming.display_pool import DisplayPool, Slot
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TOOLS_DIR = PROJECT_ROOT / "tools"
 if TOOLS_DIR.exists() and str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
+
+REMOTE_LOGIN_SERVICE_PORT = int(os.getenv("REMOTE_LOGIN_SERVICE_PORT", os.getenv("PORT", "19000")))
+REMOTE_LOGIN_MAX_SESSIONS = int(os.getenv("MAX_REMOTE_LOGIN_SESSIONS", "4"))
+REMOTE_LOGIN_DISPLAY_BASE = int(os.getenv("DISPLAY_BASE", "100"))
+REMOTE_LOGIN_KASMVNC_PORT_BASE = int(os.getenv("KASMVNC_PORT_BASE", "6900"))
+REMOTE_LOGIN_KASMVNC_BIN = os.getenv("KASMVNC_BIN", "Xvnc")
+REMOTE_LOGIN_KASMVNC_WWW = os.getenv("KASMVNC_WWW", "")
+REMOTE_LOGIN_VNC_SCREEN = os.getenv("REMOTE_VNC_SCREEN", "1440x900x24")
+
+_remote_display_pool = DisplayPool(
+    size=REMOTE_LOGIN_MAX_SESSIONS,
+    display_base=REMOTE_LOGIN_DISPLAY_BASE,
+    port_base=REMOTE_LOGIN_KASMVNC_PORT_BASE,
+)
 
 
 @dataclass
@@ -39,6 +56,9 @@ class RemoteLoginSession:
     viewer_runner: object | None = None
     playwright: object | None = None
     browser: object | None = None
+    stream: object | None = None
+    slot: Slot | None = None
+    vnc_token: str = ""
     login_event: asyncio.Event | None = None
     disconnect_event: asyncio.Event | None = None
     task: asyncio.Task | None = None
@@ -81,7 +101,6 @@ class RemoteLoginRunner:
 
         session = await self._start_real_session(platform, user_id, session_id)
         self._sessions[session_id] = session
-        session.task = asyncio.create_task(self._watch_login(session))
         return session
 
     def get(self, session_id: str) -> RemoteLoginSession | None:
@@ -102,7 +121,7 @@ class RemoteLoginRunner:
         session = self._sessions[session_id]
         if session.status == "completed":
             return []
-        cookies = await self._cookie_extractor(session.cdp_port)
+        cookies = await self._extract_session_cookies(session)
         if not _has_platform_cookie(session.platform, cookies):
             session.status = "failed"
             raise RuntimeError("remote cookie invalid")
@@ -115,7 +134,70 @@ class RemoteLoginRunner:
         await self.cleanup(session_id)
         return cookies
 
+    async def _extract_session_cookies(self, session: RemoteLoginSession) -> list[dict]:
+        if session.browser and getattr(session.browser, "contexts", None):
+            return await session.browser.contexts[0].cookies()
+        return await self._cookie_extractor(session.cdp_port)
+
     async def _start_real_session(self, platform: str, user_id: str, session_id: str) -> RemoteLoginSession:
+        slot = await _remote_display_pool.acquire()
+        stream = None
+        chrome_proc = None
+        tunnel_proc = None
+        pw = None
+        browser = None
+        try:
+            cdp_port = _find_free_port()
+            stream = await kasmvnc.start_stream(
+                slot,
+                kasmvnc_bin=REMOTE_LOGIN_KASMVNC_BIN,
+                screen=REMOTE_LOGIN_VNC_SCREEN,
+                www_dir=REMOTE_LOGIN_KASMVNC_WWW,
+            )
+            chrome_proc = await _launch_chrome(cdp_port, session_id, display=slot.display)
+            login_url = _login_url_for(platform)
+            pw, browser, page = await _attach_browser(cdp_port, login_url)
+            await page.goto(login_url, timeout=30000, wait_until="domcontentloaded")
+            tunnel_proc, tunnel_base_url = await _start_cloudflared_tunnel(REMOTE_LOGIN_SERVICE_PORT)
+            return RemoteLoginSession(
+                session_id=session_id,
+                platform=platform,
+                user_id=user_id,
+                login_url=_build_vnc_url(tunnel_base_url, session_id, session_id),
+                cdp_port=cdp_port,
+                viewer_port=slot.web_port,
+                chrome_proc=chrome_proc,
+                tunnel_proc=tunnel_proc,
+                playwright=pw,
+                browser=browser,
+                stream=stream,
+                slot=slot,
+                vnc_token=session_id,
+            )
+        except Exception:
+            if tunnel_proc and tunnel_proc.poll() is None:
+                _stop_process(tunnel_proc)
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            if pw:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+            if chrome_proc and chrome_proc.poll() is None:
+                _stop_process(chrome_proc)
+            if stream:
+                try:
+                    await stream.stop()
+                except Exception:
+                    pass
+            await _remote_display_pool.release(slot)
+            raise
+
+    async def _start_legacy_session(self, platform: str, user_id: str, session_id: str) -> RemoteLoginSession:
         cdp_port = _find_free_port()
         viewer_port = _find_free_port()
         chrome_proc = await _launch_chrome(cdp_port, session_id)
@@ -232,6 +314,16 @@ class RemoteLoginRunner:
             _stop_process(session.tunnel_proc)
         if session.chrome_proc and session.chrome_proc.poll() is None:
             _stop_process(session.chrome_proc)
+        if session.stream:
+            try:
+                await session.stream.stop()
+            except Exception:
+                pass
+        if session.slot:
+            try:
+                await _remote_display_pool.release(session.slot)
+            except Exception:
+                pass
         profile_dir = REMOTE_PROFILE_DIR / session_id
         if profile_dir.exists():
             shutil.rmtree(profile_dir, ignore_errors=True)
@@ -247,6 +339,11 @@ class RemoteLoginRunner:
             def exception(self, *args, **kwargs): pass
 
         return NullLogger()
+
+
+def _build_vnc_url(base_url: str, session_id: str, token: str) -> str:
+    ws_path = quote(f"vnc/{session_id}/websockify", safe="")
+    return f"{base_url.rstrip('/')}/vnc/{session_id}/?token={token}&path={ws_path}"
 
 
 def _find_free_port() -> int:
@@ -322,33 +419,55 @@ def _find_cloudflared_path() -> str:
     raise RuntimeError("未找到 cloudflared，请先安装 Cloudflare.cloudflared")
 
 
-async def _launch_chrome(cdp_port: int, session_id: str) -> subprocess.Popen:
+async def _launch_chrome(cdp_port: int, session_id: str, display: str | None = None) -> subprocess.Popen:
     profile_dir = REMOTE_PROFILE_DIR / session_id
     if profile_dir.exists():
         shutil.rmtree(profile_dir, ignore_errors=True)
     profile_dir.mkdir(parents=True, exist_ok=True)
     window_width, window_height = get_remote_browser_window_size()
+    env = os.environ.copy()
+    if display:
+        env["DISPLAY"] = display
+    args = [
+        _find_browser_path(),
+        f"--remote-debugging-port={cdp_port}",
+        f"--user-data-dir={profile_dir}",
+        f"--window-size={window_width},{window_height}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-default-apps",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--new-window",
+        "about:blank",
+    ]
     proc = subprocess.Popen(
-        [
-            _find_browser_path(),
-            f"--remote-debugging-port={cdp_port}",
-            f"--user-data-dir={profile_dir}",
-            f"--window-size={window_width},{window_height}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-default-apps",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--new-window",
-            "about:blank",
-        ],
+        args,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=env,
     )
     await _wait_for_cdp(cdp_port, proc)
     return proc
+
+
+async def _attach_browser(cdp_port: int, login_url: str):
+    from playwright.async_api import async_playwright
+
+    pw = await async_playwright().start()
+    try:
+        browser = await asyncio.wait_for(
+            pw.chromium.connect_over_cdp(_cdp_http_url(cdp_port)),
+            timeout=15,
+        )
+        context = browser.contexts[0]
+        page = context.pages[0] if context.pages else await context.new_page()
+        return pw, browser, page
+    except Exception:
+        await pw.stop()
+        raise
 
 
 async def _start_cloudflared_tunnel(local_port: int) -> tuple[subprocess.Popen, str]:

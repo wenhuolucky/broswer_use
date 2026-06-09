@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import os
 
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -15,11 +16,12 @@ def unauthorized_response() -> dict:
 
 
 def is_authorized_token(token: str | None) -> bool:
-    if not PUBLISH_API_TOKEN:
+    expected = os.getenv("PUBLISH_API_TOKEN", "").strip() or PUBLISH_API_TOKEN
+    if not expected:
         return False
     if not token:
         return False
-    return hmac.compare_digest(token.strip(), PUBLISH_API_TOKEN)
+    return hmac.compare_digest(token.strip(), expected)
 
 
 async def require_api_token(
