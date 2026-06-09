@@ -7,7 +7,11 @@ ENV PYTHONUNBUFFERED=1 \
     APP_LOG_DIR=/app/logs \
     APP_REMOTE_PROFILE_DIR=/app/data/remote_profiles \
     CLOUDFLARED_PATH=/usr/local/bin/cloudflared \
-    REMOTE_LOGIN_TIMEOUT_SECONDS=600 \
+    KASMVNC_BIN=Xvnc \
+    MAX_REMOTE_LOGIN_SESSIONS=4 \
+    DISPLAY_BASE=100 \
+    KASMVNC_PORT_BASE=6900 \
+    REMOTE_VNC_SCREEN=1440x900x24 \
     REMOTE_BROWSER_WINDOW_WIDTH=1440 \
     REMOTE_BROWSER_WINDOW_HEIGHT=900 \
     REMOTE_VIEWER_MAX_WIDTH=1440 \
@@ -16,9 +20,36 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+ARG TARGETARCH
+ARG KASMVNC_VERSION=1.4.0
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates xvfb \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        xvfb \
+        x11-utils \
+        procps \
+        fonts-noto-cjk \
+        fonts-noto-color-emoji \
+        libnss3 \
+        libxss1 \
+        libasound2t64 \
+        libgbm1 \
+        libxrandr2 \
+        libxdamage1 \
+        libxcomposite1 \
     && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    url="https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/kasmvncserver_bookworm_${KASMVNC_VERSION}_${TARGETARCH:-amd64}.deb"; \
+    if curl -fsSL -o /tmp/kasmvnc.deb "$url"; then \
+        apt-get update && apt-get install -y --no-install-recommends /tmp/kasmvnc.deb; \
+        rm -rf /var/lib/apt/lists/*; \
+    else \
+        echo "WARN: KasmVNC download failed ($url); remote login streaming will be unavailable"; \
+    fi; \
+    rm -f /tmp/kasmvnc.deb
 
 RUN curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
     -o /usr/local/bin/cloudflared \

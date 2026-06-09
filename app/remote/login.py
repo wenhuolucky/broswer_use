@@ -15,14 +15,31 @@ from dataclasses import dataclass
 from logging import LoggerAdapter
 from pathlib import Path
 from typing import Awaitable, Callable
+from urllib.parse import quote
 
-from app.core.config import REMOTE_LOGIN_TIMEOUT_SECONDS, REMOTE_PROFILE_DIR
+from app.core.config import REMOTE_PROFILE_DIR
 from app.remote.display_config import get_remote_browser_window_size
+from app.streaming import kasmvnc
+from app.streaming.display_pool import DisplayPool, Slot
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TOOLS_DIR = PROJECT_ROOT / "tools"
 if TOOLS_DIR.exists() and str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
+
+REMOTE_LOGIN_SERVICE_PORT = int(os.getenv("REMOTE_LOGIN_SERVICE_PORT", os.getenv("PORT", "19000")))
+REMOTE_LOGIN_MAX_SESSIONS = int(os.getenv("MAX_REMOTE_LOGIN_SESSIONS", "4"))
+REMOTE_LOGIN_DISPLAY_BASE = int(os.getenv("DISPLAY_BASE", "100"))
+REMOTE_LOGIN_KASMVNC_PORT_BASE = int(os.getenv("KASMVNC_PORT_BASE", "6900"))
+REMOTE_LOGIN_KASMVNC_BIN = os.getenv("KASMVNC_BIN", "Xvnc")
+REMOTE_LOGIN_KASMVNC_WWW = os.getenv("KASMVNC_WWW", "")
+REMOTE_LOGIN_VNC_SCREEN = os.getenv("REMOTE_VNC_SCREEN", "1440x900x24")
+
+_remote_display_pool = DisplayPool(
+    size=REMOTE_LOGIN_MAX_SESSIONS,
+    display_base=REMOTE_LOGIN_DISPLAY_BASE,
+    port_base=REMOTE_LOGIN_KASMVNC_PORT_BASE,
+)
 
 
 @dataclass
@@ -36,12 +53,11 @@ class RemoteLoginSession:
     viewer_port: int = 0
     chrome_proc: subprocess.Popen | None = None
     tunnel_proc: subprocess.Popen | None = None
-    viewer_runner: object | None = None
     playwright: object | None = None
     browser: object | None = None
-    login_event: asyncio.Event | None = None
-    disconnect_event: asyncio.Event | None = None
-    task: asyncio.Task | None = None
+    stream: object | None = None
+    slot: Slot | None = None
+    vnc_token: str = ""
 
 
 class RemoteLoginRunner:
@@ -53,17 +69,11 @@ class RemoteLoginRunner:
         save_cookie: Callable[[str, str, list[dict]], None] | None = None,
         on_cookie_ready: Callable[[str, list[dict]], Awaitable[None]] | None = None,
         logger_factory: Callable[[str], LoggerAdapter] | None = None,
-        cookie_extractor: Callable[[int], Awaitable[list[dict]]] | None = None,
-        poll_interval_seconds: float = 2.0,
-        timeout_seconds: int = REMOTE_LOGIN_TIMEOUT_SECONDS,
     ):
         self._starter = starter
         self._save_cookie = save_cookie
         self._on_cookie_ready = on_cookie_ready
         self._logger_factory = logger_factory
-        self._cookie_extractor = cookie_extractor or _extract_cookies
-        self._poll_interval_seconds = poll_interval_seconds
-        self._timeout_seconds = timeout_seconds
         self._sessions: dict[str, RemoteLoginSession] = {}
 
     async def start(self, platform: str, user_id: str) -> RemoteLoginSession:
@@ -81,7 +91,6 @@ class RemoteLoginRunner:
 
         session = await self._start_real_session(platform, user_id, session_id)
         self._sessions[session_id] = session
-        session.task = asyncio.create_task(self._watch_login(session))
         return session
 
     def get(self, session_id: str) -> RemoteLoginSession | None:
@@ -102,7 +111,7 @@ class RemoteLoginRunner:
         session = self._sessions[session_id]
         if session.status == "completed":
             return []
-        cookies = await self._cookie_extractor(session.cdp_port)
+        cookies = await self._extract_session_cookies(session)
         if not _has_platform_cookie(session.platform, cookies):
             session.status = "failed"
             raise RuntimeError("remote cookie invalid")
@@ -115,109 +124,73 @@ class RemoteLoginRunner:
         await self.cleanup(session_id)
         return cookies
 
+    async def _extract_session_cookies(self, session: RemoteLoginSession) -> list[dict]:
+        if session.browser and getattr(session.browser, "contexts", None):
+            return await session.browser.contexts[0].cookies()
+        raise RuntimeError("remote browser context unavailable")
+
     async def _start_real_session(self, platform: str, user_id: str, session_id: str) -> RemoteLoginSession:
-        cdp_port = _find_free_port()
-        viewer_port = _find_free_port()
-        chrome_proc = await _launch_chrome(cdp_port, session_id)
-
-        from app.remote.viewer import run_viewer_server
-
-        login_url = _login_url_for(platform)
-        login_event = asyncio.Event()
-        disconnect_event = asyncio.Event()
-        viewer_runner, pw, browser, _cdp, _page = await run_viewer_server(
-            cdp_port,
-            viewer_port,
-            login_url,
-            login_detect_url=login_url,
-            login_event=login_event,
-            disconnect_event=disconnect_event,
-        )
-        tunnel_proc, tunnel_url = await _start_cloudflared_tunnel(viewer_port)
-
-        return RemoteLoginSession(
-            session_id=session_id,
-            platform=platform,
-            user_id=user_id,
-            login_url=tunnel_url,
-            cdp_port=cdp_port,
-            viewer_port=viewer_port,
-            chrome_proc=chrome_proc,
-            tunnel_proc=tunnel_proc,
-            viewer_runner=viewer_runner,
-            playwright=pw,
-            browser=browser,
-            login_event=login_event,
-            disconnect_event=disconnect_event,
-        )
-
-    async def _watch_login(self, session: RemoteLoginSession) -> None:
-        logger = self._logger(session.session_id)
+        slot = await _remote_display_pool.acquire()
+        stream = None
+        chrome_proc = None
+        tunnel_proc = None
+        pw = None
+        browser = None
         try:
-            if session.disconnect_event is None:
-                session.status = "failed"
-                logger.error("remote login watcher missing disconnect event session_id=%s", session.session_id)
-                return
-            logger.info(
-                "远程登录 watcher 开始等待远程查看器关闭 session_id=%s cdp_port=%s viewer_port=%s timeout_seconds=%s",
-                session.session_id,
-                session.cdp_port,
-                session.viewer_port,
-                self._timeout_seconds,
+            cdp_port = _find_free_port()
+            stream = await kasmvnc.start_stream(
+                slot,
+                kasmvnc_bin=REMOTE_LOGIN_KASMVNC_BIN,
+                screen=REMOTE_LOGIN_VNC_SCREEN,
+                www_dir=REMOTE_LOGIN_KASMVNC_WWW,
             )
-            done, pending = await asyncio.wait(
-                [
-                    asyncio.create_task(session.disconnect_event.wait()),
-                    asyncio.create_task(asyncio.sleep(self._timeout_seconds)),
-                ],
-                return_when=asyncio.FIRST_COMPLETED,
+            chrome_proc = await _launch_chrome(cdp_port, session_id, display=slot.display)
+            login_url = _login_url_for(platform)
+            pw, browser, page = await _attach_browser(cdp_port, login_url)
+            await page.goto(login_url, timeout=30000, wait_until="domcontentloaded")
+            tunnel_proc, tunnel_base_url = await _start_cloudflared_tunnel(REMOTE_LOGIN_SERVICE_PORT)
+            return RemoteLoginSession(
+                session_id=session_id,
+                platform=platform,
+                user_id=user_id,
+                login_url=_build_vnc_url(tunnel_base_url, session_id, session_id),
+                cdp_port=cdp_port,
+                viewer_port=slot.web_port,
+                chrome_proc=chrome_proc,
+                tunnel_proc=tunnel_proc,
+                playwright=pw,
+                browser=browser,
+                stream=stream,
+                slot=slot,
+                vnc_token=session_id,
             )
-            for task in pending:
-                task.cancel()
-            if session.status == "completed":
-                logger.info(
-                    "remote login watcher skipped cookie extraction because session already completed session_id=%s",
-                    session.session_id,
-                )
-                return
-            if not session.disconnect_event.is_set():
-                session.status = "timeout"
-                logger.warning("远程登录 watcher 等待远程查看器关闭超时 session_id=%s", session.session_id)
-                return
-            logger.info("远程查看器已断开，开始提取 Cookie session_id=%s", session.session_id)
-            cookies = await self._cookie_extractor(session.cdp_port)
-            logger.info(
-                "远程登录 watcher 已提取 Cookie cookie_count=%s session_id=%s",
-                len(cookies),
-                session.session_id,
-            )
-            if not _has_platform_cookie(session.platform, cookies):
-                session.status = "failed"
-                logger.error(
-                    "远程登录 watcher 未检测到登录态 Cookie session_id=%s cookie_names=%s",
-                    session.session_id,
-                    [cookie.get("name", "") for cookie in cookies],
-                )
-                return
-            await self.complete_with_cookies(session.session_id, cookies)
-            logger.info("远程登录 watcher 已完成 Cookie 回调 session_id=%s", session.session_id)
-        except Exception as exc:
-            session.status = "failed"
-            logger.exception("远程登录 watcher 异常 session_id=%s error=%s", session.session_id, exc)
-        finally:
-            logger.info("远程登录 watcher 开始清理资源 session_id=%s", session.session_id)
-            await self.cleanup(session.session_id)
-            logger.info("远程登录 watcher 资源清理完成 session_id=%s", session.session_id)
+        except Exception:
+            if tunnel_proc and tunnel_proc.poll() is None:
+                _stop_process(tunnel_proc)
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            if pw:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+            if chrome_proc and chrome_proc.poll() is None:
+                _stop_process(chrome_proc)
+            if stream:
+                try:
+                    await stream.stop()
+                except Exception:
+                    pass
+            await _remote_display_pool.release(slot)
+            raise
 
     async def cleanup(self, session_id: str) -> None:
         session = self._sessions.get(session_id)
         if not session:
             return
-        if session.viewer_runner:
-            try:
-                await session.viewer_runner.cleanup()
-            except Exception:
-                pass
         if session.browser:
             try:
                 await session.browser.close()
@@ -232,6 +205,16 @@ class RemoteLoginRunner:
             _stop_process(session.tunnel_proc)
         if session.chrome_proc and session.chrome_proc.poll() is None:
             _stop_process(session.chrome_proc)
+        if session.stream:
+            try:
+                await session.stream.stop()
+            except Exception:
+                pass
+        if session.slot:
+            try:
+                await _remote_display_pool.release(session.slot)
+            except Exception:
+                pass
         profile_dir = REMOTE_PROFILE_DIR / session_id
         if profile_dir.exists():
             shutil.rmtree(profile_dir, ignore_errors=True)
@@ -247,6 +230,11 @@ class RemoteLoginRunner:
             def exception(self, *args, **kwargs): pass
 
         return NullLogger()
+
+
+def _build_vnc_url(base_url: str, session_id: str, token: str) -> str:
+    ws_path = quote(f"vnc/{session_id}/websockify", safe="")
+    return f"{base_url.rstrip('/')}/vnc/{session_id}/?token={token}&path={ws_path}"
 
 
 def _find_free_port() -> int:
@@ -322,62 +310,41 @@ def _find_cloudflared_path() -> str:
     raise RuntimeError("未找到 cloudflared，请先安装 Cloudflare.cloudflared")
 
 
-async def _launch_chrome(cdp_port: int, session_id: str) -> subprocess.Popen:
+async def _launch_chrome(cdp_port: int, session_id: str, display: str | None = None) -> subprocess.Popen:
     profile_dir = REMOTE_PROFILE_DIR / session_id
     if profile_dir.exists():
         shutil.rmtree(profile_dir, ignore_errors=True)
     profile_dir.mkdir(parents=True, exist_ok=True)
     window_width, window_height = get_remote_browser_window_size()
+    env = os.environ.copy()
+    if display:
+        env["DISPLAY"] = display
+    args = [
+        _find_browser_path(),
+        f"--remote-debugging-port={cdp_port}",
+        f"--user-data-dir={profile_dir}",
+        f"--window-size={window_width},{window_height}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-default-apps",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--new-window",
+        "about:blank",
+    ]
     proc = subprocess.Popen(
-        [
-            _find_browser_path(),
-            f"--remote-debugging-port={cdp_port}",
-            f"--user-data-dir={profile_dir}",
-            f"--window-size={window_width},{window_height}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-default-apps",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--new-window",
-            "about:blank",
-        ],
+        args,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=env,
     )
     await _wait_for_cdp(cdp_port, proc)
     return proc
 
 
-async def _start_cloudflared_tunnel(local_port: int) -> tuple[subprocess.Popen, str]:
-    proc = subprocess.Popen(
-        [_find_cloudflared_path(), "tunnel", "--url", f"http://localhost:{local_port}", "--no-autoupdate"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-    )
-    try:
-        while True:
-            if proc.poll() is not None:
-                raise RuntimeError(f"cloudflared 异常退出 (code={proc.poll()})")
-            line = proc.stdout.readline()
-            if not line:
-                await asyncio.sleep(0.1)
-                continue
-            match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
-            if match:
-                return proc, match.group(0)
-    except Exception:
-        _stop_process(proc)
-        raise
-
-
-async def _extract_cookies(cdp_port: int) -> list[dict]:
+async def _attach_browser(cdp_port: int, login_url: str):
     from playwright.async_api import async_playwright
 
     pw = await async_playwright().start()
@@ -387,11 +354,40 @@ async def _extract_cookies(cdp_port: int) -> list[dict]:
             timeout=15,
         )
         context = browser.contexts[0]
-        cookies = await context.cookies()
-        await browser.close()
-        return cookies
-    finally:
+        page = context.pages[0] if context.pages else await context.new_page()
+        return pw, browser, page
+    except Exception:
         await pw.stop()
+        raise
+
+
+async def _start_cloudflared_tunnel(local_port: int) -> tuple[subprocess.Popen, str]:
+    proc = subprocess.Popen(
+        [_find_cloudflared_path(), "tunnel", "--url", f"http://127.0.0.1:{local_port}", "--no-autoupdate"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
+    recent_output: list[str] = []
+    try:
+        while True:
+            if proc.poll() is not None:
+                detail = "\n".join(recent_output[-10:])
+                raise RuntimeError(f"cloudflared exited unexpectedly (code={proc.poll()}): {detail}".rstrip())
+            line = proc.stdout.readline()
+            if not line:
+                await asyncio.sleep(0.1)
+                continue
+            recent_output.append(line.strip())
+            match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
+            if match:
+                return proc, match.group(0)
+    except Exception:
+        _stop_process(proc)
+        raise
 
 
 def _login_url_for(platform: str) -> str:

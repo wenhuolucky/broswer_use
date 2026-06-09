@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 
+from app.api import vnc_proxy
 from app.api.routes import agent, router
 
 if sys.platform == "win32":
@@ -27,6 +28,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(router, prefix="/api/v1/publish")
+app.state.remote_login_runner = agent.remote_runner
+app.include_router(vnc_proxy.router)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=19000, workers=1, reload=False)
