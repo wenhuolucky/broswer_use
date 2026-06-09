@@ -61,21 +61,7 @@ class PublishService:
 
     def __init__(self):
         self._service_logger = get_service_logger()
-        self._publish_success_texts = (
-            "提交成功",
-            "发布成功",
-            "文章已发布",
-            "已成功发布",
-            "继续创作",
-            "查看文章",
-            "作品管理",
-        )
-        self._post_publish_url_fragments = (
-            "/manage/article",
-            "/profile_v4/manage",
-            "/article/manage",
-            "/content/manage",
-        )
+        self._url_lookup_retry_delays = (0, 3, 5)
         self._publish_failure_texts = (
             "发布失败",
             "提交失败",
@@ -528,10 +514,12 @@ class PublishService:
 
         available_files = [cover_path] if cover_path else None
 
+        controller = self._build_publish_tools(logger)
         agent = Agent(
             task=task,
             llm=llm,
             browser_session=session,
+            controller=controller,
             use_vision=False,
             max_actions_per_step=3,
             max_failures=5,
@@ -542,11 +530,7 @@ class PublishService:
         logger.info(f"开始发布文章: {title}")
         publish_guard = {
             "confirm_publish_clicked": False,
-            "success_detected": None,
             "failure_detected": None,
-            "confirm_observed_once": False,
-            "post_publish_verification": None,
-            "post_publish_attempts": 0,
             "cover_action_count": 0,
             "cover_loop_exceeded": False,
         }
@@ -565,47 +549,16 @@ class PublishService:
                         publish_guard["confirm_publish_clicked"] = True
                         logger.info("[PublishGuard] confirm_publish_clicked")
 
-                if publish_guard["confirm_publish_clicked"] and not publish_guard["success_detected"]:
-                    detected = await self._detect_publish_success(session, logger)
-                    if detected.get("success"):
-                        detected["article_url"] = await self._try_collect_article_url_after_publish(
-                            session, title, logger
-                        )
-                        publish_guard["success_detected"] = detected
-                        logger.info(
-                            "[PublishGuard] success_signal_detected: "
-                            f"{detected.get('signal', 'unknown')} | "
-                            f"text={detected.get('matched_text', '')} | url={detected.get('page_url', '')}"
+                if publish_guard["confirm_publish_clicked"]:
+                    failure = await self._detect_publish_failure(session, logger)
+                    if failure.get("failed"):
+                        publish_guard["failure_detected"] = failure
+                        logger.warning(
+                            "[PublishGuard] explicit_failure_signal_detected: "
+                            f"{failure.get('signal', 'unknown')} | "
+                            f"text={failure.get('matched_text', '')} | url={failure.get('page_url', '')}"
                         )
                         agent_instance.state.stopped = True
-                    else:
-                        failure = await self._detect_publish_failure(session, logger)
-                        if failure.get("failed"):
-                            publish_guard["failure_detected"] = failure
-                            logger.warning(
-                                "[PublishGuard] explicit_failure_signal_detected: "
-                                f"{failure.get('signal', 'unknown')} | "
-                                f"text={failure.get('matched_text', '')} | url={failure.get('page_url', '')}"
-                            )
-                        else:
-                            publish_guard["confirm_observed_once"] = True
-                            publish_guard["post_publish_attempts"] += 1
-                            verification = await self._open_latest_article_from_articles_page(session, title, logger)
-                            if verification.get("matched") and verification.get("article_url"):
-                                publish_guard["post_publish_verification"] = verification
-                                logger.info(
-                                    "[PublishGuard] post_publish_verification_succeeded: "
-                                    f"title={verification.get('detail_title', '')} | "
-                                    f"url={verification.get('article_url', '')}"
-                                )
-                                agent_instance.state.stopped = True
-                            else:
-                                logger.info(
-                                    "[PublishGuard] confirm_publish_pending_without_explicit_failure: "
-                                    f"attempt={publish_guard['post_publish_attempts']}"
-                                )
-                                if publish_guard["post_publish_attempts"] >= 3:
-                                    agent_instance.state.stopped = True
             except Exception as exc:
                 logger.warning(f"[PublishGuard] step_end detect failed: {exc}")
 
@@ -614,11 +567,26 @@ class PublishService:
             history,
             tracker=tracker,
             logger=logger,
-            detected_success=publish_guard["success_detected"],
             detected_failure=publish_guard["failure_detected"],
-            confirm_pending=publish_guard["confirm_observed_once"],
-            post_publish_verification=publish_guard["post_publish_verification"],
         )
+
+    def _build_publish_tools(self, logger):
+        from browser_use import ActionResult, Controller
+
+        controller = Controller()
+
+        @controller.action(
+            "发布后调用此工具获取文章链接。输入本次发布标题 title。工具会打开作品管理页，最多查询 3 次同标题文章；"
+            "found=true 时必须用 article_url 调用 done(success=true)；found=false 时必须用 reason 调用 done(success=false)。"
+        )
+        async def get_published_article_url(title: str, browser_session):
+            result = await self._lookup_published_article_url(browser_session, title, logger)
+            return ActionResult(
+                extracted_content=json.dumps(result, ensure_ascii=False),
+                include_in_memory=True,
+            )
+
+        return controller
 
     def _did_execute_confirm_publish(self, history_item) -> bool:
         for text in self._iter_history_result_texts(history_item):
@@ -725,37 +693,6 @@ class PublishService:
             if any(marker in normalized_text for marker in cover_markers):
                 return True
         return False
-
-    async def _detect_publish_success(self, session, logger) -> dict:
-        try:
-            page = await session.get_current_page()
-            page_url = ""
-            page_text = ""
-
-            if page is not None:
-                try:
-                    page_url = await session.get_current_page_url()
-                except Exception:
-                    page_url = ""
-
-                try:
-                    page_text = await page.evaluate(
-                        """() => {
-                            const bodyText = document.body ? (document.body.innerText || "") : "";
-                            return bodyText.slice(0, 5000);
-                        }"""
-                    )
-                except Exception:
-                    page_text = ""
-
-            detection = self._detect_publish_success_from_state(page_url=page_url, page_text=page_text)
-            if detection.get("success"):
-                detection["page_url"] = page_url
-            return detection
-        except Exception as exc:
-            if logger:
-                logger.warning(f"[PublishGuard] detect_publish_success failed: {exc}")
-            return {"success": False, "signal": "", "article_url": "", "page_url": "", "matched_text": ""}
 
     async def _detect_publish_failure(self, session, logger) -> dict:
         try:
@@ -994,48 +931,41 @@ class PublishService:
             "detail_title": normalized_actual,
         }
 
-    async def _try_collect_article_url_after_publish(self, session, title: str, logger) -> str:
-        try:
-            page = await session.get_current_page()
-            if page is None:
-                return ""
-
-            # 给后端一点时间处理发布请求
-            await asyncio.sleep(2)
-
-            current_url = await session.get_current_page_url()
-            if "/article/" in current_url:
+    async def _lookup_published_article_url(self, session, title: str, logger) -> dict:
+        last_reason = "确认发布后连续 3 次未在作品列表找到同标题文章，无法确认发布成功"
+        for attempt, delay in enumerate(self._url_lookup_retry_delays, start=1):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                article_detail = await self._open_latest_article_from_articles_page(session, title, logger)
+            except Exception as exc:
+                last_reason = f"第 {attempt} 次查询作品列表失败: {exc}"
                 if logger:
-                    logger.info(f"[PublishGuard] already on article page: {current_url}")
-                return current_url
-
-            if logger:
-                logger.info(f"[PublishGuard] attempting article URL lookup (title='{title}')")
-
-            # 第一次尝试
-            article_detail = await self._open_latest_article_from_articles_page(session, title, logger)
+                    logger.warning("[PublishUrlTool] attempt=%s failed: %s", attempt, exc)
+                continue
             if article_detail.get("matched") and article_detail.get("article_url"):
-                if logger:
-                    logger.info(f"[PublishGuard] article URL found on first try: {article_detail['article_url']}")
-                return str(article_detail["article_url"])
+                return {
+                    "found": True,
+                    "article_url": str(article_detail.get("article_url", "") or ""),
+                    "matched_title": str(article_detail.get("detail_title", "") or ""),
+                    "attempts": attempt,
+                    "reason": "",
+                }
+            if article_detail.get("detail_title"):
+                last_reason = (
+                    f"第 {attempt} 次查询作品列表未匹配到同标题文章，"
+                    f"最近文章标题为: {article_detail.get('detail_title', '')}"
+                )
+            if logger:
+                logger.info("[PublishUrlTool] article url not found attempt=%s title=%s", attempt, title)
 
-            # 回退：重试并放宽匹配
-            if logger:
-                logger.info("[PublishGuard] first attempt failed, retrying with fallback")
-            await asyncio.sleep(2)
-            fallback_url = await self._try_find_article_url_fallback(session, title, logger)
-            if fallback_url:
-                if logger:
-                    logger.info(f"[PublishGuard] article URL found via fallback: {fallback_url}")
-                return fallback_url
-
-            if logger:
-                logger.warning("[PublishGuard] failed to collect article URL after all attempts")
-            return ""
-        except Exception as exc:
-            if logger:
-                logger.warning(f"[PublishGuard] collect_article_url failed: {exc}")
-            return ""
+        return {
+            "found": False,
+            "article_url": "",
+            "matched_title": "",
+            "attempts": len(self._url_lookup_retry_delays),
+            "reason": last_reason,
+        }
 
     async def _try_find_article_url_fallback(self, session, title: str, logger) -> str:
         """Fallback: find article on list page with relaxed matching."""
@@ -1139,32 +1069,6 @@ class PublishService:
                 logger.warning(f"[PublishGuard] fallback article lookup failed: {exc}")
             return ""
 
-    def _detect_publish_success_from_state(self, page_url: str, page_text: str) -> dict:
-        normalized_url = page_url or ""
-        normalized_text = page_text or ""
-
-        for fragment in self._post_publish_url_fragments:
-            if fragment and fragment in normalized_url:
-                return {
-                    "success": True,
-                    "signal": "post_publish_url",
-                    "article_url": "",
-                    "page_url": normalized_url,
-                    "matched_text": fragment,
-                }
-
-        for text in self._publish_success_texts:
-            if text and text in normalized_text:
-                return {
-                    "success": True,
-                    "signal": "success_text",
-                    "article_url": "",
-                    "page_url": normalized_url,
-                    "matched_text": text,
-                }
-
-        return {"success": False, "signal": "", "article_url": "", "page_url": normalized_url, "matched_text": ""}
-
     def _detect_publish_failure_from_state(self, page_url: str, page_text: str) -> dict:
         normalized_url = page_url or ""
         normalized_text = page_text or ""
@@ -1185,10 +1089,7 @@ class PublishService:
         history,
         tracker,
         logger,
-        detected_success: dict | None = None,
         detected_failure: dict | None = None,
-        confirm_pending: bool = False,
-        post_publish_verification: dict | None = None,
     ):
         result = {
             "success": False,
@@ -1197,34 +1098,6 @@ class PublishService:
             "failure_reason": "",
             "publish_signal": "",
         }
-        if detected_success and detected_success.get("success"):
-            detected_article_url = detected_success.get("article_url", "") or ""
-            detected_signal = detected_success.get("signal", "") or ""
-            detected_text = detected_success.get("matched_text", "") or ""
-            is_management_text = detected_text in {"作品管理", "查看文章", "继续创作"}
-            if detected_article_url or (detected_signal == "success_text" and not is_management_text):
-                result["success"] = True
-                result["article_url"] = detected_article_url
-                result["publish_signal"] = detected_signal
-                if logger:
-                    logger.info(
-                        "[PublishGuard] force_finish_after_success_detection: "
-                        f"{result['publish_signal']} | {detected_success.get('matched_text', '')}"
-                    )
-            elif logger:
-                logger.info(
-                    "[PublishGuard] success_signal_without_article_url: "
-                    f"{detected_success.get('signal', '')} | {detected_success.get('matched_text', '')}"
-                )
-        elif post_publish_verification and post_publish_verification.get("matched"):
-            result["success"] = True
-            result["article_url"] = post_publish_verification.get("article_url", "") or ""
-            result["publish_signal"] = "post_publish_verification"
-            if logger:
-                logger.info(
-                    "[PublishGuard] force_finish_after_post_publish_verification: "
-                    f"{post_publish_verification.get('detail_title', '')} | {result['article_url']}"
-                )
         try:
             final = history.final_result()
             if final:
@@ -1255,15 +1128,19 @@ class PublishService:
                     logger.warning("发布流程可能未成功")
                 errors = history.errors() or []
                 error_messages = [str(item) for item in errors if item]
-                if detected_failure and detected_failure.get("failed"):
-                    result["failure_reason"] = detected_failure.get("matched_text", "") or detected_failure.get("signal", "")
-                elif error_messages and not result["failure_reason"] and not result["success"]:
+                if error_messages and not result["failure_reason"] and not result["success"]:
                     result["failure_reason"] = "; ".join(error_messages)
         except AttributeError:
             if logger:
                 logger.warning("无法解析 Agent 执行状态")
             if not result["success"]:
                 result["failure_reason"] = "无法解析 Agent 执行状态"
+
+        if detected_failure and detected_failure.get("failed"):
+            result["success"] = False
+            result["article_url"] = ""
+            result["publish_signal"] = detected_failure.get("signal", "") or "guard_failure"
+            result["failure_reason"] = detected_failure.get("matched_text", "") or detected_failure.get("signal", "")
 
         return result
 

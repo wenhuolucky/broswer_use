@@ -23,10 +23,22 @@ class ToutiaoPlatform(PlatformConfig):
         rich_html: str = None,
     ) -> str:
         if is_markdown and rich_html:
-            return self._rich_html_ready_prompt(title, cover_instruction, rich_html)
+            return self._with_url_tool_rule(self._rich_html_ready_prompt(title, cover_instruction, rich_html), title)
         if is_markdown:
-            return self._markdown_prompt(title, content, cover_instruction)
-        return self._plain_text_prompt(title, content, cover_instruction)
+            return self._with_url_tool_rule(self._markdown_prompt(title, content, cover_instruction), title)
+        return self._with_url_tool_rule(self._plain_text_prompt(title, content, cover_instruction), title)
+
+    def _with_url_tool_rule(self, prompt: str, title: str) -> str:
+        return prompt + f"""
+
+发布后 URL 获取硬性规则：
+- 点击“确认发布”后，不要直接调用 done。
+- 必须调用工具 `get_published_article_url`，参数 title="{title}"。
+- 该工具会在内部最多查询 3 次作品列表。
+- 如果工具返回 found=true，必须用工具返回的 article_url 调用 done，并返回 success=true。
+- 如果工具返回 found=false，必须用工具返回的 reason 调用 done，并返回 success=false。
+- 不要在工具返回 found=false 后继续反复查询。
+"""
 
     def _agent_recovery_rules(self) -> str:
         return """Agent 执行规则：
