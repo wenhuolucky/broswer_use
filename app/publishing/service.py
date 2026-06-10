@@ -390,14 +390,24 @@ class PublishService:
     def _get_browser_llm(self):
         import os
 
-        from app.publishing.deepseek import DeepSeekChatOpenAILike
+        from app.publishing.deepseek import OpenAICompatibleChat
 
-        api_key = os.getenv("DEEPSEEK_API_KEY")
+        api_key = os.getenv("LLM_API_KEY", "").strip()
+        base_url = os.getenv("LLM_BASE_URL", "http://47.242.205.13:8110/v1").strip()
+        model = os.getenv("LLM_MODEL", "Qwen/Qwen3.5-397B-A17B").strip()
+
         if not api_key:
-            raise RuntimeError("DEEPSEEK_API_KEY is not set")
-        return DeepSeekChatOpenAILike(
-            model="deepseek-chat",
-            base_url="https://api.deepseek.com/v1",
+            api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+            if api_key:
+                base_url = "https://api.deepseek.com/v1"
+                model = "deepseek-chat"
+
+        if not api_key:
+            raise RuntimeError("LLM_API_KEY is not set")
+
+        return OpenAICompatibleChat(
+            model=model,
+            base_url=base_url,
             api_key=api_key,
             dont_force_structured_output=True,
             add_schema_to_system_prompt=True,
@@ -566,7 +576,7 @@ class PublishService:
 
         available_files = [cover_path] if cover_path else None
 
-        controller = self._build_publish_tools(logger)
+        controller = self._build_publish_tools(logger, original_title=title)
         agent = Agent(
             task=task,
             llm=llm,
@@ -622,7 +632,7 @@ class PublishService:
             detected_failure=publish_guard["failure_detected"],
         )
 
-    def _build_publish_tools(self, logger):
+    def _build_publish_tools(self, logger, original_title: str = ""):
         from browser_use import ActionResult, Controller
 
         controller = Controller()
@@ -632,7 +642,15 @@ class PublishService:
             "found=true 时必须用 article_url 调用 done(success=true)；found=false 时必须用 reason 调用 done(success=false)。"
         )
         async def get_published_article_url(title: str, browser_session):
-            result = await self._lookup_published_article_url(browser_session, title, logger)
+            lookup_title = (original_title or title or "").strip()
+            if logger and title and lookup_title != title:
+                logger.info(
+                    "[PublishUrlTool] ignoring llm supplied title; "
+                    "llm_title=%s | lookup_title=%s",
+                    title,
+                    lookup_title,
+                )
+            result = await self._lookup_published_article_url(browser_session, lookup_title, logger)
             return ActionResult(
                 extracted_content=json.dumps(result, ensure_ascii=False),
                 include_in_memory=True,
