@@ -106,6 +106,15 @@ Agent 执行规则：
 3. 读取当前账号显示名，记为 account_name。
 4. 进入文章发布入口。
 5. 填写标题：{title}
+   - 找到标题输入框（input 或 textarea，可能 placeholder 含"请输入标题"、"文章标题"等）。
+   - 点击标题输入框使其获得焦点；如果输入框有残留内容，先 select_all + delete 清空。
+   - 输入标题文本。
+   - **强制标题校验（防止标题实际未填但 Agent 误判为已填）**：
+     - 读取标题输入框的实际值：input 元素读 value，textarea 元素读 textContent / value，contenteditable 元素读 innerText。
+     - 与字符串 "{title}" 完全匹配（去掉首尾空白后比较）。
+     - 如果不匹配，重新清空 + 重新点击 + 重新输入，最多重试 2 次。
+     - 2 次后仍不匹配，立即调用 done 返回 success=false，failure_reason="搜狐号标题填写失败：实际标题与预期不符"。
+   - 通过校验后才能继续执行步骤 6。
 6. 找到搜狐号正文富文本编辑器，点击使其获得焦点。
 7. 使用 evaluate 执行下面的 JavaScript，把完整 HTML 写入浏览器剪贴板：
 ```javascript
@@ -153,7 +162,7 @@ async (htmlContent) => {{
 
 封面要求：
 {cover_instruction.strip()}
-{self._cover_fallback_rule()}
+{self._sohu_cover_rules(cover_instruction)}
 
 完整 HTML 长度：{html_length} 字符
 
@@ -203,6 +212,15 @@ Agent 执行规则：
 3. 读取当前账号显示名，记为 account_name。
 4. 进入文章发布入口。
 5. 填写标题：{title}
+   - 找到标题输入框（input 或 textarea，可能 placeholder 含"请输入标题"、"文章标题"等）。
+   - 点击标题输入框使其获得焦点；如果输入框有残留内容，先 select_all + delete 清空。
+   - 输入标题文本。
+   - **强制标题校验（防止标题实际未填但 Agent 误判为已填）**：
+     - 读取标题输入框的实际值：input 元素读 value，textarea 元素读 textContent / value，contenteditable 元素读 innerText。
+     - 与字符串 "{title}" 完全匹配（去掉首尾空白后比较）。
+     - 如果不匹配，重新清空 + 重新点击 + 重新输入，最多重试 2 次。
+     - 2 次后仍不匹配，立即调用 done 返回 success=false，failure_reason="搜狐号标题填写失败：实际标题与预期不符"。
+   - 通过校验后才能继续执行步骤 6。
 6. 搜狐号正文写入策略（纯文本路径）：
    - 先点击搜狐号正文编辑器，让编辑器获得焦点。
    - 将下面 `<content>` 中的纯文本写入剪贴板（navigator.clipboard.writeText 或 execCommand），再使用 Ctrl+V 粘贴。
@@ -226,7 +244,7 @@ Agent 执行规则：
 
 封面要求：
 {cover_instruction.strip()}
-{self._cover_fallback_rule()}
+{self._sohu_cover_rules(cover_instruction)}
 
 正文内容：
 <content>
@@ -235,16 +253,45 @@ Agent 执行规则：
 """
 
     @staticmethod
-    def _cover_fallback_rule() -> str:
+    def _sohu_cover_rules(cover_instruction: str) -> str:
+        """根据 cover_instruction 是否含本地文件路径返回 3 选项的具体指导。
+
+        简化的路径检测：含 Windows 盘符 (C:\\ 等) 或 Linux/Mac 绝对路径
+        (/tmp、/var、/home、/Users) 视为有本地路径。
+        """
+        has_cover_path = bool(
+            re.search(
+                r"[A-Za-z]:\\|/(?:tmp|var|home|Users|root)/",
+                cover_instruction or "",
+            )
+        )
+        if has_cover_path:
+            return """
+
+搜狐号封面设置（覆盖上面 cover_instruction 中关于"本地上传"那一步的判定）：
+- 搜狐号通常提供 3 个选项：1) 正文图片  2) 本地上传  3) 素材库。
+- 本次提供了本地封面文件路径，**优先选"本地上传"**：
+  1. 切换到"本地上传"标签。
+  2. 使用 file input 上传上面 cover_instruction 给的本地文件路径。
+  3. 等待上传完成，并确认页面上显示的是单封面预览。
+  4. 如果观察到"上传中"状态持续不消失（页面有"上传中"文字、loading 旋转图标、spinner 动画、进度条一直动但没有完成提示），实际图片已经上传完成并同步到"素材库"，关闭本地上传对话框，切换到"素材库"标签，**选择列表第一张图片**作为封面。
+  5. 都失败时停止并返回失败。
+- 任何情况下都必须保持**单封面**，不要选三封面或五封面。
+- 上面 cover_instruction 中"不要主动打开封面选择器或上传对话框"这条**不适用本次**。
+"""
         return """
 
-搜狐号封面特殊要求（覆盖上述封面流程中"本地上传"那一步的判定）：
-- 触发本地上传文件后，如果观察到"上传中"状态持续不消失（页面出现"上传中"文字、loading 旋转图标、spinner 动画、进度条一直动但没有完成提示等），不要再继续等待。
-- 此时实际图片已经上传完成，并已经同步到"素材库"。
-- 关闭本地上传对话框或进度弹窗，切换到"素材库"标签，浏览素材库列表，**选择列表第一张图片**作为封面。
-- 选完后确认页面上显示的是单封面预览，再继续后续步骤。
-- 如果素材库列表为空或加载失败，再尝试其他兜底；否则不要再循环封面上传。
-- 本地路径失败不一定是"上传中"卡死；如果 file input 报错或文件类型不被接受，按页面提示处理；只有"上传中"持续不消失才走素材库 fallback。
+搜狐号封面设置（覆盖上面 cover_instruction 中"不需要手动设置封面"那部分）：
+- 搜狐号通常提供 3 个选项：1) 正文图片  2) 本地上传  3) 素材库。
+- 本次没有封面 URL，**必须选"正文图片"**：
+  1. 切换到"正文图片"标签。
+  2. 浏览正文图片列表。
+  3. **必须实际点击（click）**第一张图片；hover、focus、鼠标移过都不算选中，必须 click 触发图片被选中的视觉反馈（边框高亮、勾选标记、变成主图等）。
+  4. 选完后确认页面上显示该图片作为单封面预览。
+  5. 如果正文没有图片（列表为空），回退到"素材库"选列表第一张图片。
+  6. 如果"素材库"也空，停止并返回失败。
+- 任何情况下都必须保持**单封面**，不要选三封面或五封面。
+- 上面 cover_instruction 中"不需要手动设置封面"、"不要主动打开封面选择器"这两条**不适用搜狐号**，必须主动选封面。
 """
 
     @staticmethod
