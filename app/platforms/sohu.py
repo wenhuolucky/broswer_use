@@ -144,10 +144,13 @@ async (htmlContent) => {{
 8. 保持编辑器焦点，使用 `send_keys("Control+v")` 进行粘贴，也就是执行 Ctrl+V。
 9. 等待 1-2 秒让富文本渲染完成。
 10. 发布前正文校验（强制）：
-    - 必须读取正文编辑器的可见文本（document.body.innerText / 编辑器 innerText）。
+    - 必须读取**正文编辑器自身的**可见文本（找 `[contenteditable="true"]` 元素，挑可见文本最长的那个，不要读 document.body）。
     - 正文编辑器文本必须非空，并且包含这个正文关键片段："{body_probe}"。
-    - 如果未检测到正文，重新点击编辑器并再次执行 7、8 步写入正文，最多重试 2 次。
-    - 2 次后仍未检测到正文，立即调用 done 返回 success=false，failure_reason="搜狐号正文写入失败，发布前未检测到正文内容"。
+    - 如果未检测到正文，**先按以下顺序重试 3 次**，再考虑返回失败：
+      - 重试 A：重新点击编辑器 + 重新执行步骤 7、8（剪贴板 + Ctrl+V）。
+      - 重试 B：在编辑器仍 focus 状态下，使用 evaluate 执行 `document.execCommand('insertHTML', false, htmlContent)`，其中 `htmlContent` 是下面 `========== HTML BEGIN ==========` 和 `========== HTML END ==========` 之间的完整 HTML 字符串。**这是绕过系统剪贴板的 DOM 注入方式，不依赖 Ctrl+V 事件能否被编辑器接收**。
+      - 重试 C：如果步骤 B 的 evaluate 也没有让编辑器内容出现，再清空 + 重新执行步骤 7、8。
+    - 3 次重试后仍未检测到正文，立即调用 done 返回 success=false，failure_reason="搜狐号正文写入失败，发布前未检测到正文内容"。
     - 未通过正文校验时，禁止继续点击"下一步"、封面设置或发布。
 11. 如果页面需要点击"下一步"，点击进入发布设置页。
 12. {cover_instruction.strip()}
@@ -226,10 +229,13 @@ Agent 执行规则：
    - 将下面 `<content>` 中的纯文本写入剪贴板（navigator.clipboard.writeText 或 execCommand），再使用 Ctrl+V 粘贴。
    - 如果剪贴板不可用，可以使用键盘输入或页面支持的普通文本粘贴方式。
 7. 发布前正文校验（强制）：
-   - 必须读取正文编辑器的可见文本。
+   - 必须读取**正文编辑器自身的**可见文本（找 `[contenteditable="true"]` 元素，挑可见文本最长的那个，不要读 document.body）。
    - 正文编辑器文本必须非空，并且包含这个正文关键片段："{body_probe}"。
-   - 如果未检测到正文，重新点击编辑器并再次写入正文，最多重试 2 次。
-   - 2 次后仍未检测到正文，立即调用 done 返回 success=false，failure_reason="搜狐号正文写入失败，发布前未检测到正文内容"。
+   - 如果未检测到正文，**先按以下顺序重试 3 次**，再考虑返回失败：
+     - 重试 A：重新点击编辑器 + 重新执行步骤 6（剪贴板 + Ctrl+V）。
+     - 重试 B：在编辑器仍 focus 状态下，使用 evaluate 执行 `document.execCommand('insertText', false, bodyText)`，其中 `bodyText` 是下面 `<content>` 标签内的纯文本字符串。**这是绕过系统剪贴板的 DOM 注入方式**。
+     - 重试 C：清空 + 重新执行步骤 6。
+   - 3 次重试后仍未检测到正文，立即调用 done 返回 success=false，failure_reason="搜狐号正文写入失败，发布前未检测到正文内容"。
    - 未通过正文校验时，禁止继续点击"下一步"、封面设置或发布。
 8. 如果页面需要点击"下一步"，点击进入发布设置页。
 9. {cover_instruction.strip()}

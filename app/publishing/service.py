@@ -636,8 +636,13 @@ class PublishService:
             "last_url": "",
             "last_editor_text_len": 0,
             "last_editor_preview": "",
+            "last_editor_source": "none",
+            "last_probe_found": False,
             "step_summaries": [],
         }
+
+        # 正文存在性探针：与平台 _body_probe 算法一致，确保两边算出的字符串相同
+        body_probe = self._compute_body_probe(content)
 
         async def on_step_end(agent_instance):
             try:
@@ -649,7 +654,7 @@ class PublishService:
 
                 # 每步抓取页面状态用于诊断
                 try:
-                    page_state = await self._capture_page_state(session)
+                    page_state = await self._capture_page_state(session, body_probe)
                 except Exception as exc:
                     logger.warning(f"[StepDiag {step_number}] state capture failed: {exc}")
                     page_state = {}
@@ -662,20 +667,33 @@ class PublishService:
                 publish_guard["last_editor_preview"] = (
                     page_state.get("editor_text_preview", "") or ""
                 )
+                publish_guard["last_editor_source"] = page_state.get("editor_source", "none")
+                publish_guard["last_probe_found"] = bool(page_state.get("probe_found", False))
 
                 # 跟踪正文粘贴尝试
                 action_summary = self._extract_action_summary(last_item)
                 if action_summary and self._looks_like_paste_action(action_summary):
                     publish_guard["body_paste_attempts"] += 1
                     editor_len_after = publish_guard["last_editor_text_len"]
+                    probe_found = publish_guard["last_probe_found"]
                     logger.info(
                         f"[BodyWrite] paste_attempt={publish_guard['body_paste_attempts']} "
-                        f"editor_len_after={editor_len_after}"
+                        f"editor_len_after={editor_len_after} probe_found={probe_found} "
+                        f"editor_source={publish_guard['last_editor_source']}"
                     )
-                    if editor_len_after > 5:
+                    # 必须 editor 真的有内容 + 探针字符串命中 才算成功
+                    # 4738382 之前的 false positive：editor_len 来自 document.body（页面 chrome），
+                    # 任何时候都 > 5，误判 paste_succeeded=True。修后必须 probe_found
+                    if editor_len_after > 30 and probe_found:
                         publish_guard["body_paste_succeeded"] = True
                         logger.info(
                             f"[BodyWrite] paste_succeeded: editor_len={editor_len_after}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[BodyWrite] paste_attempt_failed: "
+                            f"editor_len={editor_len_after} probe_found={probe_found} "
+                            f"editor_source={publish_guard['last_editor_source']}"
                         )
 
                 # 跟踪步骤摘要（保留最近 10 步）
@@ -893,12 +911,32 @@ class PublishService:
                 logger.warning(f"[PublishGuard] detect_publish_failure failed: {exc}")
             return {"failed": False, "signal": "", "page_url": "", "matched_text": ""}
 
-    async def _capture_page_state(self, session) -> dict:
-        """抓取当前页面状态用于诊断日志：URL + 编辑器可见文本长度 + 前 200 字。"""
+    async def _capture_page_state(
+        self,
+        session,
+        content_probe: str = "",
+    ) -> dict:
+        """抓取当前页面状态用于诊断日志。
+
+        关键改进（修 4738382 之后的 false positive）：
+        之前读 `document.body.innerText` 把页面 chrome（顶栏、侧栏、封面上传区）
+        当成编辑器内容，导致 editor_len 一直是 457、body_paste_succeeded 误判
+        为 True。现在改为：
+
+        1) 在主文档里找最大 [contenteditable="true"] 元素作为正文编辑器。
+        2) 主文档没有富编辑器时，遍历 iframe 里的 contenteditable 兜底。
+        3) 都没有才退回到 document.body（旧行为）但 editor_source 标记为
+           "body-fallback"，日志里能看出来没找到。
+
+        content_probe 透传后，JS 会检查编辑器可见文本是否包含该探针字符串
+        （取自原始正文的去格式前缀），用于诊断"编辑器真的有正文吗"。
+        """
         state = {
             "url": "",
             "editor_text_length": 0,
             "editor_text_preview": "",
+            "editor_source": "none",
+            "probe_found": False,
         }
         try:
             state["url"] = await session.get_current_page_url()
@@ -909,11 +947,50 @@ class PublishService:
             if page is None:
                 return state
             captured = await page.evaluate(
-                """() => {
-                    const body = document.body;
-                    const text = body ? (body.innerText || body.textContent || "") : "";
-                    return { text: text, length: text.length };
-                }"""
+                """(contentProbe) => {
+                    const probe = contentProbe || "";
+                    let best = null;
+                    // 1) 主文档里最大的 contenteditable
+                    const editables = Array.from(document.querySelectorAll('[contenteditable="true"]'));
+                    for (const node of editables) {
+                        const t = (node.innerText || node.textContent || '').trim();
+                        const len = t.length;
+                        if (!best || len > best.len) {
+                            best = { text: t, len: len, source: 'contenteditable' };
+                        }
+                    }
+                    // 2) 兜底：iframe 里的 contenteditable
+                    if (!best || best.len < 10) {
+                        const iframes = Array.from(document.querySelectorAll('iframe'));
+                        for (const iframe of iframes) {
+                            try {
+                                const doc = iframe.contentDocument || (iframe.contentWindow && iframe.contentWindow.document);
+                                if (!doc) continue;
+                                const innerEditables = Array.from(doc.querySelectorAll('[contenteditable="true"]'));
+                                for (const node of innerEditables) {
+                                    const t = (node.innerText || node.textContent || '').trim();
+                                    if (t.length > (best ? best.len : 0)) {
+                                        best = { text: t, len: t.length, source: 'iframe-contenteditable' };
+                                    }
+                                }
+                            } catch (e) { /* cross-origin, skip */ }
+                        }
+                    }
+                    // 3) 最终兜底：document.body
+                    if (!best) {
+                        const body = document.body;
+                        const text = body ? (body.innerText || body.textContent || '') : '';
+                        best = { text: text, len: text.length, source: 'body-fallback' };
+                    }
+                    const probeFound = !!(probe && best && best.text && best.text.indexOf(probe) !== -1);
+                    return {
+                        text: best ? best.text : '',
+                        length: best ? best.len : 0,
+                        source: best ? best.source : 'none',
+                        probeFound: probeFound,
+                    };
+                }""",
+                content_probe,
             )
             if isinstance(captured, str):
                 try:
@@ -921,16 +998,32 @@ class PublishService:
                     if isinstance(parsed, dict):
                         captured = parsed
                     else:
-                        captured = {"text": captured, "length": len(captured)}
+                        captured = {"text": captured, "length": len(captured), "source": "fallback"}
                 except json.JSONDecodeError:
-                    captured = {"text": captured, "length": len(captured)}
+                    captured = {"text": captured, "length": len(captured), "source": "fallback"}
             if isinstance(captured, dict):
                 text = str(captured.get("text", "") or "")
                 state["editor_text_length"] = len(text)
                 state["editor_text_preview"] = text[:200]
+                state["editor_source"] = captured.get("source", "unknown")
+                state["probe_found"] = bool(captured.get("probeFound", False))
         except Exception:
             pass
         return state
+
+    @staticmethod
+    def _compute_body_probe(content: str) -> str:
+        """从原始 content 计算正文存在性探针，算法与各平台 _body_probe 一致。"""
+        import re
+        text = str(content or "")
+        text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+        text = re.sub(r"[*_`>#-]+", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = text.strip()
+        compact = "".join(text.split())
+        return compact[:30]
 
     @staticmethod
     def _extract_action_summary(history_item) -> str:
@@ -989,11 +1082,14 @@ class PublishService:
         """每步结束输出 [StepDiag N] 行，便于排查。"""
         url = page_state.get("url", "") or ""
         editor_len = page_state.get("editor_text_length", 0) or 0
+        editor_source = page_state.get("editor_source", "none") or "none"
+        probe_found = bool(page_state.get("probe_found", False))
         editor_preview = (
             (page_state.get("editor_text_preview", "") or "").replace("\n", " ")
         )[:120]
         logger.info(
             f"[StepDiag {step_number}] url={url} editor_len={editor_len} "
+            f"editor_source={editor_source} probe_found={probe_found} "
             f"editor_preview={editor_preview!r}"
         )
         action_summary = self._extract_action_summary(history_item)
@@ -1010,6 +1106,8 @@ class PublishService:
         step_count = len(step_summaries)
         last_url = publish_guard.get("last_url", "") or ""
         last_editor_len = publish_guard.get("last_editor_text_len", 0) or 0
+        last_editor_source = publish_guard.get("last_editor_source", "none") or "none"
+        last_probe_found = bool(publish_guard.get("last_probe_found", False))
         last_editor_preview = (
             (publish_guard.get("last_editor_preview", "") or "").replace("\n", " ")
         )[:120]
@@ -1024,6 +1122,8 @@ class PublishService:
         logger.info(f"  总步数: {step_count}")
         logger.info(f"  最后 URL: {last_url}")
         logger.info(f"  最后正文长度: {last_editor_len}")
+        logger.info(f"  最后正文来源: {last_editor_source}")
+        logger.info(f"  最后正文探针命中: {last_probe_found}")
         logger.info(f"  最后正文预览: {last_editor_preview!r}")
         logger.info(f"  失败原因: {failure_reason or '(无)'}")
         logger.info(f"  Article URL: {article_url or '(无)'}")
