@@ -256,10 +256,12 @@ class PublishAgent:
 
         try:
             result = await self.publish_adapter.publish(
+                platform=request.platform,
                 title=request.title,
                 content=request.content,
                 cookie=cookie,
                 request_id=job_id,
+                user_id=request.user_id,
                 cover_image_url=request.cover_image_url,
                 on_live_url_ready=on_live_url_ready,
             )

@@ -74,6 +74,11 @@ class PublishService:
             "请重试",
         )
 
+    def _platform(self):
+        from app.platforms.toutiao import ToutiaoPlatform
+
+        return ToutiaoPlatform()
+
     async def publish(
         self,
         title: str,
@@ -126,9 +131,8 @@ class PublishService:
             cookies = self._parse_cookie_string(cookie)
             if not cookies:
                 raise ValueError("Cookie 解析结果为空")
-            from app.platforms.toutiao import ToutiaoPlatform
 
-            platform = ToutiaoPlatform()
+            platform = self._platform()
             if not platform.validate_cookies(cookies):
                 raise ValueError(f"Cookie 中未检测到 {platform.name} 的有效登录凭据")
             logger.info(f"[Step 2] Cookie 验证通过（{platform.name}），共 {len(cookies)} 项")
@@ -627,21 +631,93 @@ class PublishService:
             "failure_detected": None,
             "cover_action_count": 0,
             "cover_loop_exceeded": False,
+            "body_paste_attempts": 0,
+            "body_paste_succeeded": False,
+            "last_url": "",
+            "last_editor_text_len": 0,
+            "last_editor_preview": "",
+            "last_editor_source": "none",
+            "last_probe_found": False,
+            "step_summaries": [],
         }
+
+        # 正文存在性探针：与平台 _body_probe 算法一致，确保两边算出的字符串相同
+        body_probe = self._compute_body_probe(content)
 
         async def on_step_end(agent_instance):
             try:
                 history_items = getattr(agent_instance.history, "history", []) or []
-                if history_items:
-                    last_item = history_items[-1]
-                    if not publish_guard["cover_loop_exceeded"] and self._looks_like_cover_action(last_item):
-                        publish_guard["cover_action_count"] += 1
-                        if publish_guard["cover_action_count"] > 3:
-                            publish_guard["cover_loop_exceeded"] = True
-                            logger.warning("[PublishGuard] cover_loop_limit_exceeded_skip_cover")
-                    if self._did_execute_confirm_publish(last_item) and not publish_guard["confirm_publish_clicked"]:
-                        publish_guard["confirm_publish_clicked"] = True
-                        logger.info("[PublishGuard] confirm_publish_clicked")
+                if not history_items:
+                    return
+                last_item = history_items[-1]
+                step_number = len(history_items)
+
+                # 每步抓取页面状态用于诊断
+                try:
+                    page_state = await self._capture_page_state(session, body_probe)
+                except Exception as exc:
+                    logger.warning(f"[StepDiag {step_number}] state capture failed: {exc}")
+                    page_state = {}
+
+                self._log_step_diagnostics(step_number, last_item, page_state, logger)
+
+                # 更新 publish_guard 中最近状态（用于失败摘要）
+                publish_guard["last_url"] = page_state.get("url", "") or ""
+                publish_guard["last_editor_text_len"] = page_state.get("editor_text_length", 0) or 0
+                publish_guard["last_editor_preview"] = (
+                    page_state.get("editor_text_preview", "") or ""
+                )
+                publish_guard["last_editor_source"] = page_state.get("editor_source", "none")
+                publish_guard["last_probe_found"] = bool(page_state.get("probe_found", False))
+
+                # 跟踪正文粘贴尝试
+                action_summary = self._extract_action_summary(last_item)
+                if action_summary and self._looks_like_paste_action(action_summary):
+                    publish_guard["body_paste_attempts"] += 1
+                    editor_len_after = publish_guard["last_editor_text_len"]
+                    probe_found = publish_guard["last_probe_found"]
+                    logger.info(
+                        f"[BodyWrite] paste_attempt={publish_guard['body_paste_attempts']} "
+                        f"editor_len_after={editor_len_after} probe_found={probe_found} "
+                        f"editor_source={publish_guard['last_editor_source']}"
+                    )
+                    # 必须 editor 真的有内容 + 探针字符串命中 才算成功
+                    # 4738382 之前的 false positive：editor_len 来自 document.body（页面 chrome），
+                    # 任何时候都 > 5，误判 paste_succeeded=True。修后必须 probe_found
+                    if editor_len_after > 30 and probe_found:
+                        publish_guard["body_paste_succeeded"] = True
+                        logger.info(
+                            f"[BodyWrite] paste_succeeded: editor_len={editor_len_after}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[BodyWrite] paste_attempt_failed: "
+                            f"editor_len={editor_len_after} probe_found={probe_found} "
+                            f"editor_source={publish_guard['last_editor_source']}"
+                        )
+
+                # 跟踪步骤摘要（保留最近 10 步）
+                step_summary = {
+                    "step": step_number,
+                    "url": publish_guard["last_url"],
+                    "action": action_summary,
+                    "result": self._extract_result_summary(last_item),
+                    "editor_len": publish_guard["last_editor_text_len"],
+                }
+                publish_guard["step_summaries"].append(step_summary)
+                if len(publish_guard["step_summaries"]) > 10:
+                    publish_guard["step_summaries"] = publish_guard["step_summaries"][-10:]
+
+                # 原有 cover loop 防护
+                if not publish_guard["cover_loop_exceeded"] and self._looks_like_cover_action(last_item):
+                    publish_guard["cover_action_count"] += 1
+                    if publish_guard["cover_action_count"] > 3:
+                        publish_guard["cover_loop_exceeded"] = True
+                        logger.warning("[PublishGuard] cover_loop_limit_exceeded_skip_cover")
+                # 原有确认发布检测
+                if self._did_execute_confirm_publish(last_item) and not publish_guard["confirm_publish_clicked"]:
+                    publish_guard["confirm_publish_clicked"] = True
+                    logger.info("[PublishGuard] confirm_publish_clicked")
 
                 if publish_guard["confirm_publish_clicked"]:
                     failure = await self._detect_publish_failure(session, logger)
@@ -652,17 +728,29 @@ class PublishService:
                             f"{failure.get('signal', 'unknown')} | "
                             f"text={failure.get('matched_text', '')} | url={failure.get('page_url', '')}"
                         )
+                        self._log_final_summary(
+                            publish_guard,
+                            {
+                                "success": False,
+                                "article_url": "",
+                                "failure_reason": failure.get("matched_text", "")
+                                or failure.get("signal", ""),
+                            },
+                            logger,
+                        )
                         agent_instance.state.stopped = True
             except Exception as exc:
                 logger.warning(f"[PublishGuard] step_end detect failed: {exc}")
 
         history = await agent.run(max_steps=80, on_step_end=on_step_end)
-        return self._parse_agent_outcome(
+        result = self._parse_agent_outcome(
             history,
             tracker=tracker,
             logger=logger,
             detected_failure=publish_guard["failure_detected"],
         )
+        self._log_final_summary(publish_guard, result, logger)
+        return result
 
     def _build_publish_tools(self, logger, original_title: str = ""):
         from browser_use import ActionResult, Controller
@@ -713,10 +801,9 @@ class PublishService:
         return any(marker in text for marker in click_markers)
 
     def _build_publish_task(self, title, content, cover_path, logger, cover_loop_exceeded=False):
-        from app.platforms.toutiao import ToutiaoPlatform
         from app.publishing.markdown import markdown_to_html
 
-        platform = ToutiaoPlatform()
+        platform = self._platform()
         is_markdown = self._is_markdown_content(content)
         rich_html = None
 
@@ -823,6 +910,245 @@ class PublishService:
             if logger:
                 logger.warning(f"[PublishGuard] detect_publish_failure failed: {exc}")
             return {"failed": False, "signal": "", "page_url": "", "matched_text": ""}
+
+    async def _capture_page_state(
+        self,
+        session,
+        content_probe: str = "",
+    ) -> dict:
+        """抓取当前页面状态用于诊断日志。
+
+        关键改进（修 4738382 之后的 false positive）：
+        之前读 `document.body.innerText` 把页面 chrome（顶栏、侧栏、封面上传区）
+        当成编辑器内容，导致 editor_len 一直是 457、body_paste_succeeded 误判
+        为 True。现在改为：
+
+        1) 在主文档里找最大 [contenteditable="true"] 元素作为正文编辑器。
+        2) 主文档没有富编辑器时，遍历 iframe 里的 contenteditable 兜底。
+        3) 都没有才退回到 document.body（旧行为）但 editor_source 标记为
+           "body-fallback"，日志里能看出来没找到。
+
+        content_probe 透传后，JS 会检查编辑器可见文本是否包含该探针字符串
+        （取自原始正文的去格式前缀），用于诊断"编辑器真的有正文吗"。
+        """
+        state = {
+            "url": "",
+            "editor_text_length": 0,
+            "editor_text_preview": "",
+            "editor_source": "none",
+            "probe_found": False,
+        }
+        try:
+            state["url"] = await session.get_current_page_url()
+        except Exception:
+            pass
+        try:
+            page = await session.get_current_page()
+            if page is None:
+                return state
+            captured = await page.evaluate(
+                """(contentProbe) => {
+                    const probe = contentProbe || "";
+                    let best = null;
+                    // 1) 主文档里最大的 contenteditable
+                    const editables = Array.from(document.querySelectorAll('[contenteditable="true"]'));
+                    for (const node of editables) {
+                        const t = (node.innerText || node.textContent || '').trim();
+                        const len = t.length;
+                        if (!best || len > best.len) {
+                            best = { text: t, len: len, source: 'contenteditable' };
+                        }
+                    }
+                    // 2) 兜底：iframe 里的 contenteditable
+                    if (!best || best.len < 10) {
+                        const iframes = Array.from(document.querySelectorAll('iframe'));
+                        for (const iframe of iframes) {
+                            try {
+                                const doc = iframe.contentDocument || (iframe.contentWindow && iframe.contentWindow.document);
+                                if (!doc) continue;
+                                const innerEditables = Array.from(doc.querySelectorAll('[contenteditable="true"]'));
+                                for (const node of innerEditables) {
+                                    const t = (node.innerText || node.textContent || '').trim();
+                                    if (t.length > (best ? best.len : 0)) {
+                                        best = { text: t, len: t.length, source: 'iframe-contenteditable' };
+                                    }
+                                }
+                            } catch (e) { /* cross-origin, skip */ }
+                        }
+                    }
+                    // 3) 最终兜底：document.body
+                    if (!best) {
+                        const body = document.body;
+                        const text = body ? (body.innerText || body.textContent || '') : '';
+                        best = { text: text, len: text.length, source: 'body-fallback' };
+                    }
+                    const probeFound = !!(probe && best && best.text && best.text.indexOf(probe) !== -1);
+                    return {
+                        text: best ? best.text : '',
+                        length: best ? best.len : 0,
+                        source: best ? best.source : 'none',
+                        probeFound: probeFound,
+                    };
+                }""",
+                content_probe,
+            )
+            if isinstance(captured, str):
+                try:
+                    parsed = json.loads(captured)
+                    if isinstance(parsed, dict):
+                        captured = parsed
+                    else:
+                        captured = {"text": captured, "length": len(captured), "source": "fallback"}
+                except json.JSONDecodeError:
+                    captured = {"text": captured, "length": len(captured), "source": "fallback"}
+            if isinstance(captured, dict):
+                text = str(captured.get("text", "") or "")
+                state["editor_text_length"] = len(text)
+                state["editor_text_preview"] = text[:200]
+                state["editor_source"] = captured.get("source", "unknown")
+                state["probe_found"] = bool(captured.get("probeFound", False))
+        except Exception:
+            pass
+        return state
+
+    @staticmethod
+    def _compute_body_probe(content: str) -> str:
+        """从原始 content 计算正文存在性探针，算法与各平台 _body_probe 一致。"""
+        import re
+        text = str(content or "")
+        text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+        text = re.sub(r"[*_`>#-]+", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = text.strip()
+        compact = "".join(text.split())
+        return compact[:30]
+
+    @staticmethod
+    def _extract_action_summary(history_item) -> str:
+        """从 history_item 的 model_output 中抽取动作的简短文本。"""
+        try:
+            model_output = getattr(history_item, "model_output", None)
+            if model_output is None:
+                return ""
+            action = getattr(model_output, "action", None)
+            if action is None:
+                return ""
+            if isinstance(action, (list, tuple)):
+                parts = [str(item)[:200] for item in action]
+                return " | ".join(parts)
+            return str(action)[:300]
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _extract_result_summary(history_item) -> str:
+        """从 history_item.result 中抽取 error / extracted_content / long_term_memory。"""
+        try:
+            results = getattr(history_item, "result", None) or []
+            parts = []
+            for result in results:
+                for field_name in ("error", "extracted_content", "long_term_memory"):
+                    value = getattr(result, field_name, None) if result else None
+                    if value:
+                        parts.append(f"{field_name}={str(value)[:200]}")
+            return " | ".join(parts)[:500]
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _looks_like_paste_action(action_summary: str) -> bool:
+        """判定动作字符串是否暗示粘贴尝试。
+
+        包含：
+        - Ctrl+V 真实键事件（send_keys / keyboard.press / page.keyboard）
+        - document.execCommand('insertHTML'/'insertText') fallback 路径
+          （682aa49 引入，绕过系统剪贴板直接 DOM 注入）
+        """
+        text = (action_summary or "").lower()
+        markers = (
+            "control+v",
+            "ctrl+v",
+            "control v",
+            "ctrl v",
+            "send_keys",
+            "keyboard.press",
+            "page.keyboard",
+            "inserthtml",  # execCommand('insertHTML', ...) 落点字符串
+            "inserttext",  # execCommand('insertText', ...) 落点字符串
+            "execcommand",  # 兜底：任何 execCommand 都算
+        )
+        return any(marker in text for marker in markers)
+
+    def _log_step_diagnostics(
+        self,
+        step_number: int,
+        history_item,
+        page_state: dict,
+        logger,
+    ) -> None:
+        """每步结束输出 [StepDiag N] 行，便于排查。"""
+        url = page_state.get("url", "") or ""
+        editor_len = page_state.get("editor_text_length", 0) or 0
+        editor_source = page_state.get("editor_source", "none") or "none"
+        probe_found = bool(page_state.get("probe_found", False))
+        editor_preview = (
+            (page_state.get("editor_text_preview", "") or "").replace("\n", " ")
+        )[:120]
+        logger.info(
+            f"[StepDiag {step_number}] url={url} editor_len={editor_len} "
+            f"editor_source={editor_source} probe_found={probe_found} "
+            f"editor_preview={editor_preview!r}"
+        )
+        action_summary = self._extract_action_summary(history_item)
+        if action_summary:
+            logger.info(f"[StepDiag {step_number}] action: {action_summary[:400]}")
+        result_summary = self._extract_result_summary(history_item)
+        if result_summary:
+            logger.info(f"[StepDiag {step_number}] result: {result_summary[:500]}")
+
+    def _log_final_summary(self, publish_guard: dict, result: dict, logger) -> None:
+        """发布流程结束后输出最终诊断摘要：失败时尤其关键。"""
+        success = bool(result.get("success"))
+        step_summaries = publish_guard.get("step_summaries", []) or []
+        step_count = len(step_summaries)
+        last_url = publish_guard.get("last_url", "") or ""
+        last_editor_len = publish_guard.get("last_editor_text_len", 0) or 0
+        last_editor_source = publish_guard.get("last_editor_source", "none") or "none"
+        last_probe_found = bool(publish_guard.get("last_probe_found", False))
+        last_editor_preview = (
+            (publish_guard.get("last_editor_preview", "") or "").replace("\n", " ")
+        )[:120]
+        body_paste_attempts = publish_guard.get("body_paste_attempts", 0) or 0
+        body_paste_succeeded = bool(publish_guard.get("body_paste_succeeded", False))
+        failure_reason = str(result.get("failure_reason", "") or "")
+        article_url = str(result.get("article_url", "") or "")
+
+        logger.info("=" * 60)
+        logger.info("[FinalDiag] 发布结果诊断")
+        logger.info(f"  状态: {'成功' if success else '失败'}")
+        logger.info(f"  总步数: {step_count}")
+        logger.info(f"  最后 URL: {last_url}")
+        logger.info(f"  最后正文长度: {last_editor_len}")
+        logger.info(f"  最后正文来源: {last_editor_source}")
+        logger.info(f"  最后正文探针命中: {last_probe_found}")
+        logger.info(f"  最后正文预览: {last_editor_preview!r}")
+        logger.info(f"  失败原因: {failure_reason or '(无)'}")
+        logger.info(f"  Article URL: {article_url or '(无)'}")
+        if body_paste_attempts > 0:
+            logger.info(f"  正文粘贴尝试次数: {body_paste_attempts}")
+            logger.info(f"  正文粘贴是否成功: {body_paste_succeeded}")
+        if not success and step_count > 0:
+            logger.info("  最近 5 步摘要:")
+            for s in step_summaries[-5:]:
+                action = (s.get("action", "") or "").replace("\n", " ")[:100]
+                logger.info(
+                    f"    Step {s.get('step', '?')}: "
+                    f"url={s.get('url', '')} editor_len={s.get('editor_len', 0)} "
+                    f"action={action!r}"
+                )
+        logger.info("=" * 60)
 
     async def _reload_page(self, page, logger) -> None:
         await page.evaluate("() => window.location.reload()")
