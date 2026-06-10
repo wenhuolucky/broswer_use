@@ -38,7 +38,11 @@ cp .env.example .env
 LLM_API_KEY=your_qwen_key
 LLM_BASE_URL=http://47.242.205.13:8110/v1
 LLM_MODEL=Qwen/Qwen3.5-397B-A17B
+BROWSER_USE_VISION=auto
+BROWSER_USE_VISION_DETAIL=low
 ```
+
+`BROWSER_USE_VISION` 支持 `auto`、`true`、`false`；默认 `auto`，便于使用多模态模型时按需启用截图输入。`BROWSER_USE_VISION_DETAIL` 支持 `low`、`high`、`auto`，默认 `low` 以控制图片负载。
 
 ## Docker 启动
 
