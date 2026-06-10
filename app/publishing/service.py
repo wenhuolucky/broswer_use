@@ -576,7 +576,7 @@ class PublishService:
 
         available_files = [cover_path] if cover_path else None
 
-        controller = self._build_publish_tools(logger)
+        controller = self._build_publish_tools(logger, original_title=title)
         agent = Agent(
             task=task,
             llm=llm,
@@ -632,7 +632,7 @@ class PublishService:
             detected_failure=publish_guard["failure_detected"],
         )
 
-    def _build_publish_tools(self, logger):
+    def _build_publish_tools(self, logger, original_title: str = ""):
         from browser_use import ActionResult, Controller
 
         controller = Controller()
@@ -642,7 +642,15 @@ class PublishService:
             "found=true 时必须用 article_url 调用 done(success=true)；found=false 时必须用 reason 调用 done(success=false)。"
         )
         async def get_published_article_url(title: str, browser_session):
-            result = await self._lookup_published_article_url(browser_session, title, logger)
+            lookup_title = (original_title or title or "").strip()
+            if logger and title and lookup_title != title:
+                logger.info(
+                    "[PublishUrlTool] ignoring llm supplied title; "
+                    "llm_title=%s | lookup_title=%s",
+                    title,
+                    lookup_title,
+                )
+            result = await self._lookup_published_article_url(browser_session, lookup_title, logger)
             return ActionResult(
                 extracted_content=json.dumps(result, ensure_ascii=False),
                 include_in_memory=True,
