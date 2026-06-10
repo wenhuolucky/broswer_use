@@ -43,7 +43,8 @@ class AutoSohuPublishService(PublishService):
     def _looks_like_sohu_article_url(url: str) -> bool:
         if not url:
             return False
-        if "m.sohu.com/a/" in url:
+        # 官方最终 URL（包含旧 m.sohu.com 和新 www.sohu.com 两种）
+        if "sohu.com/a/" in url and ("m.sohu.com" in url or "www.sohu.com" in url):
             return True
         if "mp.sohu.com/h5/v2/newsPreview" in url and "id=" in url:
             return True
