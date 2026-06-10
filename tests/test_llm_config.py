@@ -51,3 +51,51 @@ def test_browser_llm_keeps_deepseek_fallback(monkeypatch):
     assert llm.model == "deepseek-chat"
     assert str(llm.base_url).rstrip("/") == "https://api.deepseek.com/v1"
     assert _api_key_value(llm) == "legacy-key"
+
+
+def test_browser_vision_config_defaults_to_auto_low(monkeypatch):
+    from app.publishing.service import PublishService
+
+    monkeypatch.delenv("BROWSER_USE_VISION", raising=False)
+    monkeypatch.delenv("BROWSER_USE_VISION_DETAIL", raising=False)
+
+    assert PublishService()._get_browser_vision_config() == {
+        "use_vision": "auto",
+        "vision_detail_level": "low",
+    }
+
+
+def test_browser_vision_config_can_disable_vision(monkeypatch):
+    from app.publishing.service import PublishService
+
+    monkeypatch.setenv("BROWSER_USE_VISION", "false")
+    monkeypatch.setenv("BROWSER_USE_VISION_DETAIL", "high")
+
+    assert PublishService()._get_browser_vision_config() == {
+        "use_vision": False,
+        "vision_detail_level": "high",
+    }
+
+
+def test_browser_vision_config_can_force_enable_vision(monkeypatch):
+    from app.publishing.service import PublishService
+
+    monkeypatch.setenv("BROWSER_USE_VISION", "true")
+    monkeypatch.setenv("BROWSER_USE_VISION_DETAIL", "auto")
+
+    assert PublishService()._get_browser_vision_config() == {
+        "use_vision": True,
+        "vision_detail_level": "auto",
+    }
+
+
+def test_browser_vision_config_invalid_values_fall_back_to_safe_defaults(monkeypatch):
+    from app.publishing.service import PublishService
+
+    monkeypatch.setenv("BROWSER_USE_VISION", "maybe")
+    monkeypatch.setenv("BROWSER_USE_VISION_DETAIL", "ultra")
+
+    assert PublishService()._get_browser_vision_config() == {
+        "use_vision": "auto",
+        "vision_detail_level": "low",
+    }

@@ -413,6 +413,30 @@ class PublishService:
             add_schema_to_system_prompt=True,
         )
 
+    @staticmethod
+    def _get_browser_vision_config() -> dict:
+        import os
+
+        raw_use_vision = os.getenv("BROWSER_USE_VISION", "auto").strip().lower()
+        raw_detail = os.getenv("BROWSER_USE_VISION_DETAIL", "low").strip().lower()
+
+        if raw_use_vision in ("1", "true", "yes", "on"):
+            use_vision = True
+        elif raw_use_vision in ("0", "false", "no", "off"):
+            use_vision = False
+        elif raw_use_vision == "auto":
+            use_vision = "auto"
+        else:
+            use_vision = "auto"
+
+        if raw_detail not in ("auto", "low", "high"):
+            raw_detail = "low"
+
+        return {
+            "use_vision": use_vision,
+            "vision_detail_level": raw_detail,
+        }
+
     async def _launch_isolated_publish_browser(self, auth_file, logger):
         last_exc = None
         for attempt in range(1, self._browser_launch_attempts + 1):
@@ -576,13 +600,21 @@ class PublishService:
 
         available_files = [cover_path] if cover_path else None
 
+        vision_config = self._get_browser_vision_config()
+        logger.info(
+            "[Vision] browser-use vision config: use_vision=%s | vision_detail_level=%s",
+            vision_config["use_vision"],
+            vision_config["vision_detail_level"],
+        )
+
         controller = self._build_publish_tools(logger, original_title=title)
         agent = Agent(
             task=task,
             llm=llm,
             browser_session=session,
             controller=controller,
-            use_vision=False,
+            use_vision=vision_config["use_vision"],
+            vision_detail_level=vision_config["vision_detail_level"],
             max_actions_per_step=3,
             max_failures=5,
             step_timeout=120,
