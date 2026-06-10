@@ -41,13 +41,13 @@ class AutoSohuPublishService(PublishService):
 
     @staticmethod
     def _looks_like_sohu_article_url(url: str) -> bool:
-        return bool(
-            url
-            and (
-                "m.sohu.com/a/" in url
-                or (
-                    "mp.sohu.com/h5/v2/newsPreview" in url
-                    and "id=" in url
-                )
-            )
-        )
+        if not url:
+            return False
+        if "m.sohu.com/a/" in url:
+            return True
+        if "mp.sohu.com/h5/v2/newsPreview" in url and "id=" in url:
+            return True
+        # 后台管理列表的预览 URL（含 /mpfe/v4/.../news/articlepreview）
+        if "mp.sohu.com" in url and "/news/articlepreview" in url and "id=" in url:
+            return True
+        return False

@@ -1059,7 +1059,13 @@ class PublishService:
 
     @staticmethod
     def _looks_like_paste_action(action_summary: str) -> bool:
-        """判定动作字符串是否暗示 Ctrl+V 粘贴尝试。"""
+        """判定动作字符串是否暗示粘贴尝试。
+
+        包含：
+        - Ctrl+V 真实键事件（send_keys / keyboard.press / page.keyboard）
+        - document.execCommand('insertHTML'/'insertText') fallback 路径
+          （682aa49 引入，绕过系统剪贴板直接 DOM 注入）
+        """
         text = (action_summary or "").lower()
         markers = (
             "control+v",
@@ -1069,6 +1075,9 @@ class PublishService:
             "send_keys",
             "keyboard.press",
             "page.keyboard",
+            "inserthtml",  # execCommand('insertHTML', ...) 落点字符串
+            "inserttext",  # execCommand('insertText', ...) 落点字符串
+            "execcommand",  # 兜底：任何 execCommand 都算
         )
         return any(marker in text for marker in markers)
 
