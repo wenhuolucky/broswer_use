@@ -631,21 +631,75 @@ class PublishService:
             "failure_detected": None,
             "cover_action_count": 0,
             "cover_loop_exceeded": False,
+            "body_paste_attempts": 0,
+            "body_paste_succeeded": False,
+            "last_url": "",
+            "last_editor_text_len": 0,
+            "last_editor_preview": "",
+            "step_summaries": [],
         }
 
         async def on_step_end(agent_instance):
             try:
                 history_items = getattr(agent_instance.history, "history", []) or []
-                if history_items:
-                    last_item = history_items[-1]
-                    if not publish_guard["cover_loop_exceeded"] and self._looks_like_cover_action(last_item):
-                        publish_guard["cover_action_count"] += 1
-                        if publish_guard["cover_action_count"] > 3:
-                            publish_guard["cover_loop_exceeded"] = True
-                            logger.warning("[PublishGuard] cover_loop_limit_exceeded_skip_cover")
-                    if self._did_execute_confirm_publish(last_item) and not publish_guard["confirm_publish_clicked"]:
-                        publish_guard["confirm_publish_clicked"] = True
-                        logger.info("[PublishGuard] confirm_publish_clicked")
+                if not history_items:
+                    return
+                last_item = history_items[-1]
+                step_number = len(history_items)
+
+                # 每步抓取页面状态用于诊断
+                try:
+                    page_state = await self._capture_page_state(session)
+                except Exception as exc:
+                    logger.warning(f"[StepDiag {step_number}] state capture failed: {exc}")
+                    page_state = {}
+
+                self._log_step_diagnostics(step_number, last_item, page_state, logger)
+
+                # 更新 publish_guard 中最近状态（用于失败摘要）
+                publish_guard["last_url"] = page_state.get("url", "") or ""
+                publish_guard["last_editor_text_len"] = page_state.get("editor_text_length", 0) or 0
+                publish_guard["last_editor_preview"] = (
+                    page_state.get("editor_text_preview", "") or ""
+                )
+
+                # 跟踪正文粘贴尝试
+                action_summary = self._extract_action_summary(last_item)
+                if action_summary and self._looks_like_paste_action(action_summary):
+                    publish_guard["body_paste_attempts"] += 1
+                    editor_len_after = publish_guard["last_editor_text_len"]
+                    logger.info(
+                        f"[BodyWrite] paste_attempt={publish_guard['body_paste_attempts']} "
+                        f"editor_len_after={editor_len_after}"
+                    )
+                    if editor_len_after > 5:
+                        publish_guard["body_paste_succeeded"] = True
+                        logger.info(
+                            f"[BodyWrite] paste_succeeded: editor_len={editor_len_after}"
+                        )
+
+                # 跟踪步骤摘要（保留最近 10 步）
+                step_summary = {
+                    "step": step_number,
+                    "url": publish_guard["last_url"],
+                    "action": action_summary,
+                    "result": self._extract_result_summary(last_item),
+                    "editor_len": publish_guard["last_editor_text_len"],
+                }
+                publish_guard["step_summaries"].append(step_summary)
+                if len(publish_guard["step_summaries"]) > 10:
+                    publish_guard["step_summaries"] = publish_guard["step_summaries"][-10:]
+
+                # 原有 cover loop 防护
+                if not publish_guard["cover_loop_exceeded"] and self._looks_like_cover_action(last_item):
+                    publish_guard["cover_action_count"] += 1
+                    if publish_guard["cover_action_count"] > 3:
+                        publish_guard["cover_loop_exceeded"] = True
+                        logger.warning("[PublishGuard] cover_loop_limit_exceeded_skip_cover")
+                # 原有确认发布检测
+                if self._did_execute_confirm_publish(last_item) and not publish_guard["confirm_publish_clicked"]:
+                    publish_guard["confirm_publish_clicked"] = True
+                    logger.info("[PublishGuard] confirm_publish_clicked")
 
                 if publish_guard["confirm_publish_clicked"]:
                     failure = await self._detect_publish_failure(session, logger)
@@ -656,17 +710,29 @@ class PublishService:
                             f"{failure.get('signal', 'unknown')} | "
                             f"text={failure.get('matched_text', '')} | url={failure.get('page_url', '')}"
                         )
+                        self._log_final_summary(
+                            publish_guard,
+                            {
+                                "success": False,
+                                "article_url": "",
+                                "failure_reason": failure.get("matched_text", "")
+                                or failure.get("signal", ""),
+                            },
+                            logger,
+                        )
                         agent_instance.state.stopped = True
             except Exception as exc:
                 logger.warning(f"[PublishGuard] step_end detect failed: {exc}")
 
         history = await agent.run(max_steps=80, on_step_end=on_step_end)
-        return self._parse_agent_outcome(
+        result = self._parse_agent_outcome(
             history,
             tracker=tracker,
             logger=logger,
             detected_failure=publish_guard["failure_detected"],
         )
+        self._log_final_summary(publish_guard, result, logger)
+        return result
 
     def _build_publish_tools(self, logger, original_title: str = ""):
         from browser_use import ActionResult, Controller
@@ -826,6 +892,154 @@ class PublishService:
             if logger:
                 logger.warning(f"[PublishGuard] detect_publish_failure failed: {exc}")
             return {"failed": False, "signal": "", "page_url": "", "matched_text": ""}
+
+    async def _capture_page_state(self, session) -> dict:
+        """抓取当前页面状态用于诊断日志：URL + 编辑器可见文本长度 + 前 200 字。"""
+        state = {
+            "url": "",
+            "editor_text_length": 0,
+            "editor_text_preview": "",
+        }
+        try:
+            state["url"] = await session.get_current_page_url()
+        except Exception:
+            pass
+        try:
+            page = await session.get_current_page()
+            if page is None:
+                return state
+            captured = await page.evaluate(
+                """() => {
+                    const body = document.body;
+                    const text = body ? (body.innerText || body.textContent || "") : "";
+                    return { text: text, length: text.length };
+                }"""
+            )
+            if isinstance(captured, str):
+                try:
+                    parsed = json.loads(captured)
+                    if isinstance(parsed, dict):
+                        captured = parsed
+                    else:
+                        captured = {"text": captured, "length": len(captured)}
+                except json.JSONDecodeError:
+                    captured = {"text": captured, "length": len(captured)}
+            if isinstance(captured, dict):
+                text = str(captured.get("text", "") or "")
+                state["editor_text_length"] = len(text)
+                state["editor_text_preview"] = text[:200]
+        except Exception:
+            pass
+        return state
+
+    @staticmethod
+    def _extract_action_summary(history_item) -> str:
+        """从 history_item 的 model_output 中抽取动作的简短文本。"""
+        try:
+            model_output = getattr(history_item, "model_output", None)
+            if model_output is None:
+                return ""
+            action = getattr(model_output, "action", None)
+            if action is None:
+                return ""
+            if isinstance(action, (list, tuple)):
+                parts = [str(item)[:200] for item in action]
+                return " | ".join(parts)
+            return str(action)[:300]
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _extract_result_summary(history_item) -> str:
+        """从 history_item.result 中抽取 error / extracted_content / long_term_memory。"""
+        try:
+            results = getattr(history_item, "result", None) or []
+            parts = []
+            for result in results:
+                for field_name in ("error", "extracted_content", "long_term_memory"):
+                    value = getattr(result, field_name, None) if result else None
+                    if value:
+                        parts.append(f"{field_name}={str(value)[:200]}")
+            return " | ".join(parts)[:500]
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _looks_like_paste_action(action_summary: str) -> bool:
+        """判定动作字符串是否暗示 Ctrl+V 粘贴尝试。"""
+        text = (action_summary or "").lower()
+        markers = (
+            "control+v",
+            "ctrl+v",
+            "control v",
+            "ctrl v",
+            "send_keys",
+            "keyboard.press",
+            "page.keyboard",
+        )
+        return any(marker in text for marker in markers)
+
+    def _log_step_diagnostics(
+        self,
+        step_number: int,
+        history_item,
+        page_state: dict,
+        logger,
+    ) -> None:
+        """每步结束输出 [StepDiag N] 行，便于排查。"""
+        url = page_state.get("url", "") or ""
+        editor_len = page_state.get("editor_text_length", 0) or 0
+        editor_preview = (
+            (page_state.get("editor_text_preview", "") or "").replace("\n", " ")
+        )[:120]
+        logger.info(
+            f"[StepDiag {step_number}] url={url} editor_len={editor_len} "
+            f"editor_preview={editor_preview!r}"
+        )
+        action_summary = self._extract_action_summary(history_item)
+        if action_summary:
+            logger.info(f"[StepDiag {step_number}] action: {action_summary[:400]}")
+        result_summary = self._extract_result_summary(history_item)
+        if result_summary:
+            logger.info(f"[StepDiag {step_number}] result: {result_summary[:500]}")
+
+    def _log_final_summary(self, publish_guard: dict, result: dict, logger) -> None:
+        """发布流程结束后输出最终诊断摘要：失败时尤其关键。"""
+        success = bool(result.get("success"))
+        step_summaries = publish_guard.get("step_summaries", []) or []
+        step_count = len(step_summaries)
+        last_url = publish_guard.get("last_url", "") or ""
+        last_editor_len = publish_guard.get("last_editor_text_len", 0) or 0
+        last_editor_preview = (
+            (publish_guard.get("last_editor_preview", "") or "").replace("\n", " ")
+        )[:120]
+        body_paste_attempts = publish_guard.get("body_paste_attempts", 0) or 0
+        body_paste_succeeded = bool(publish_guard.get("body_paste_succeeded", False))
+        failure_reason = str(result.get("failure_reason", "") or "")
+        article_url = str(result.get("article_url", "") or "")
+
+        logger.info("=" * 60)
+        logger.info("[FinalDiag] 发布结果诊断")
+        logger.info(f"  状态: {'成功' if success else '失败'}")
+        logger.info(f"  总步数: {step_count}")
+        logger.info(f"  最后 URL: {last_url}")
+        logger.info(f"  最后正文长度: {last_editor_len}")
+        logger.info(f"  最后正文预览: {last_editor_preview!r}")
+        logger.info(f"  失败原因: {failure_reason or '(无)'}")
+        logger.info(f"  Article URL: {article_url or '(无)'}")
+        if body_paste_attempts > 0:
+            logger.info(f"  正文粘贴尝试次数: {body_paste_attempts}")
+            logger.info(f"  正文粘贴是否成功: {body_paste_succeeded}")
+        if not success and step_count > 0:
+            logger.info("  最近 5 步摘要:")
+            for s in step_summaries[-5:]:
+                action = (s.get("action", "") or "").replace("\n", " ")[:100]
+                logger.info(
+                    f"    Step {s.get('step', '?')}: "
+                    f"url={s.get('url', '')} editor_len={s.get('editor_len', 0)} "
+                    f"action={action!r}"
+                )
+        logger.info("=" * 60)
 
     async def _reload_page(self, page, logger) -> None:
         await page.evaluate("() => window.location.reload()")
