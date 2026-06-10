@@ -74,6 +74,11 @@ class PublishService:
             "请重试",
         )
 
+    def _platform(self):
+        from app.platforms.toutiao import ToutiaoPlatform
+
+        return ToutiaoPlatform()
+
     async def publish(
         self,
         title: str,
@@ -126,9 +131,8 @@ class PublishService:
             cookies = self._parse_cookie_string(cookie)
             if not cookies:
                 raise ValueError("Cookie 解析结果为空")
-            from app.platforms.toutiao import ToutiaoPlatform
 
-            platform = ToutiaoPlatform()
+            platform = self._platform()
             if not platform.validate_cookies(cookies):
                 raise ValueError(f"Cookie 中未检测到 {platform.name} 的有效登录凭据")
             logger.info(f"[Step 2] Cookie 验证通过（{platform.name}），共 {len(cookies)} 项")
@@ -713,10 +717,9 @@ class PublishService:
         return any(marker in text for marker in click_markers)
 
     def _build_publish_task(self, title, content, cover_path, logger, cover_loop_exceeded=False):
-        from app.platforms.toutiao import ToutiaoPlatform
         from app.publishing.markdown import markdown_to_html
 
-        platform = ToutiaoPlatform()
+        platform = self._platform()
         is_markdown = self._is_markdown_content(content)
         rich_html = None
 

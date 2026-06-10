@@ -14,7 +14,8 @@ from app.jobs.models import (
     STATUS_WAITING_COOKIE,
 )
 from app.publishing.agent import PublishAgent
-from app.utils.urls import normalize_toutiao_article_url
+from app.platforms.sohu import SohuPlatform
+from app.utils.urls import normalize_article_url
 
 
 router = APIRouter()
@@ -161,12 +162,15 @@ def _job_response(code: int, task_status: str, message: str, job_id: str, extra_
 def _published_job_data(job) -> dict:
     payload = job.payload or {}
     result = job.result or {}
+    platform = str(payload.get("platform", "") or "")
+    user_id = str(payload.get("user_id", "") or "")
+    account_id = SohuPlatform().account_id_for_user(user_id) if platform == "sohu" else ""
     return {
-        "user_id": str(payload.get("user_id", "") or ""),
-        "platform": str(payload.get("platform", "") or ""),
+        "user_id": user_id,
+        "platform": platform,
         "title": str(payload.get("title", "") or ""),
         "cover_image_url": str(payload.get("cover_image_url", "") or ""),
-        "article_url": normalize_toutiao_article_url(str(result.get("article_url", "") or "")),
+        "article_url": normalize_article_url(platform, str(result.get("article_url", "") or ""), account_id=account_id),
         "publish_result": {
             "success": bool(result.get("success", False)),
             "account_name": str(result.get("account_name", "") or result.get("account", "") or ""),
