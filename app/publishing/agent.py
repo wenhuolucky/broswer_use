@@ -118,6 +118,18 @@ class PublishAgent:
             log_file_path=current_job.log_file_path if current_job else str(log_path),
         )
 
+    async def clear_cookie(self, request: LoginRequest) -> AutoTaskCreateResponse:
+        deleted = self.cookie_store.delete(request.platform, request.user_id)
+        return AutoTaskCreateResponse(
+            code=200,
+            message="cookie cleared" if deleted else "cookie not found",
+            data={
+                "user_id": request.user_id,
+                "platform": request.platform,
+                "deleted": deleted,
+            },
+        )
+
     def _schedule_publish(self, job_id: str, request: AutoPublishRequest) -> None:
         task = asyncio.create_task(self._publish_with_cookie(job_id, request))
         self._background_tasks.add(task)

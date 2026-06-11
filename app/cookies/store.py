@@ -34,6 +34,13 @@ class CookieStore:
     def load_storage_state_text(self, platform: str, user_id: str) -> str:
         return self.path_for(platform, user_id).read_text(encoding="utf-8")
 
+    def delete(self, platform: str, user_id: str) -> bool:
+        path = self.path_for(platform, user_id)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
     def has_valid_cookie(self, platform: str, user_id: str) -> bool:
         path = self.path_for(platform, user_id)
         if not path.exists():
