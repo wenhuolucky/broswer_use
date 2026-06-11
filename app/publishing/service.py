@@ -749,6 +749,7 @@ class PublishService:
             logger=logger,
             detected_failure=publish_guard["failure_detected"],
         )
+        self._apply_article_url_fallbacks(result, publish_guard, history, logger)
         self._log_final_summary(publish_guard, result, logger)
         return result
 
@@ -1439,6 +1440,44 @@ class PublishService:
             result["failure_reason"] = detected_failure.get("matched_text", "") or detected_failure.get("signal", "")
 
         return result
+
+    def _apply_article_url_fallbacks(self, result: dict, publish_guard: dict, history, logger) -> None:
+        if result.get("article_url"):
+            return
+
+        history_url = self._extract_article_url_from_history(history)
+        if history_url:
+            result["article_url"] = history_url
+            if logger:
+                logger.info("[PublishUrlFallback] using article URL from history text: %s", history_url)
+        else:
+            last_url = str(publish_guard.get("last_url", "") or "")
+            fallback_url = self._extract_article_url_from_text(last_url)
+            if fallback_url:
+                result["article_url"] = fallback_url
+                if logger:
+                    logger.info("[PublishUrlFallback] using final browser URL as article_url: %s", fallback_url)
+
+        if result.get("success") and not result.get("article_url"):
+            result["success"] = False
+            result["failure_reason"] = result.get("failure_reason") or "发布成功但未获取到文章 URL"
+
+    def _extract_article_url_from_history(self, history) -> str:
+        final = ""
+        try:
+            final = history.final_result()
+        except Exception:
+            final = ""
+        fallback_url = self._extract_article_url_from_text(str(final or ""))
+        if fallback_url:
+            return fallback_url
+
+        for item in getattr(history, "history", []) or []:
+            for text in self._iter_history_result_texts(item):
+                fallback_url = self._extract_article_url_from_text(text)
+                if fallback_url:
+                    return fallback_url
+        return ""
 
     def _extract_article_url_from_text(self, text: str) -> str:
         urls = re.findall(r"https?://[^\s<>\"'，。；、)）\]]+", text or "")

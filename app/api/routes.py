@@ -41,6 +41,13 @@ async def login(request: LoginRequest, auth_error: dict | None = Depends(require
     return (await agent.start_login_only(request)).model_dump()
 
 
+@router.post("/clearcookie")
+async def clear_cookie(request: LoginRequest, auth_error: dict | None = Depends(require_api_token)):
+    if auth_error:
+        return auth_error
+    return (await agent.clear_cookie(request)).model_dump()
+
+
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: str, auth_error: dict | None = Depends(require_api_token)):
     if auth_error:

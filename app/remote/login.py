@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import quote, urlparse
 
-from app.core.config import REMOTE_PROFILE_DIR
+from app.core.config import CLOUDFLARED_PROXY_KEEPALIVE_TIMEOUT, REMOTE_PROFILE_DIR
 from app.remote.display_config import get_remote_browser_window_size
 from app.streaming import kasmvnc
 from app.streaming.display_pool import DisplayPool, Slot
@@ -510,8 +510,15 @@ def _is_remote_login_url_allowed(platform: str, url: str) -> bool:
 
 
 async def _start_cloudflared_tunnel(local_port: int) -> tuple[subprocess.Popen, str]:
+    # Layer 3: raise the cloudflared<->local-viewer idle-connection close
+    # timeout above the default 1m30s so the hop is not reaped during quiet
+    # periods. This is a hardening flag only; the primary keepalive lives in
+    # vnc_proxy._bridge. Empty config value keeps cloudflared defaults.
+    cmd = [_find_cloudflared_path(), "tunnel", "--url", f"http://127.0.0.1:{local_port}", "--no-autoupdate"]
+    if CLOUDFLARED_PROXY_KEEPALIVE_TIMEOUT:
+        cmd += ["--proxy-keepalive-timeout", CLOUDFLARED_PROXY_KEEPALIVE_TIMEOUT]
     proc = subprocess.Popen(
-        [_find_cloudflared_path(), "tunnel", "--url", f"http://127.0.0.1:{local_port}", "--no-autoupdate"],
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

@@ -83,6 +83,53 @@ def setup_request_logger(request_id: str) -> logging.Logger:
     return _setup_publish_logger(request_id).logger
 
 
+def get_vnc_logger() -> logging.Logger:
+    """远程连接 VNC 代理专用 logger。
+
+    远程登录的 WebSocket 代理（app/api/vnc_proxy.py）不属于任何 job_id，
+    它的连接日志是 session 级别的。这个 logger 同时输出到：
+    - 控制台（stdout）
+    - 文件 logs/vnc_proxy.log
+
+    目的：在生产 uvicorn 环境下也能稳定看到 VNC 连接的打开/断开/断开原因，
+    用于排查远程连接 8-9 秒断开等问题。
+
+    注意：默认的 app.vnc_proxy logger 没有挂 handler，靠 propagate 传到 root，
+    而 uvicorn 不会把 root 配成 INFO+console+file，导致 INFO 日志被丢弃。
+    这里显式挂 handler 并关闭 propagate，确保日志不丢。
+
+    session_id 通过 LOG_FORMAT 的 request_id 字段透出，没有时填 "VNC"。
+    """
+    logger = logging.getLogger("app.vnc_proxy")
+    logger.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.INFO))
+    logger.propagate = False
+
+    if logger.handlers:
+        return logger
+
+    class VncFormatter(logging.Formatter):
+        def format(self, record):
+            if not hasattr(record, "request_id"):
+                record.request_id = "VNC"
+            return super().format(record)
+
+    formatter = VncFormatter(LOG_FORMAT)
+
+    # 控制台 handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # 文件 handler：logs/vnc_proxy.log
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    vnc_file = LOG_DIR / "vnc_proxy.log"
+    file_handler = logging.FileHandler(vnc_file, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    return logger
+
+
 def get_service_logger() -> logging.Logger:
     """获取服务级别的全局 logger（不带 request_id）"""
     logger = logging.getLogger("publish.service")
