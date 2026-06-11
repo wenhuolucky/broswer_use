@@ -277,6 +277,26 @@ curl -X POST http://127.0.0.1:19000/api/v1/publish/savecookie/{job_id}
 | `409` | 任务没有远程登录 session，或 Cookie 已保存，或任务已进入发布流程 |
 | `500` | 提取 Cookie 或继续发布时异常 |
 
+### 5. 终止任务和清理账号数据
+
+```http
+POST /api/v1/publish/cancel
+POST /api/v1/publish/cleanup
+```
+
+两个接口都使用相同请求体，并且需要 `Authorization: Bearer <PUBLISH_API_TOKEN>`：
+
+```json
+{
+  "user_id": "user1",
+  "platform": "toutiao"
+}
+```
+
+- `cancel`：终止指定用户和平台当前正在执行或等待登录的最新任务，任务会变为 `failed`，失败原因是 `任务已被用户终止`。该接口不会删除 Cookie。
+- `cleanup`：替代旧的 `clearcookie`。如果存在当前任务，会先执行终止逻辑，然后删除 `data/cookies/{platform}/{user_id}.json`，并尝试关闭关联的远程登录 session。
+- `/api/v1/publish/clearcookie` 已删除，不再作为兼容入口保留。
+
 ## 运行期目录
 
 - `data/cookies/{platform}/{user_id}.json`：长期保存用户 Cookie

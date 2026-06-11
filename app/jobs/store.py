@@ -89,6 +89,24 @@ class JobStore:
         with self._lock:
             return [job for job in self._jobs.values() if job.status in statuses]
 
+    def find_latest_by_user_platform_statuses(
+        self,
+        user_id: str,
+        platform: str,
+        statuses: set[str],
+    ) -> Job | None:
+        user_id = str(user_id or "")
+        platform = str(platform or "")
+        candidates = [
+            job
+            for job in self.list_by_statuses(statuses)
+            if str((job.payload or {}).get("user_id", "")) == user_id
+            and str((job.payload or {}).get("platform", "toutiao") or "toutiao") == platform
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda job: job.updated_at or job.created_at)
+
     def _connect_redis(self, redis_url: str):
         try:
             from redis import Redis

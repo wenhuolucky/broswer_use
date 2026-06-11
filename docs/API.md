@@ -416,6 +416,131 @@ curl.exe -X POST http://127.0.0.1:8000/api/v1/publish/savecookie/9c833a78-4f42-4
 | `409` | 当前任务状态 | `remote login runner not available` | 当前进程没有可用的远程登录 runner |
 | `500` | `failed` | 异常信息 | Cookie 提取、校验或保存异常 |
 
+### 4.6 终止当前任务
+
+```http
+POST /api/v1/publish/cancel
+```
+
+按 `user_id` 和 `platform` 终止该账号当前正在执行或等待登录的最新任务。
+
+是否需要鉴权：是。
+
+请求体：
+
+```json
+{
+  "user_id": "user1",
+  "platform": "toutiao"
+}
+```
+
+行为说明：
+
+- 若找到当前任务，会将任务状态更新为 `failed`，失败原因写入 `任务已被用户终止`。
+- 若任务有本进程后台发文 task，会请求取消该 task。
+- 若任务有关联的远程登录 session，会尝试关闭远程 session 并清空 `live_url`、`login_url`、`remote_session_id`。
+- 该接口不会删除 Cookie。如需同时删除 Cookie 和相关临时会话，请调用 `cleanup`。
+- 当前部署按单 worker 设计时可以直接取消正在运行的本地 agent。若未来使用多 worker，可能只能更新任务状态，返回中的 `task_cancel_requested=false` 表示当前进程没有拿到该任务的本地 task 句柄。
+
+请求示例：
+
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/api/v1/publish/cancel `
+  -H "Authorization: Bearer <PUBLISH_API_TOKEN>" `
+  -H "Content-Type: application/json" `
+  -Body '{"user_id":"user1","platform":"toutiao"}'
+```
+
+响应示例：
+
+```json
+{
+  "code": 200,
+  "message": "task cancelled",
+  "data": {
+    "user_id": "user1",
+    "platform": "toutiao",
+    "job_id": "9c833a78-4f42-4c98-aef6-cc7d0d06a7f8",
+    "cancelled": true,
+    "previous_status": "publishing",
+    "task_cancel_requested": true,
+    "remote_session_cleaned": false
+  }
+}
+```
+
+没有当前任务时也会返回成功，便于调用方做幂等处理：
+
+```json
+{
+  "code": 200,
+  "message": "no running task",
+  "data": {
+    "user_id": "user1",
+    "platform": "toutiao",
+    "job_id": "",
+    "cancelled": false,
+    "task_cancel_requested": false
+  }
+}
+```
+
+### 4.7 清理账号数据
+
+```http
+POST /api/v1/publish/cleanup
+```
+
+按 `user_id` 和 `platform` 清理该账号的运行期数据。该接口用于替代旧的 `/clearcookie`，旧接口已经删除。
+
+是否需要鉴权：是。
+
+请求体：
+
+```json
+{
+  "user_id": "user1",
+  "platform": "sohu"
+}
+```
+
+行为说明：
+
+- 如果该账号在指定平台存在当前任务，会先执行 `cancel` 的终止逻辑。
+- 删除 `data/cookies/{platform}/{user_id}.json`。
+- 尝试关闭该账号当前任务关联的远程登录 session。
+- 不删除 `logs/jobs/` 或 `logs/requests/` 下的历史日志，方便后续排查。
+
+请求示例：
+
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/api/v1/publish/cleanup `
+  -H "Authorization: Bearer <PUBLISH_API_TOKEN>" `
+  -H "Content-Type: application/json" `
+  -Body '{"user_id":"user1","platform":"sohu"}'
+```
+
+响应示例：
+
+```json
+{
+  "code": 200,
+  "message": "account data cleaned",
+  "data": {
+    "user_id": "user1",
+    "platform": "sohu",
+    "job_id": "64d9df1e-dcc1-4d7e-8c44-7f3e5932ac72",
+    "deleted": {
+      "cookie": true,
+      "active_task_cancelled": true,
+      "remote_session_cleaned": true
+    },
+    "task_cancel_requested": false
+  }
+}
+```
+
 ## 5. 推荐调用流程
 
 ### 5.1 自动发文，Cookie 已存在
