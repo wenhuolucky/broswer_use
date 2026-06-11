@@ -42,8 +42,29 @@ _remote_display_pool = DisplayPool(
 )
 
 REMOTE_LOGIN_ALLOWED_HOSTS = {
-    "toutiao": ("toutiao.com",),
-    "sohu": ("sohu.com",),
+    "toutiao": (
+        "toutiao.com",
+        # 头条登录过程中嵌入的第三方域名（验证码、SSO、CDN 等）
+        "snssdk.com",
+        "byteimg.com",
+        "pstatp.com",
+        "bytedance.com",
+        "volces.com",
+        "bytegoofy.com",
+        "toutiaoapi.com",
+        "amemv.com",
+    ),
+    "sohu": (
+        "sohu.com",
+        # 搜狐登录过程中嵌入的第三方域名（腾讯滑块验证码、CDN 等）
+        "gtimg.com",  # turing.captcha.gtimg.com（腾讯滑块验证码）
+        "gtimg.cn",
+        "qq.com",
+        "qpic.cn",
+        "qlogo.cn",
+        "smtcdns.net",
+        "idqqimg.com",
+    ),
 }
 
 
