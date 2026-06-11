@@ -71,6 +71,10 @@ async def start_stream(
     display_num = slot.display.lstrip(":")
     stream.log_path = str(Path(tempfile.gettempdir()) / f"kasmvnc-X{display_num}.log")
     stream._logf = open(stream.log_path, "wb")
+
+    # 并发场景下，如果之前的 Xvnc 崩溃残留锁文件，先清理
+    await _cleanup_stale_display(display_num)
+
     args = [
         kasmvnc_bin,
         slot.display,
@@ -117,3 +121,47 @@ async def _wait_display_ready(
         await asyncio.sleep(0.2)
         waited += 0.2
     return proc.returncode is None and sock.exists()
+
+
+async def _cleanup_stale_display(display_num: str) -> None:
+    """清理残留的 X display 锁文件和 socket。
+
+    并发场景下，如果 Xvnc 进程崩溃但没清理锁文件，下次启动会报
+    "Server is already active for display X"。这个函数检查锁文件是否
+    真的对应一个活着的进程，如果是残留的，删除锁文件和 socket。
+    """
+    lock_file = Path(f"/tmp/.X{display_num}-lock")
+    sock_file = Path(f"/tmp/.X11-unix/X{display_num}")
+
+    if lock_file.exists():
+        try:
+            # 锁文件里存的是进程 PID
+            pid_str = lock_file.read_text().strip()
+            if pid_str.isdigit():
+                pid = int(pid_str)
+                # 检查进程是否还在跑
+                try:
+                    import os
+                    import signal
+                    os.kill(pid, 0)  # 不发送信号，只检查进程是否存在
+                    # 进程还在跑，不能删除锁文件
+                    return False
+                except ProcessLookupError:
+                    # 进程不在，锁文件是残留的，删除
+                    lock_file.unlink()
+                except PermissionError:
+                    # 没权限检查，保守起见不删除
+                    return False
+            else:
+                # 锁文件格式不对，直接删除
+                lock_file.unlink()
+        except Exception:
+            pass
+
+    if sock_file.exists():
+        try:
+            sock_file.unlink()
+        except Exception:
+            pass
+
+    return True
