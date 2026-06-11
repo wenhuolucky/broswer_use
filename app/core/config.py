@@ -58,8 +58,16 @@ def _env_bool(name: str, default: bool) -> bool:
 # app/remote/login.py); the publish flow and its CDP screencast viewer
 # (app/remote/viewer.py) are untouched.
 VNC_PROXY_KEEPALIVE_INTERVAL = _env_int("VNC_PROXY_KEEPALIVE_INTERVAL", 10)
-KASMVNC_WS_PING_INTERVAL = _env_int("KASMVNC_WS_PING_INTERVAL", 15)
-KASMVNC_WS_PING_TIMEOUT = _env_int("KASMVNC_WS_PING_TIMEOUT", 60)
+# Upstream (proxy<->KasmVNC) WebSocket protocol ping. DISABLED by default (0).
+# KasmVNC's websockify does NOT answer WebSocket protocol PING frames
+# (novnc/websockify#170), so enabling library auto-ping makes websockets kill a
+# perfectly live connection after interval+timeout seconds ("keepalive ping
+# timeout"). The upstream hop is a local loopback (127.0.0.1) carrying a
+# continuous screencast stream, so TCP + real traffic already prove liveness;
+# a genuine KasmVNC crash drops TCP and surfaces via the bridge read loop.
+# Set a positive interval only if you knowingly run a websockify that pongs.
+KASMVNC_WS_PING_INTERVAL = _env_int("KASMVNC_WS_PING_INTERVAL", 0, min_value=0)
+KASMVNC_WS_PING_TIMEOUT = _env_int("KASMVNC_WS_PING_TIMEOUT", 60, min_value=0)
 # Maps to cloudflared `tunnel --proxy-keepalive-timeout` (idle connection
 # close timeout for the cloudflared<->local-viewer hop; default upstream is
 # 1m30s). Empty value disables the flag and keeps cloudflared defaults.

@@ -220,14 +220,17 @@ async def vnc_ws(websocket: WebSocket, session_id: str, path: str) -> None:
     qs = websocket.url.query
     upstream_url = f"ws://127.0.0.1:{port}/{path}" + (f"?{qs}" if qs else "")
     started = time.monotonic()
+    # 0 in config means "disable library auto-ping" — websockets wants None.
+    upstream_ping_interval = KASMVNC_WS_PING_INTERVAL or None
+    upstream_ping_timeout = KASMVNC_WS_PING_TIMEOUT or None
     logger.info(
         "[vnc-ws] open session=%s path=%s upstream_port=%s keepalive=%ss ping=%s/%s",
         session_id,
         path,
         port,
         VNC_PROXY_KEEPALIVE_INTERVAL,
-        KASMVNC_WS_PING_INTERVAL,
-        KASMVNC_WS_PING_TIMEOUT,
+        upstream_ping_interval,
+        upstream_ping_timeout,
         extra={"request_id": session_id},
     )
     try:
@@ -235,9 +238,14 @@ async def vnc_ws(websocket: WebSocket, session_id: str, path: str) -> None:
             upstream_url,
             max_size=None,
             open_timeout=10,
-            # Layer 1: keep the proxy<->KasmVNC hop alive with protocol ping.
-            ping_interval=KASMVNC_WS_PING_INTERVAL,
-            ping_timeout=KASMVNC_WS_PING_TIMEOUT,
+            # Upstream (proxy<->KasmVNC) is a local loopback carrying a live
+            # screencast stream. Library auto-ping is DISABLED by default
+            # (ping_interval=None) because KasmVNC's websockify never answers
+            # WebSocket PING frames, which previously made websockets kill the
+            # live connection after 75s ("keepalive ping timeout"). TCP + real
+            # traffic prove liveness; a real crash surfaces via the read loop.
+            ping_interval=upstream_ping_interval,
+            ping_timeout=upstream_ping_timeout,
             subprotocols=requested or None,
             additional_headers={"Origin": f"http://127.0.0.1:{port}"},
         ) as upstream:
