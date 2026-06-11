@@ -245,9 +245,27 @@ def _build_vnc_url(base_url: str, session_id: str, token: str) -> str:
 
 
 def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    """在配置的端口范围内找一个空闲端口（默认 8000-9999）。
+
+    服务器端口白名单通常限制在 8000-9999，OS 随机分配的端口（32768-60999）
+    会被防火墙/白名单拦截，导致 Chrome bind() 失败、CDP 端口连不上。
+    通过环境变量 CDP_PORT_RANGE 可配置范围，默认 8000-9999。
+    """
+    port_range = os.getenv("CDP_PORT_RANGE", "8000-9999")
+    try:
+        start, end = map(int, port_range.split("-"))
+    except (ValueError, AttributeError):
+        start, end = 8000, 9999
+
+    for port in range(start, end + 1):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(f"No free port in range {port_range}")
 
 
 def _find_browser_path() -> str:
