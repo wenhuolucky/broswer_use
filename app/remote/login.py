@@ -408,11 +408,29 @@ async def _attach_browser(cdp_port: int, login_url: str):
 
 
 def _install_remote_navigation_guard(page, platform: str, login_url: str, logger) -> None:
+    """安装远程登录 URL 守卫，防止用户点击链接跳转到非登录相关页面。
+
+    关键改进（2026-06-11 修白屏问题）：
+    - 增加 grace_period 机制：初始加载阶段（安装 guard 后的 15 秒内）
+      不触发拦截，避免 login_url 自身的重定向链被误拦截导致白屏。
+    - 只在用户主动点击链接触发的后续导航才拦截。
+    """
+    grace_until = asyncio.get_event_loop().time() + 15.0  # 15 秒保护期
+    guard_state = {"last_intercepted_url": "", "intercept_count": 0}
+
     def on_frame_navigated(frame):
         if getattr(frame, "parent_frame", None):
             return
+
+        # grace period 内不拦截（让初始加载和重定向链跑完）
+        now = asyncio.get_event_loop().time()
+        if now < grace_until:
+            return
+
         try:
-            asyncio.create_task(_enforce_remote_navigation_guard(page, platform, login_url, logger))
+            asyncio.create_task(
+                _enforce_remote_navigation_guard(page, platform, login_url, logger, guard_state)
+            )
         except RuntimeError:
             pass
 
@@ -423,13 +441,36 @@ def _install_remote_navigation_guard(page, platform: str, login_url: str, logger
             logger.warning("远程登录 URL 守卫安装失败: %s", exc)
 
 
-async def _enforce_remote_navigation_guard(page, platform: str, login_url: str, logger) -> None:
+async def _enforce_remote_navigation_guard(
+    page, platform: str, login_url: str, logger, guard_state: dict | None = None
+) -> None:
     current_url = str(getattr(page, "url", "") or "")
     if _is_remote_login_url_allowed(platform, current_url):
         return
+
+    # 防止同一 URL 被反复拦截（避免"拦截 → goto → 又触发 guard → 又拦截"的死循环）
+    if guard_state is not None:
+        if current_url == guard_state.get("last_intercepted_url"):
+            return
+        guard_state["last_intercepted_url"] = current_url
+        guard_state["intercept_count"] = guard_state.get("intercept_count", 0) + 1
+        # 同一 session 拦截超过 5 次，停止拦截，避免死循环把页面搞挂
+        if guard_state["intercept_count"] > 5:
+            if logger:
+                logger.warning(
+                    "远程登录 URL 守卫达到拦截上限，停止拦截 current_url=%s intercept_count=%s",
+                    current_url,
+                    guard_state["intercept_count"],
+                )
+            return
+
     if logger:
         logger.warning("远程登录 URL 被拦截 platform=%s url=%s", platform, current_url)
-    await page.goto(login_url, timeout=30000, wait_until="domcontentloaded")
+    try:
+        await page.goto(login_url, timeout=30000, wait_until="domcontentloaded")
+    except Exception as exc:
+        if logger:
+            logger.warning("远程登录 URL 守卫跳回 login_url 失败: %s", exc)
 
 
 def _is_remote_login_url_allowed(platform: str, url: str) -> bool:
