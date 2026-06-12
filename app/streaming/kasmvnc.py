@@ -57,7 +57,12 @@ def _resolve_www(configured: str | None) -> str | None:
 
 
 async def start_stream(
-    slot: Slot, *, kasmvnc_bin: str, screen: str, www_dir: str | None = None
+    slot: Slot,
+    *,
+    kasmvnc_bin: str,
+    screen: str,
+    www_dir: str | None = None,
+    quality: dict | None = None,
 ) -> StreamProcess:
     parts = screen.split("x")
     if len(parts) == 3:
@@ -90,6 +95,17 @@ async def start_stream(
         "-websocketPort",
         str(slot.web_port),
     ]
+    if quality:
+        # 钳制画质：抬高动态质量下限 + 视频模式质量，避免登录页动态背景
+        # 触发 KasmVNC 视频模式后画面变糊。质量刻度 0-9。
+        args.extend(
+            [
+                "-DynamicQualityMin", str(quality["quality_min"]),
+                "-DynamicQualityMax", str(quality["quality_max"]),
+                "-JpegVideoQuality", str(quality["video_quality"]),
+                "-WebpVideoQuality", str(quality["video_quality"]),
+            ]
+        )
     www = _resolve_www(www_dir)
     if www:
         args.extend(["-httpd", www])

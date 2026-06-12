@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import httpx
 import websockets
@@ -24,6 +25,32 @@ _HOP_BY_HOP = {
     "content-length",
 }
 _RESP_DROP = _HOP_BY_HOP | {"server", "date"}
+
+# 登录 viewer 不需要 KasmVNC 左侧控制栏(Keys/Clipboard/Settings/Disconnect…)。
+# 整个面板及其边缘展开把手都挂在 #noVNC_control_bar_anchor 下，隐藏它即可，
+# 鼠标/键盘仍正常透传到远程浏览器。可用 REMOTE_VIEWER_HIDE_CONTROL_BAR=0 关闭注入。
+_HIDE_CONTROL_BAR_CSS = (
+    "<style>#noVNC_control_bar_anchor{display:none!important;}</style>"
+)
+
+
+def _hide_control_bar_enabled() -> bool:
+    import os
+
+    return os.getenv("REMOTE_VIEWER_HIDE_CONTROL_BAR", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+
+
+def _inject_hide_control_bar(html: str) -> str:
+    lowered = html.lower()
+    for anchor in ("</head>", "</body>"):
+        idx = lowered.rfind(anchor)
+        if idx != -1:
+            return html[:idx] + _HIDE_CONTROL_BAR_CSS + html[idx:]
+    return html + _HIDE_CONTROL_BAR_CSS
 
 
 def _runner(request_or_websocket):
@@ -92,12 +119,24 @@ async def vnc_http(session_id: str, path: str, request: Request) -> Response:
         for key, value in upstream_resp.headers.items()
         if key.lower() not in _RESP_DROP
     }
-    response = StreamingResponse(
-        upstream_resp.aiter_raw(),
-        status_code=upstream_resp.status_code,
-        headers=headers,
-        background=BackgroundTask(_aclose, upstream_resp, client),
-    )
+    content_type = upstream_resp.headers.get("content-type", "")
+    if "text/html" in content_type.lower() and _hide_control_bar_enabled():
+        # HTML 页面较小：缓冲后注入隐藏控制栏的 CSS，再整体返回。
+        # 用 aread() 取已解码(去除 content-encoding)的正文，content-length 由 Response 重算。
+        raw = await upstream_resp.aread()
+        status_code = upstream_resp.status_code
+        await _aclose(upstream_resp, client)
+        body = _inject_hide_control_bar(
+            raw.decode("utf-8", errors="replace")
+        ).encode("utf-8")
+        response = Response(content=body, status_code=status_code, headers=headers)
+    else:
+        response = StreamingResponse(
+            upstream_resp.aiter_raw(),
+            status_code=upstream_resp.status_code,
+            headers=headers,
+            background=BackgroundTask(_aclose, upstream_resp, client),
+        )
     if request.query_params.get("token") == token:
         response.set_cookie(
             _COOKIE_PREFIX + session_id,
@@ -138,6 +177,12 @@ async def vnc_ws(websocket: WebSocket, session_id: str, path: str) -> None:
             upstream_url,
             max_size=None,
             open_timeout=10,
+            # 纯二进制透传代理：关掉 websockets 自带的保活 ping。
+            # VNC 协议自身有活动；KasmVNC 上游在持续编码(如登录页背景视频)、
+            # CPU 吃满时不一定及时回 WS 层 pong，默认 20s ping_timeout 会误判
+            # 超时并以 1011 断开，引发反复重连/画面抖动。
+            ping_interval=None,
+            ping_timeout=None,
             subprotocols=requested or None,
             additional_headers={"Origin": f"http://127.0.0.1:{port}"},
         ) as upstream:
@@ -165,11 +210,15 @@ async def _bridge(client_ws: WebSocket, upstream) -> None:
             pass
 
     async def upstream_to_client() -> None:
-        async for message in upstream:
-            if isinstance(message, bytes):
-                await client_ws.send_bytes(message)
-            else:
-                await client_ws.send_text(message)
+        try:
+            async for message in upstream:
+                if isinstance(message, bytes):
+                    await client_ws.send_bytes(message)
+                else:
+                    await client_ws.send_text(message)
+        except websockets.exceptions.ConnectionClosed:
+            # 上游断开是正常收尾（用户关闭/会话结束），不当异常上抛。
+            pass
 
     done, pending = await asyncio.wait(
         {
@@ -180,3 +229,7 @@ async def _bridge(client_ws: WebSocket, upstream) -> None:
     )
     for task in pending:
         task.cancel()
+    # 取走已完成任务的异常，避免 "Task exception was never retrieved" 噪音日志。
+    for task in done:
+        with contextlib.suppress(Exception):
+            task.result()
