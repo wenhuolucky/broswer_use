@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from .base import PlatformConfig
+from app.platforms.base import PlatformConfig
 
 
 @dataclass
@@ -12,6 +12,11 @@ class ToutiaoPlatform(PlatformConfig):
     publish_url: str = "https://mp.toutiao.com/profile_v4/graphic/publish"
     auth_domains: list = field(default_factory=lambda: [".toutiao.com", "mp.toutiao.com", "www.toutiao.com"])
     account_cookies: list = field(default_factory=lambda: ["uid_tt", "uid_tt_ss"])
+    # 头条登录态的标志性 cookie；extract_native_key 默认取首个（uid_tt）做账号去重键。
+    login_cookie_names: list = field(default_factory=lambda: [
+        "uid_tt", "uid_tt_ss", "sessionid", "sessionid_ss",
+        "sid_tt", "sid_guard", "sid_ucp_v1", "ssid_ucp_v1",
+    ])
 
     def get_agent_prompt(
         self,

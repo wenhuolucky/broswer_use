@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass, field
 
-from .base import PlatformConfig
+from app.platforms.base import PlatformConfig
 
 
 @dataclass
@@ -17,25 +16,17 @@ class SohuPlatform(PlatformConfig):
     auth_domains: list = field(default_factory=lambda: [".sohu.com", "mp.sohu.com", "www.sohu.com"])
     account_cookies: list = field(default_factory=lambda: ["SUV", "ppinf", "ppmdig"])
 
-    def account_id_for_user(self, user_id: str) -> str:
-        user_id = str(user_id or "").strip()
-        mapping = self._parse_account_id_map(os.getenv("SOHU_ACCOUNT_ID_MAP", ""))
-        if user_id and user_id in mapping:
-            return mapping[user_id]
-        return os.getenv("SOHU_ACCOUNT_ID", "").strip()
+    def extract_native_key(self, cookies: list) -> str:
+        # 搜狐用 passport 标识 ppinf 作为账号去重键，回退到 ppmdig / SUV。
+        by_name = {c.get("name"): c.get("value") for c in cookies if c.get("name")}
+        for name in ("ppinf", "ppmdig", "SUV"):
+            if by_name.get(name):
+                return str(by_name[name])
+        return ""
 
-    @staticmethod
-    def _parse_account_id_map(raw_mapping: str) -> dict[str, str]:
-        result: dict[str, str] = {}
-        for item in (raw_mapping or "").split(","):
-            if ":" not in item:
-                continue
-            user_id, account_id = item.split(":", 1)
-            user_id = user_id.strip()
-            account_id = account_id.strip()
-            if user_id and account_id:
-                result[user_id] = account_id
-        return result
+    def article_url_account_id(self, metadata: dict) -> str:
+        # 搜狐号数字 id 取自该渠道 metadata 里登录期抓到的 account_number。
+        return str((metadata or {}).get("account_number", "") or "").strip()
 
     def get_agent_prompt(
         self,

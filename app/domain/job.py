@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.domain.channel import validate_channel_id
+
+
+# Platforms this service can publish to / log in. Constrained at the request
+# boundary so an unknown platform is rejected with a clean 422.
+Platform = Literal["toutiao", "sohu"]
 
 
 STATUS_QUEUED = "queued"
@@ -16,19 +23,40 @@ STATUS_WAITING_COOKIE = "waiting_cookie"
 STATUS_PUBLISHING = "publishing"
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
+STATUS_CANCELLED = "cancelled"
 
 
 class AutoPublishRequest(BaseModel):
-    user_id: str = Field(..., min_length=1, description="用户 ID，用于隔离 Cookie")
-    platform: str = Field(default="toutiao", min_length=1, description="发布平台")
+    # 发文只认 channel_id：平台由该渠道解析，不再单独传 platform/user_id。
+    channel_id: str = Field(..., min_length=1, description="渠道 ID（登录时由服务签发）")
     title: str = Field(..., min_length=1, max_length=200, description="文章标题")
     content: str = Field(..., min_length=1, description="文章正文")
     cover_image_url: str | None = Field(default=None, description="封面图片 URL")
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "channel_id": "3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c",
+                "title": "测试标题",
+                "content": "文章正文内容",
+                "cover_image_url": "https://example.com/cover.jpg",
+            }
+        }
+    }
+
+    @field_validator("channel_id")
+    @classmethod
+    def _check_channel_id(cls, v: str) -> str:
+        return validate_channel_id(v)
+
 
 class LoginRequest(BaseModel):
-    user_id: str = Field(..., min_length=1, description="User ID for cookie isolation")
-    platform: str = Field(default="toutiao", min_length=1, description="Login platform")
+    # 登录只需平台：服务据此签发一个新的 channel_id。
+    platform: Platform = Field(default="toutiao", description="登录平台")
+
+    model_config = {
+        "json_schema_extra": {"example": {"platform": "toutiao"}}
+    }
 
 
 class AutoPublishResponse(BaseModel):
@@ -60,6 +88,10 @@ class Job:
     log_file_path: str = ""
     result: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    # Derived/queryable convenience fields (kept optional so Job(**data) over
+    # legacy/serialized payloads keeps working).
+    type: str = "publish"  # 'publish' | 'login'
+    article_url: str = ""
 
     def touch(self) -> None:
         self.updated_at = datetime.now(UTC).isoformat()

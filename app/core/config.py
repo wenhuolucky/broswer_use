@@ -18,14 +18,33 @@ def _project_path(value: str | os.PathLike | None, default: Path) -> Path:
 
 
 DATA_DIR = _project_path(os.getenv("APP_DATA_DIR"), PROJECT_ROOT / "data")
-COOKIE_DIR = DATA_DIR / "cookies"
-JOB_DIR = DATA_DIR / "jobs"
 LOG_DIR = _project_path(os.getenv("APP_LOG_DIR"), PROJECT_ROOT / "logs")
-REMOTE_PROFILE_DIR = _project_path(os.getenv("APP_REMOTE_PROFILE_DIR"), DATA_DIR / "remote_profiles")
+REMOTE_PROFILE_DIR = _project_path(os.getenv("APP_REMOTE_PROFILE_DIR"), DATA_DIR / "profiles")
 
 DEFAULT_PLATFORM = "toutiao"
-REDIS_URL = os.getenv("REDIS_URL", "").strip()
-REDIS_KEY_PREFIX = os.getenv("REDIS_KEY_PREFIX", "browser_use:publish").strip() or "browser_use:publish"
-REDIS_JOB_TTL_SECONDS = int(os.getenv("REDIS_JOB_TTL_SECONDS", "86400"))
+
+# PostgreSQL-backed job store. The job store persists durable publish/login
+# records (no TTL); see app/jobs/store.py. When PGSQL_DSN is empty the store
+# falls back to an in-memory dict for local dev/tests.
+PGSQL_HOST = os.getenv("PGSQL_HOST", "").strip()
+PGSQL_PORT = int(os.getenv("PGSQL_PORT", "5432"))
+PGSQL_DB = os.getenv("PGSQL_DB", "").strip()
+PGSQL_USER = os.getenv("PGSQL_USER", "").strip()
+PGSQL_PASSWORD = os.getenv("PGSQL_PASSWORD", "")
+PGSQL_POOL_MIN = int(os.getenv("PGSQL_POOL_MIN", "1"))
+PGSQL_POOL_MAX = int(os.getenv("PGSQL_POOL_MAX", "10"))
+
+
+def _pg_dsn() -> str:
+    if not (PGSQL_HOST and PGSQL_DB and PGSQL_USER):
+        return ""
+    from urllib.parse import quote
+
+    user = quote(PGSQL_USER, safe="")  # user may contain '-' etc.
+    pw = quote(PGSQL_PASSWORD, safe="")
+    return f"postgresql://{user}:{pw}@{PGSQL_HOST}:{PGSQL_PORT}/{PGSQL_DB}"
+
+
+PGSQL_DSN = _pg_dsn()
 
 PUBLISH_API_TOKEN = os.getenv("PUBLISH_API_TOKEN", "").strip()

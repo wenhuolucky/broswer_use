@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from app.publishing.service import PublishService
+from app.publishing.kernel import PublishService
 
 
 class AutoToutiaoPublishService(PublishService):

@@ -1,23 +1,25 @@
 from __future__ import annotations
 
-from app.platforms.sohu import SohuPlatform
-from app.publishing.service import PublishService
+from app.platforms.sohu.config import SohuPlatform
+from app.publishing.kernel import PublishService
 from app.utils.urls import normalize_sohu_article_url
 
 
 class AutoSohuPublishService(PublishService):
     """Sohu publishing service."""
 
-    def __init__(self, user_id: str = ""):
+    def __init__(self, account_id: str = ""):
         super().__init__()
-        self.user_id = user_id
+        # 搜狐号数字 id（拼文章 URL 用），由 orchestrator 从该渠道的 metadata
+        # 解析后注入（见 SohuPlatform.article_url_account_id）。
+        self.account_id = account_id
         self._sohu_platform = SohuPlatform()
 
     def _platform(self):
         return self._sohu_platform
 
     def _account_id(self) -> str:
-        return self._sohu_platform.account_id_for_user(self.user_id)
+        return self.account_id
 
     def _extract_article_url_from_text(self, text: str) -> str:
         import re

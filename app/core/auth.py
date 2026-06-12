@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import hmac
-import os
 
-from fastapi import Depends
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import PUBLISH_API_TOKEN
@@ -11,22 +10,21 @@ from app.core.config import PUBLISH_API_TOKEN
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def unauthorized_response() -> dict:
-    return {"code": 401, "message": "unauthorized", "data": {}}
-
-
 def is_authorized_token(token: str | None) -> bool:
-    expected = os.getenv("PUBLISH_API_TOKEN", "").strip() or PUBLISH_API_TOKEN
-    if not expected:
+    if not PUBLISH_API_TOKEN or not token:
         return False
-    if not token:
-        return False
-    return hmac.compare_digest(token.strip(), expected)
+    return hmac.compare_digest(token.strip(), PUBLISH_API_TOKEN)
 
 
 async def require_api_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-) -> dict | None:
+) -> str:
+    """Router-level dependency: enforce the Bearer token, raising a real HTTP 401
+    (with WWW-Authenticate) on failure instead of returning a 200 body."""
     if credentials and is_authorized_token(credentials.credentials):
-        return None
-    return unauthorized_response()
+        return credentials.credentials
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="unauthorized",
+        headers={"WWW-Authenticate": "Bearer"},
+    )

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import sys
@@ -205,7 +206,6 @@ class PublishService:
         viewer_runner = None
         viewer_playwright = None
         viewer_browser = None
-        tunnel_proc = None
         try:
             logger.info("[Step 6] 正在启动浏览器...")
             browser_start = asyncio.get_event_loop().time()
@@ -221,7 +221,6 @@ class PublishService:
             await session.connect()
             if on_live_url_ready:
                 try:
-                    from app.remote.login import _start_cloudflared_tunnel, _stop_process
                     from app.remote.viewer import run_viewer_server
 
                     viewer_port = _find_free_port()
@@ -234,11 +233,12 @@ class PublishService:
                         publish_cdp_port,
                         viewer_port,
                     )
-                    tunnel_proc, live_url = await _start_cloudflared_tunnel(viewer_port)
-                    await on_live_url_ready(live_url)
-                    logger.info("[LiveViewer] 发布实时查看链接已启动: %s", live_url)
+                    # 发文是 LLM 自动操作、无需人盯，故实时查看仅供服务器侧本地调试
+                    # （http://127.0.0.1:{viewer_port}/），不再经 cloudflared 对外暴露，
+                    # 也不生成对外 live_url（on_live_url_ready 不再回调）。
+                    logger.info("[LiveViewer] 发布实时查看(仅本地)已启动: http://127.0.0.1:%s/", viewer_port)
                 except Exception as exc:
-                    logger.warning("[LiveViewer] 发布实时查看链接启动失败: %s", exc, exc_info=True)
+                    logger.warning("[LiveViewer] 发布实时查看启动失败: %s", exc, exc_info=True)
             browser_elapsed = asyncio.get_event_loop().time() - browser_start
             logger.info(f"[Step 6] 浏览器启动完成，耗时 {browser_elapsed:.2f}s")
 
@@ -278,12 +278,6 @@ class PublishService:
             if viewer_playwright:
                 try:
                     await viewer_playwright.stop()
-                except Exception:
-                    pass
-            if tunnel_proc and tunnel_proc.poll() is None:
-                try:
-                    _stop_process(tunnel_proc)
-                    logger.info("[Cleanup] Live tunnel 已关闭")
                 except Exception:
                     pass
             if playwright:
@@ -392,9 +386,7 @@ class PublishService:
         return info
 
     def _get_browser_llm(self):
-        import os
-
-        from app.publishing.deepseek import OpenAICompatibleChat
+        from app.llm.openai_compat import OpenAICompatibleChat
 
         api_key = os.getenv("LLM_API_KEY", "").strip()
         base_url = os.getenv("LLM_BASE_URL", "http://47.242.205.13:8110/v1").strip()
@@ -419,8 +411,6 @@ class PublishService:
 
     @staticmethod
     def _get_browser_vision_config() -> dict:
-        import os
-
         raw_use_vision = os.getenv("BROWSER_USE_VISION", "auto").strip().lower()
         raw_detail = os.getenv("BROWSER_USE_VISION_DETAIL", "low").strip().lower()
 
@@ -801,7 +791,7 @@ class PublishService:
         return any(marker in text for marker in click_markers)
 
     def _build_publish_task(self, title, content, cover_path, logger, cover_loop_exceeded=False):
-        from app.publishing.markdown import markdown_to_html
+        from app.utils.markdown import markdown_to_html
 
         platform = self._platform()
         is_markdown = self._is_markdown_content(content)

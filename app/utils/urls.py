@@ -31,7 +31,8 @@ def normalize_sohu_article_url(url: str, account_id: str = "") -> str:
     支持的输入 pattern：
 
     1) https://mp.sohu.com/h5/v2/newsPreview?id=...&type=article
-       旧版预览 URL，account_id 只能从 env 来（SOHU_ACCOUNT_ID）。
+       旧版预览 URL，URL 自身不带 account_id，只能由调用方传入
+       （来自该渠道 metadata 的 account_number）。
 
     2) https://mp.sohu.com/mpfe/v4/contentManagement/news/articlepreview?id=...&accountId=...
        以及中间带 first/page 段的变体：
@@ -69,7 +70,7 @@ def normalize_sohu_article_url(url: str, account_id: str = "") -> str:
     if netloc != "mp.sohu.com":
         return url
 
-    # Pattern 1: /h5/v2/newsPreview — 旧版预览 URL，account_id 只能从 env 来
+    # Pattern 1: /h5/v2/newsPreview — 旧版预览 URL，account_id 只能由调用方传入
     if path == "/h5/v2/newsPreview":
         article_id = query.get("id", [""])[0]
         if article_id and account_id:

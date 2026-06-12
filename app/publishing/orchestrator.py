@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 
 from app.publishing.adapter import PublishServiceAdapter
-from app.cookies.store import CookieStore
+from app.channels.store import ChannelStore
 from app.jobs.store import JobStore
-from app.core.job_logging import setup_job_logger
-from app.jobs.models import (
+from app.core.request_logging import setup_job_logger
+from app.domain.job import (
     AutoPublishRequest,
     AutoPublishResponse,
     AutoTaskCreateResponse,
     LoginRequest,
+    STATUS_CANCELLED,
     STATUS_CHECKING_COOKIE,
     STATUS_COOKIE_READY,
     STATUS_FAILED,
@@ -20,61 +21,91 @@ from app.jobs.models import (
     STATUS_SUCCEEDED,
     STATUS_WAITING_COOKIE,
 )
+from app.platforms import registry
 from app.remote.login import RemoteLoginRunner
 from app.core.config import LOG_DIR
 
 
 class PublishAgent:
-    """Coordinates cookie lookup, remote login, and publishing."""
+    """Coordinates channel lookup, remote login, and publishing.
+
+    The caller deals only in ``channel_id`` (a service-issued handle bound 1:1 to
+    a platform account). Publishing resolves the platform from the channel; when a
+    channel's cookie is missing/expired it transparently re-logs-in that same
+    channel and resumes.
+    """
 
     def __init__(
         self,
         job_store: JobStore | None = None,
-        cookie_store: CookieStore | None = None,
+        channel_store: ChannelStore | None = None,
         publish_adapter: PublishServiceAdapter | None = None,
         remote_runner: RemoteLoginRunner | None = None,
         log_dir=None,
     ):
         self.job_store = job_store or JobStore()
-        self.cookie_store = cookie_store or CookieStore()
+        self.channel_store = channel_store or ChannelStore()
         self.publish_adapter = publish_adapter or PublishServiceAdapter()
-        self.remote_runner = remote_runner
         self.log_dir = log_dir or LOG_DIR
+        # 提前建好 runner：预热池需要在 app 启动时就能拿到它（不能再等首个登录请求
+        # 才惰性创建）。logger 按 session_id 反查 job，warm 会话（无 job）落到通用 sink。
+        self.remote_runner = remote_runner or RemoteLoginRunner(
+            on_cookie_ready=self._resume_for_remote_session,
+            logger_factory=self._remote_logger,
+        )
         self._background_tasks: set[asyncio.Task] = set()
+        # Index background publish tasks by job_id so cancel_job can reach them.
+        self._tasks_by_job: dict[str, asyncio.Task] = {}
 
+    # ------------------------------------------------------------------
+    # Publishing
+    # ------------------------------------------------------------------
     async def submit(self, request: AutoPublishRequest) -> AutoTaskCreateResponse:
-        job = self.job_store.create(request.model_dump())
+        channel = self.channel_store.get(request.channel_id)
+        if channel is None:
+            return self._task_response(
+                "",
+                "failed",
+                "渠道不存在，请先登录",
+                code=404,
+                channel_id=request.channel_id,
+                error_detail="channel not found",
+            )
+
+        payload = request.model_dump()
+        payload["platform"] = channel.platform
+        job = self.job_store.create(payload)
         logger, log_path = setup_job_logger(job.job_id, self.log_dir)
         self.job_store.update(job.job_id, log_file_path=str(log_path))
         logger.info(
-            "收到自动发文请求 user_id=%s platform=%s title=%s content_length=%s",
-            request.user_id,
-            request.platform,
+            "收到自动发文请求 channel_id=%s platform=%s title=%s content_length=%s",
+            request.channel_id,
+            channel.platform,
             request.title,
             len(request.content),
         )
         self.job_store.update(job.job_id, status=STATUS_CHECKING_COOKIE)
 
-        if self.cookie_store.has_valid_cookie(request.platform, request.user_id):
+        if self.channel_store.has_valid_cookie(request.channel_id):
             logger.info("Cookie 存在且有效，创建后台发布任务")
-            self._schedule_publish(job.job_id, request)
+            self._schedule_publish(job.job_id)
             return self._task_response(
                 job.job_id,
                 "running",
                 "任务创建成功，发布任务正在后台执行",
-                log_file_path=str(log_path),
+                channel_id=request.channel_id,
             )
 
         logger.info("Cookie 不存在或无效，准备启动远程登录")
-        login_response = await self._start_remote_login(job.job_id, request, "Cookie 不存在或无效")
+        login_response = await self._start_remote_login(job.job_id, "Cookie 不存在或无效")
         if login_response.code >= 500:
             return self._task_response(
                 job.job_id,
                 "failed",
                 "任务创建失败",
                 code=500,
-                log_file_path=str(log_path),
-                reason=login_response.message,
+                channel_id=request.channel_id,
+                error_detail=login_response.message,
             )
 
         current_job = self.job_store.get(job.job_id)
@@ -82,29 +113,37 @@ class PublishAgent:
             job.job_id,
             "login_required",
             "任务创建成功，需要用户登录",
-            login_url=current_job.login_url if current_job else "",
-            remote_session_id=current_job.remote_session_id if current_job else "",
-            live_url=current_job.live_url if current_job else "",
-            log_file_path=current_job.log_file_path if current_job else str(log_path),
+            channel_id=request.channel_id,
+            live_url=(current_job.live_url or current_job.login_url) if current_job else "",
         )
 
+    # ------------------------------------------------------------------
+    # Login-only / re-login
+    # ------------------------------------------------------------------
     async def start_login_only(self, request: LoginRequest) -> AutoTaskCreateResponse:
-        payload = request.model_dump()
-        payload["job_type"] = "login_only"
+        # 新登录：先签发一个 pending 渠道，登录成功后再绑定到真实平台账号。
+        channel = self.channel_store.create(request.platform)
+        payload = {
+            "platform": request.platform,
+            "channel_id": channel.channel_id,
+            "job_type": "login_only",
+        }
         job = self.job_store.create(payload)
         logger, log_path = setup_job_logger(job.job_id, self.log_dir)
         self.job_store.update(job.job_id, log_file_path=str(log_path))
-        logger.info("收到仅登录请求 user_id=%s platform=%s", request.user_id, request.platform)
+        logger.info(
+            "收到仅登录请求 platform=%s channel_id=%s", request.platform, channel.channel_id
+        )
 
-        login_response = await self._start_remote_login(job.job_id, request, "login_only")
+        login_response = await self._start_remote_login(job.job_id, "login_only")
         if login_response.code >= 500:
             return self._task_response(
                 job.job_id,
                 "failed",
                 "登录任务创建失败",
                 code=500,
-                log_file_path=str(log_path),
-                reason=login_response.message,
+                channel_id=channel.channel_id,
+                error_detail=login_response.message,
             )
 
         current_job = self.job_store.get(job.job_id)
@@ -112,19 +151,64 @@ class PublishAgent:
             job.job_id,
             "login_required",
             "登录任务创建成功，需要用户登录",
-            login_url=current_job.login_url if current_job else "",
-            remote_session_id=current_job.remote_session_id if current_job else "",
-            live_url=current_job.live_url if current_job else "",
-            log_file_path=current_job.log_file_path if current_job else str(log_path),
+            channel_id=channel.channel_id,
+            live_url=(current_job.live_url or current_job.login_url) if current_job else "",
         )
 
-    def _schedule_publish(self, job_id: str, request: AutoPublishRequest) -> None:
-        task = asyncio.create_task(self._publish_with_cookie(job_id, request))
+    async def start_relogin(self, channel_id: str) -> AutoTaskCreateResponse:
+        # 重新登录一个已存在的渠道：复用同一个 channel_id，只刷新 cookie。
+        channel = self.channel_store.get(channel_id)
+        if channel is None:
+            return self._task_response(
+                "",
+                "failed",
+                "渠道不存在",
+                code=404,
+                channel_id=channel_id,
+                error_detail="channel not found",
+            )
+        payload = {
+            "platform": channel.platform,
+            "channel_id": channel_id,
+            "job_type": "login_only",
+        }
+        job = self.job_store.create(payload)
+        logger, log_path = setup_job_logger(job.job_id, self.log_dir)
+        self.job_store.update(job.job_id, log_file_path=str(log_path))
+        logger.info("收到渠道重新登录请求 platform=%s channel_id=%s", channel.platform, channel_id)
+
+        login_response = await self._start_remote_login(job.job_id, "relogin")
+        if login_response.code >= 500:
+            return self._task_response(
+                job.job_id,
+                "failed",
+                "登录任务创建失败",
+                code=500,
+                channel_id=channel_id,
+                error_detail=login_response.message,
+            )
+        current_job = self.job_store.get(job.job_id)
+        return self._task_response(
+            job.job_id,
+            "login_required",
+            "重新登录任务创建成功，需要用户登录",
+            channel_id=channel_id,
+            live_url=(current_job.live_url or current_job.login_url) if current_job else "",
+        )
+
+    # ------------------------------------------------------------------
+    # Background publish task plumbing
+    # ------------------------------------------------------------------
+    def _schedule_publish(self, job_id: str) -> None:
+        task = asyncio.create_task(self._publish_with_cookie(job_id))
         self._background_tasks.add(task)
+        self._tasks_by_job[job_id] = task
         task.add_done_callback(lambda done_task, job_id=job_id: self._on_background_publish_done(job_id, done_task))
 
     def _on_background_publish_done(self, job_id: str, task: asyncio.Task) -> None:
         self._background_tasks.discard(task)
+        if self._tasks_by_job.get(job_id) is task:
+            self._tasks_by_job.pop(job_id, None)
         logger, _ = setup_job_logger(job_id, self.log_dir)
         try:
             task.result()
@@ -169,47 +253,40 @@ class PublishAgent:
         task_status: str,
         message: str,
         code: int = 200,
-        login_url: str = "",
-        remote_session_id: str = "",
+        channel_id: str = "",
         live_url: str = "",
-        log_file_path: str = "",
-        reason: str = "",
+        error_detail: str = "",
     ) -> AutoTaskCreateResponse:
+        # 只回传调用方真正用得到的字段：job_id / channel_id / task_status、登录时的
+        # live_url、失败时的 error_detail。其余可由 job_id 推导或属内部信息，不下发。
         data = {
             "job_id": job_id,
+            "channel_id": channel_id,
             "task_status": task_status,
-            "query_url": f"/api/v1/publish/jobs/{job_id}",
-            "remote_session_id": remote_session_id,
-            "live_url": live_url or login_url,
-            "log_file_path": log_file_path,
+            "live_url": live_url,
         }
-        if reason:
-            data["reason"] = reason
+        if error_detail:
+            data["error_detail"] = error_detail
         return AutoTaskCreateResponse(code=code, message=message, data=data)
 
     async def _start_remote_login(
         self,
         job_id: str,
-        request: AutoPublishRequest | LoginRequest,
         reason: str,
         mark_cookie_refresh_attempted: bool = False,
     ) -> AutoPublishResponse:
         logger, _ = setup_job_logger(job_id, self.log_dir)
         job = self.job_store.get(job_id)
         log_file_path = job.log_file_path if job else ""
-        self.job_store.update(job.job_id, status=STATUS_STARTING_REMOTE_LOGIN)
+        payload = dict(job.payload or {}) if job else {}
+        platform = str(payload.get("platform", "") or "")
+        channel_id = str(payload.get("channel_id", "") or "")
+        self.job_store.update(job_id, status=STATUS_STARTING_REMOTE_LOGIN)
         if mark_cookie_refresh_attempted:
-            payload = dict(job.payload)
             payload["cookie_refresh_attempted"] = True
             self.job_store.update(job_id, payload=payload)
-        if self.remote_runner is None:
-            self.remote_runner = RemoteLoginRunner(
-                save_cookie=self.cookie_store.save,
-                on_cookie_ready=self._resume_for_remote_session,
-                logger_factory=lambda _session_id, job_id=job_id: setup_job_logger(job_id, self.log_dir)[0],
-            )
         try:
-            session = await self.remote_runner.start(request.platform, request.user_id)
+            session = await self.remote_runner.start(platform, channel_id)
         except Exception as exc:
             logger.exception("远程登录启动失败: %s", exc)
             self.job_store.update(job_id, status=STATUS_FAILED, error=str(exc))
@@ -242,13 +319,22 @@ class PublishAgent:
             log_file_path=log_file_path,
         )
 
-    async def _publish_with_cookie(self, job_id: str, request: AutoPublishRequest) -> AutoPublishResponse:
+    async def _publish_with_cookie(self, job_id: str) -> AutoPublishResponse:
         logger, _ = setup_job_logger(job_id, self.log_dir)
         job = self.job_store.get(job_id)
         log_file_path = job.log_file_path if job else ""
+        payload = dict(job.payload or {}) if job else {}
+        platform = str(payload.get("platform", "") or "")
+        channel_id = str(payload.get("channel_id", "") or "")
         self.job_store.update(job_id, status=STATUS_PUBLISHING, live_url="")
         logger.info("开始调用自动化发文服务")
-        cookie = self.cookie_store.load_storage_state_text(request.platform, request.user_id)
+        cookie = self.channel_store.cookie_text(channel_id)
+
+        channel = self.channel_store.get(channel_id)
+        config = registry.config_for(platform)
+        article_account_id = (
+            config.article_url_account_id(channel.metadata) if (config and channel) else ""
+        )
 
         async def on_live_url_ready(live_url: str) -> None:
             self.job_store.update(job_id, live_url=live_url)
@@ -256,13 +342,13 @@ class PublishAgent:
 
         try:
             result = await self.publish_adapter.publish(
-                platform=request.platform,
-                title=request.title,
-                content=request.content,
+                platform=platform,
+                title=str(payload.get("title", "") or ""),
+                content=str(payload.get("content", "") or ""),
                 cookie=cookie,
                 request_id=job_id,
-                user_id=request.user_id,
-                cover_image_url=request.cover_image_url,
+                article_account_id=article_account_id,
+                cover_image_url=payload.get("cover_image_url"),
                 on_live_url_ready=on_live_url_ready,
             )
         except Exception as exc:
@@ -271,7 +357,6 @@ class PublishAgent:
                 logger.info("自动化发文异常疑似 Cookie 失效，切换远程登录")
                 return await self._start_remote_login(
                     job_id,
-                    request,
                     "自动化发文异常疑似 Cookie 失效",
                     mark_cookie_refresh_attempted=True,
                 )
@@ -289,7 +374,6 @@ class PublishAgent:
             logger.info("检测到 Cookie 可能失效，切换远程登录 failure_reason=%s", result.get("failure_reason", ""))
             return await self._start_remote_login(
                 job_id,
-                request,
                 "自动化发文检测到 Cookie 失效",
                 mark_cookie_refresh_attempted=True,
             )
@@ -310,17 +394,49 @@ class PublishAgent:
             result=result,
         )
 
+    # ------------------------------------------------------------------
+    # Cookie capture → channel binding → resume
+    # ------------------------------------------------------------------
     async def resume_after_cookie(self, job_id: str, cookies: list[dict]) -> AutoPublishResponse:
         job = self.job_store.get(job_id)
         if job is None:
             return AutoPublishResponse(code=404, job_id=job_id, status=STATUS_FAILED, message="job not found")
 
         logger, _ = setup_job_logger(job_id, self.log_dir)
-        is_login_only = (job.payload or {}).get("job_type") == "login_only"
-        request = LoginRequest(**job.payload) if is_login_only else AutoPublishRequest(**job.payload)
+        payload = dict(job.payload or {})
+        platform = str(payload.get("platform", "") or "")
+        channel_id = str(payload.get("channel_id", "") or "")
+        is_login_only = payload.get("job_type") == "login_only"
         logger.info("收到远程登录 Cookie 回调 cookie_count=%s", len(cookies))
-        self.cookie_store.save(request.platform, request.user_id, cookies)
-        if not self.cookie_store.has_valid_cookie(request.platform, request.user_id):
+
+        config = registry.config_for(platform)
+        native_key = config.extract_native_key(cookies) if config else ""
+        account_name = config.extract_account_name(cookies) if config else ""
+
+        try:
+            channel = self.channel_store.bind(
+                channel_id,
+                cookie={"cookies": cookies, "origins": []},
+                native_key=native_key,
+                account_name=account_name,
+                metadata={},
+            )
+        except KeyError:
+            logger.error("绑定 Cookie 失败：渠道不存在 channel_id=%s", channel_id)
+            self.job_store.update(job_id, status=STATUS_FAILED, error="channel not found")
+            return AutoPublishResponse(
+                code=404, job_id=job_id, status=STATUS_FAILED, message="channel not found",
+                log_file_path=job.log_file_path,
+            )
+
+        # 去重 A 可能把本次登录并到了已有渠道：把 job 指向规范 channel_id。
+        canonical_id = channel.channel_id
+        if canonical_id != channel_id:
+            payload["channel_id"] = canonical_id
+            channel_id = canonical_id
+            self.job_store.update(job_id, payload=payload)
+
+        if not self.channel_store.has_valid_cookie(channel_id):
             logger.error("远程 Cookie 无效")
             self.job_store.update(job_id, status=STATUS_FAILED, error="remote cookie invalid")
             return AutoPublishResponse(
@@ -331,13 +447,14 @@ class PublishAgent:
                 log_file_path=job.log_file_path,
             )
 
-        logger.info("远程 Cookie 已保存且验证通过，继续发文")
+        logger.info("远程 Cookie 已保存且验证通过 channel_id=%s", channel_id)
         if is_login_only:
             result = {
                 "success": True,
                 "login_only": True,
                 "cookie_ready": True,
                 "cookie_count": len(cookies),
+                "channel_id": channel_id,
             }
             self.job_store.update(job_id, status=STATUS_SUCCEEDED, result=result, error="")
             logger.info("仅登录任务 Cookie 保存完成，不执行发文")
@@ -351,17 +468,14 @@ class PublishAgent:
             )
 
         self.job_store.update(job_id, status=STATUS_PUBLISHING, live_url="", error="")
-        self._schedule_publish(job_id, request)
+        self._schedule_publish(job_id)
         return AutoPublishResponse(
             code=200,
             job_id=job_id,
             status=STATUS_PUBLISHING,
             message="Cookie 保存成功，发文任务已继续后台执行",
             log_file_path=job.log_file_path,
-            result={
-                "cookie_count": len(cookies),
-                "query_url": f"/api/v1/publish/jobs/{job_id}",
-            },
+            result={"cookie_count": len(cookies), "channel_id": channel_id},
         )
 
     async def save_remote_cookie(self, job_id: str) -> AutoPublishResponse:
@@ -442,6 +556,77 @@ class PublishAgent:
             log_file_path=resume_response.log_file_path,
             result=resume_response.result,
         )
+
+    async def cancel_job(self, job_id: str) -> AutoPublishResponse:
+        """Cancel a running publish/login job: tear down any remote login session,
+        cancel the background publish task, and mark the job cancelled."""
+        job = self.job_store.get(job_id)
+        if job is None:
+            return AutoPublishResponse(code=404, job_id=job_id, status=STATUS_FAILED, message="job not found")
+
+        if job.status in {STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED}:
+            return AutoPublishResponse(
+                code=409,
+                job_id=job_id,
+                status=job.status,
+                message="job already finished",
+                log_file_path=job.log_file_path,
+            )
+
+        logger, _ = setup_job_logger(job_id, self.log_dir)
+        logger.info("收到取消任务请求 status=%s remote_session_id=%s", job.status, job.remote_session_id)
+
+        # 1. Tear down the remote login session (browser/Xvnc/display slot) if any.
+        if job.remote_session_id and self.remote_runner is not None:
+            try:
+                await self.remote_runner.cleanup(job.remote_session_id)
+            except Exception as exc:  # cleanup is best-effort
+                logger.warning("取消任务时清理远程登录会话失败: %s", exc)
+
+        # 2. Cancel the background publish task if one is running.
+        task = self._tasks_by_job.pop(job_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+        # 3. Mark the job cancelled and clear transient URLs.
+        self.job_store.update(
+            job_id,
+            status=STATUS_CANCELLED,
+            error="cancelled by request",
+            live_url="",
+            login_url="",
+            remote_session_id="",
+        )
+        return AutoPublishResponse(
+            code=200,
+            job_id=job_id,
+            status=STATUS_CANCELLED,
+            message="任务已取消",
+            log_file_path=job.log_file_path,
+        )
+
+    # ------------------------------------------------------------------
+    # Channels (cookie-bearing accounts)
+    # ------------------------------------------------------------------
+    def get_channel(self, channel_id: str):
+        return self.channel_store.get(channel_id)
+
+    def list_channels(self, platform: str | None = None, limit: int = 50, offset: int = 0):
+        return self.channel_store.list_channels(platform=platform, limit=limit, offset=offset)
+
+    def channel_cookie_valid(self, channel_id: str) -> bool:
+        return self.channel_store.has_valid_cookie(channel_id)
+
+    def delete_channel(self, channel_id: str) -> bool:
+        """Delete a channel (its cookie + record). Returns True if it existed."""
+        return self.channel_store.delete(channel_id)
+
+    def _remote_logger(self, session_id: str):
+        # 把远程登录会话的日志按 session_id 反查到对应 job 的 sink；预热会话还没绑
+        # job，落到通用 "remote-login" sink。
+        job = self.job_store.find_by_remote_session(session_id)
+        job_id = job.job_id if job else "remote-login"
+        return setup_job_logger(job_id, self.log_dir)[0]
 
     async def _resume_for_remote_session(self, session_id: str, cookies: list[dict]) -> None:
         job = self.job_store.find_by_remote_session(session_id)
