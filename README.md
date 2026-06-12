@@ -44,14 +44,13 @@ AGENT_VERBOSE_LOG_ENABLED=true
 AGENT_VERBOSE_LOG_INPUT_MODE=summary
 AGENT_VERBOSE_LOG_MAX_CHARS=12000
 AGENT_VERBOSE_LOG_MESSAGE_MAX_CHARS=12000
-AGENT_LOG_COLOR_ENABLED=true
 SOHU_ACCOUNT_ID=
 SOHU_ACCOUNT_ID_MAP=
 ```
 
 `BROWSER_USE_VISION` 支持 `auto`、`true`、`false`；默认 `auto`，便于使用多模态模型时按需启用截图输入。`BROWSER_USE_VISION_DETAIL` 支持 `low`、`high`、`auto`，默认 `low` 以控制图片负载。
 
-Agent 详细诊断日志默认开启，会在任务日志中输出 `[AgentLLM:*]`、`[AgentStep:*]`、`[AgentState:*]`、`[AgentGuard:*]`、`[AgentTool:*]`、`[AgentFinal:*]` 等固定标志，方便排查 LLM 输出、动作选择、页面状态和最终结果。`AGENT_VERBOSE_LOG_INPUT_MODE` 支持 `summary`、`none`、`full`，默认 `summary` 只输出输入摘要；`AGENT_LOG_COLOR_ENABLED` 只影响控制台彩色输出，文件日志保持纯文本。
+Agent 详细诊断日志默认开启，会在任务日志中输出 `[AgentLLM:*]`、`[AgentStep:*]`、`[AgentState:*]`、`[AgentGuard:*]`、`[AgentTool:*]`、`[AgentFinal:*]` 等固定标志，方便排查 LLM 输出、动作选择、页面状态和最终结果。`AGENT_VERBOSE_LOG_INPUT_MODE` 支持 `summary`、`none`、`full`，默认 `summary` 只输出输入摘要。
 
 搜狐号发布会把后台预览链接转换为 `https://m.sohu.com/a/{article_id}_{account_id}?sec=wd`。单账号部署可配置 `SOHU_ACCOUNT_ID`；多账号部署可配置 `SOHU_ACCOUNT_ID_MAP`，格式为 `user1:122702850,user2:122580788`。
 
