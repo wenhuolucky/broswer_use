@@ -1,28 +1,31 @@
-FROM mcr.microsoft.com/playwright/python:v1.50.0-noble
+FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    APP_DATA_DIR=/app/data \
-    APP_LOG_DIR=/app/logs \
-    APP_REMOTE_PROFILE_DIR=/app/data/remote_profiles \
-    CLOUDFLARED_PATH=/usr/local/bin/cloudflared \
-    KASMVNC_BIN=Xvnc \
-    MAX_REMOTE_LOGIN_SESSIONS=4 \
-    DISPLAY_BASE=100 \
-    KASMVNC_PORT_BASE=6900 \
-    REMOTE_VNC_SCREEN=1440x900x24 \
-    REMOTE_BROWSER_WINDOW_WIDTH=1440 \
-    REMOTE_BROWSER_WINDOW_HEIGHT=900 \
-    REMOTE_VIEWER_MAX_WIDTH=1440 \
-    REMOTE_VIEWER_MAX_HEIGHT=900 \
-    REMOTE_VIEWER_JPEG_QUALITY=85
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    UV_LINK_MODE=copy \
+    PATH=/app/.venv/bin:$PATH
 
 WORKDIR /app
 
 ARG TARGETARCH
 ARG KASMVNC_VERSION=1.4.0
+ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
 
+# base 是 Ubuntu noble；把官方 apt 源(archive/security/ports.ubuntu.com)换成国内镜像加速。
+# 仅换主机名、保留 /ubuntu 与 /ubuntu-ports 路径，TUNA 两者都有；老/新(deb822)源文件都覆盖。
+RUN sed -i \
+        -e "s|archive.ubuntu.com|${APT_MIRROR}|g" \
+        -e "s|security.ubuntu.com|${APT_MIRROR}|g" \
+        -e "s|ports.ubuntu.com|${APT_MIRROR}|g" \
+        /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+
+# playwright base 已含 Chromium 运行库与 xvfb，这里仅补本服务额外需要的：
+#   curl/ca-certificates —— KasmVNC 下载 + HEALTHCHECK
+#   xvfb/x11-utils       —— entrypoint 起虚拟显示并用 xdpyinfo 等就绪(幂等，已装则跳过)
+#   fonts-noto-cjk/emoji —— 中文/表情渲染，否则登录页是豆腐块
+#   procps               —— 进程工具
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         curl \
@@ -32,13 +35,6 @@ RUN apt-get update \
         procps \
         fonts-noto-cjk \
         fonts-noto-color-emoji \
-        libnss3 \
-        libxss1 \
-        libasound2t64 \
-        libgbm1 \
-        libxrandr2 \
-        libxdamage1 \
-        libxcomposite1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
@@ -51,19 +47,19 @@ RUN set -eux; \
     fi; \
     rm -f /tmp/kasmvnc.deb
 
-RUN curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-    -o /usr/local/bin/cloudflared \
-    && chmod +x /usr/local/bin/cloudflared
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple uv
 
-COPY requirements.txt .
-RUN python -m pip install -U pip \
-    && pip install -r requirements.txt \
-    && python -m playwright install chromium
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
 
-COPY . .
+COPY app ./app
+COPY entrypoint.sh ./
+RUN chmod +x /app/entrypoint.sh
 
-RUN mkdir -p /app/data /app/logs
+EXPOSE 8833
 
-EXPOSE 19000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD curl -fsS "http://127.0.0.1:${SERVICE_PORT:-8833}/health" || exit 1
 
-CMD ["sh", "-c", "Xvfb ${DISPLAY:-:99} -screen 0 ${XVFB_SCREEN:-1920x1080x24} -nolisten tcp & export DISPLAY=${DISPLAY:-:99}; exec python -m uvicorn app.server:app --host 0.0.0.0 --port 19000 --workers 1"]
+ENTRYPOINT ["/app/entrypoint.sh"]

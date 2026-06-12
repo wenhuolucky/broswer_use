@@ -2,23 +2,26 @@ services:
   publish:
     build:
       context: .
-      dockerfile: Dockerfile
     image: browser-publish-service:latest
     container_name: browser-publish-service
+    # init 进程负责回收 Chrome / Xvfb 等子进程产生的僵尸进程。
+    init: true
     env_file:
       - .env
     environment:
-      APP_DATA_DIR: /app/data
-      APP_LOG_DIR: /app/logs
-      APP_REMOTE_PROFILE_DIR: /app/data/remote_profiles
-      CLOUDFLARED_PATH: /usr/local/bin/cloudflared
-      REDIS_URL: ${REDIS_URL:-}
-      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-browser_use:publish}
-      REDIS_JOB_TTL_SECONDS: ${REDIS_JOB_TTL_SECONDS:-86400}
       TZ: Asia/Shanghai
     ports:
-      - "8000:19000"
+      - "${HOST_PORT:-8833}:8833"
     volumes:
-      - .:/app
-    shm_size: "64gb"
+      - ./data:/app/data
+      - ./logs:/app/logs
+    # Chrome 需要较大的 /dev/shm，否则标签页易崩。按并发登录会话数量调整：
+    # 经验值约每会话 ~256MB，留足余量；如并发很高（如 40+）可上调到 16g。
+    shm_size: "8gb"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8833/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped

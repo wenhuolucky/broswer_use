@@ -1,13 +1,64 @@
+# 构建上下文裁剪：只让运行所需进入镜像（Dockerfile 用白名单 COPY app/+entrypoint.sh）。
+# 本文件主要作用是缩小发送给 daemon 的上下文，并对敏感文件做双保险。
+
+# ---- VCS / 元数据 ----
 .git
-.venv
+.gitignore
+.dockerignore
+
+# ---- Secrets / local env ----
+.env*
+
+# ---- Python ----
 __pycache__
-*.pyc
+*.py[cod]
+*.so
+*.egg
+*.egg-info
+.eggs
+dist
+build
+
+# ---- Virtualenvs ----
+.venv
+venv
+env
+ENV
+
+# ---- Test / type / lint caches ----
 .pytest_cache
 .mypy_cache
 .ruff_cache
-.env
+.coverage
+.coverage.*
+htmlcov
+.cache
+tests
+
+# ---- IDE / editor / OS ----
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---- 运行期数据与日志 ----
 data
 logs
 runtime
-.idea
-tests
+*.log
+chrome_profile*
+ms-playwright
+
+# ---- 文档 / 编排文件（运行镜像不需要）----
+docs
+*.md
+Makefile
+Dockerfile
+docker-compose*.yml
+
+# ---- Tooling / agent ----
+.claude
+.worktrees
+.python-version
