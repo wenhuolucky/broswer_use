@@ -1,31 +1,63 @@
+# ---- Secrets / local env ----
+# 忽略所有 .env 变体（含 .env.staging / .env.production 等），仅保留模板 .env.example。
 .env
+.env.*
+!.env.example
 
+# ---- Python ----
 __pycache__/
 *.py[cod]
 *.pyo
+*.so
+*.egg
 *.egg-info/
+.eggs/
 dist/
 build/
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
 
+# ---- Virtualenvs ----
 venv/
 .venv/
 env/
+ENV/
 
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
+# ---- uv ----
+# uv.lock 与 pyproject.toml 需要纳入版本控制；缓存目录则忽略。
+.uv/
 
+# ---- Test / type / lint caches ----
+# 注意：只忽略缓存，不忽略 tests/ 本身——测试代码需要纳入版本控制。
+# （tests/ 在 .dockerignore 中排除，不进运行镜像即可。）
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-tests/
+.coverage
+.coverage.*
+htmlcov/
+.cache/
 
+# ---- IDE / editor ----
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+
+# ---- Runtime data & logs ----
 data/
 logs/
 runtime/
+*.log
 chrome_profile*/
+ms-playwright/
 
+# ---- Tooling / agent ----
 .worktrees/
 .claude/
 CLAUDE.md

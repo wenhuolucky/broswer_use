@@ -1,0 +1,43 @@
+[project]
+name = "browser-publish-service"
+version = "0.1.0"
+description = "基于 FastAPI、Playwright、browser-use 的自动发文服务"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "browser-use>=0.12.0",
+    "playwright>=1.50.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
+    "httpx>=0.28.0",
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+    "openai>=1.0.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "python-multipart>=0.0.9",
+    "psycopg[binary,pool]>=3.2.0",
+    "scalar-fastapi>=1.0.0",
+    "loguru>=0.7.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+# asyncio_mode=auto：异步用例无需逐个标 @pytest.mark.asyncio（为后续编排层测试预留）
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra -q"
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+# 国内镜像源，加速依赖下载；如在海外可删除此段回退默认 PyPI
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
