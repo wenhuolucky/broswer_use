@@ -14,7 +14,35 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from app.core.config import AGENT_LOG_COLOR_ENABLED
 from app.core.runtime import LOG_DIR, LOG_LEVEL, LOG_FORMAT
+
+
+class AgentColorFormatter(logging.Formatter):
+    """Add ANSI colors to agent diagnostic markers for console output only."""
+
+    _RESET = "\033[0m"
+    _COLORS = {
+        "[AgentLLM:": "\033[36m",
+        "[AgentStep:": "\033[34m",
+        "[AgentState:": "\033[90m",
+        "[AgentGuard:": "\033[33m",
+        "[AgentTool:": "\033[35m",
+        "[AgentFinal:": "\033[32m",
+    }
+
+    def __init__(self, fmt: str, *, enable_color: bool = AGENT_LOG_COLOR_ENABLED):
+        super().__init__(fmt)
+        self.enable_color = enable_color
+
+    def format(self, record):
+        formatted = super().format(record)
+        if not self.enable_color:
+            return formatted
+        for marker, color in self._COLORS.items():
+            if marker in formatted:
+                return f"{color}{formatted}{self._RESET}"
+        return formatted
 
 
 def _setup_publish_logger(job_id: str) -> logging.LoggerAdapter:
@@ -39,10 +67,11 @@ def _setup_publish_logger(job_id: str) -> logging.LoggerAdapter:
                 return super().format(record)
 
         formatter = PublishFormatter(LOG_FORMAT)
+        console_formatter = AgentColorFormatter(LOG_FORMAT)
 
         # 控制台 handler
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(formatter)
+        console_handler.setFormatter(console_formatter)
         logger.addHandler(console_handler)
 
         # 按日期分割的文件 handler
@@ -114,10 +143,11 @@ def get_vnc_logger() -> logging.Logger:
             return super().format(record)
 
     formatter = VncFormatter(LOG_FORMAT)
+    console_formatter = AgentColorFormatter(LOG_FORMAT)
 
     # 控制台 handler
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
+    console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
 
     # 文件 handler：logs/vnc_proxy.log
@@ -146,7 +176,7 @@ def get_service_logger() -> logging.Logger:
 
     formatter = ServiceFormatter(LOG_FORMAT)
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
+    console_handler.setFormatter(AgentColorFormatter(LOG_FORMAT))
     logger.addHandler(console_handler)
 
     return logger

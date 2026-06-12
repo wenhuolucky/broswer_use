@@ -7,6 +7,7 @@ from typing import Any
 
 from app.core.config import (
     AGENT_VERBOSE_LOG_ENABLED,
+    AGENT_VERBOSE_LOG_INPUT_MODE,
     AGENT_VERBOSE_LOG_MAX_CHARS,
     AGENT_VERBOSE_LOG_MESSAGE_MAX_CHARS,
 )
@@ -60,11 +61,13 @@ class AgentDiagnosticsLogger:
         logger,
         *,
         enabled: bool = AGENT_VERBOSE_LOG_ENABLED,
+        input_mode: str = AGENT_VERBOSE_LOG_INPUT_MODE,
         max_chars: int = AGENT_VERBOSE_LOG_MAX_CHARS,
         message_max_chars: int = AGENT_VERBOSE_LOG_MESSAGE_MAX_CHARS,
     ):
         self.logger = logger
         self.enabled = enabled
+        self.input_mode = self._normalize_input_mode(input_mode)
         self.max_chars = max_chars
         self.message_max_chars = message_max_chars
 
@@ -88,19 +91,7 @@ class AgentDiagnosticsLogger:
             output_format,
             len(messages),
         )
-        for index, message in enumerate(messages):
-            raw_text = message_to_text(message)
-            role = message_role(message)
-            role_part = f" role={role}" if role else ""
-            self.logger.info(
-                "[AgentLLM:INPUT] call=%s message_index=%s type=%s%s chars=%s",
-                call_id,
-                index,
-                message_type_name(message),
-                role_part,
-                len(str(raw_text)),
-            )
-            self.logger.info(truncate_text(raw_text, self.message_max_chars))
+        self._log_llm_input(call_id=call_id, messages=messages)
         output_text = self._safe_serialize(output)
         self.logger.info("[AgentLLM:OUTPUT] call=%s chars=%s", call_id, len(output_text))
         self.logger.info(truncate_text(output_text, self.max_chars))
@@ -215,6 +206,40 @@ class AgentDiagnosticsLogger:
 
     def elapsed_ms(self, started_at: float) -> int:
         return int((perf_counter() - started_at) * 1000)
+
+    def _log_llm_input(self, *, call_id: int, messages: list[Any]) -> None:
+        if self.input_mode == "none":
+            return
+        if self.input_mode == "summary":
+            message_lengths = [len(message_to_text(message)) for message in messages]
+            self.logger.info(
+                "[AgentLLM:INPUT] call=%s mode=summary message_count=%s total_chars=%s message_chars=%s",
+                call_id,
+                len(messages),
+                sum(message_lengths),
+                ",".join(str(length) for length in message_lengths),
+            )
+            return
+        for index, message in enumerate(messages):
+            raw_text = message_to_text(message)
+            role = message_role(message)
+            role_part = f" role={role}" if role else ""
+            self.logger.info(
+                "[AgentLLM:INPUT] call=%s message_index=%s type=%s%s chars=%s",
+                call_id,
+                index,
+                message_type_name(message),
+                role_part,
+                len(str(raw_text)),
+            )
+            self.logger.info(truncate_text(raw_text, self.message_max_chars))
+
+    @staticmethod
+    def _normalize_input_mode(input_mode: str) -> str:
+        normalized = str(input_mode or "summary").strip().lower()
+        if normalized in {"none", "summary", "full"}:
+            return normalized
+        return "summary"
 
     def _format_fields(self, fields: dict[str, Any]) -> str:
         if not fields:
