@@ -41,11 +41,18 @@ async def login(request: LoginRequest, auth_error: dict | None = Depends(require
     return (await agent.start_login_only(request)).model_dump()
 
 
-@router.post("/clearcookie")
-async def clear_cookie(request: LoginRequest, auth_error: dict | None = Depends(require_api_token)):
+@router.post("/cancel")
+async def cancel_current_task(request: LoginRequest, auth_error: dict | None = Depends(require_api_token)):
     if auth_error:
         return auth_error
-    return (await agent.clear_cookie(request)).model_dump()
+    return (await agent.cancel_current_task(request)).model_dump()
+
+
+@router.post("/cleanup")
+async def cleanup_account_data(request: LoginRequest, auth_error: dict | None = Depends(require_api_token)):
+    if auth_error:
+        return auth_error
+    return (await agent.cleanup_account_data(request)).model_dump()
 
 
 @router.get("/jobs/{job_id}")

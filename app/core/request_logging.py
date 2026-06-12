@@ -17,6 +17,19 @@ from pathlib import Path
 from app.core.runtime import LOG_DIR, LOG_LEVEL, LOG_FORMAT
 
 
+class PublishFormatter(logging.Formatter):
+    def __init__(self, fmt: str, request_id: str):
+        super().__init__(fmt)
+        self.request_id = request_id
+
+    def format(self, record):
+        if not hasattr(record, "job_id"):
+            record.job_id = self.request_id
+        if not hasattr(record, "request_id"):
+            record.request_id = self.request_id
+        return super().format(record)
+
+
 def _setup_publish_logger(job_id: str) -> logging.LoggerAdapter:
     """
     内部函数：创建或获取 job_id 对应的发布日志器。
@@ -30,15 +43,7 @@ def _setup_publish_logger(job_id: str) -> logging.LoggerAdapter:
     logger.propagate = False
 
     if not logger.handlers:
-        class PublishFormatter(logging.Formatter):
-            def format(self, record):
-                if not hasattr(record, "job_id"):
-                    record.job_id = job_id
-                if not hasattr(record, "request_id"):
-                    record.request_id = job_id
-                return super().format(record)
-
-        formatter = PublishFormatter(LOG_FORMAT)
+        formatter = PublishFormatter(LOG_FORMAT, request_id=job_id)
 
         # 控制台 handler
         console_handler = logging.StreamHandler(sys.stdout)
@@ -107,13 +112,7 @@ def get_vnc_logger() -> logging.Logger:
     if logger.handlers:
         return logger
 
-    class VncFormatter(logging.Formatter):
-        def format(self, record):
-            if not hasattr(record, "request_id"):
-                record.request_id = "VNC"
-            return super().format(record)
-
-    formatter = VncFormatter(LOG_FORMAT)
+    formatter = PublishFormatter(LOG_FORMAT, request_id="VNC")
 
     # 控制台 handler
     console_handler = logging.StreamHandler(sys.stdout)
@@ -138,13 +137,7 @@ def get_service_logger() -> logging.Logger:
     if logger.handlers:
         return logger
 
-    class ServiceFormatter(logging.Formatter):
-        def format(self, record):
-            if not hasattr(record, "request_id"):
-                record.request_id = "SYSTEM"
-            return super().format(record)
-
-    formatter = ServiceFormatter(LOG_FORMAT)
+    formatter = PublishFormatter(LOG_FORMAT, request_id="SYSTEM")
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)

@@ -41,6 +41,7 @@ class PublishAgent:
         self.remote_runner = remote_runner
         self.log_dir = log_dir or LOG_DIR
         self._background_tasks: set[asyncio.Task] = set()
+        self._background_tasks_by_job_id: dict[str, asyncio.Task] = {}
 
     async def submit(self, request: AutoPublishRequest) -> AutoTaskCreateResponse:
         job = self.job_store.create(request.model_dump())
@@ -118,25 +119,107 @@ class PublishAgent:
             log_file_path=current_job.log_file_path if current_job else str(log_path),
         )
 
-    async def clear_cookie(self, request: LoginRequest) -> AutoTaskCreateResponse:
-        deleted = self.cookie_store.delete(request.platform, request.user_id)
+    async def cancel_current_task(self, request: LoginRequest) -> AutoTaskCreateResponse:
+        job = self._find_current_job(request)
+        if job is None:
+            return AutoTaskCreateResponse(
+                code=200,
+                message="no running task",
+                data={
+                    "user_id": request.user_id,
+                    "platform": request.platform,
+                    "job_id": "",
+                    "cancelled": False,
+                    "task_cancel_requested": False,
+                },
+            )
+
+        previous_status = job.status
+        task = self._background_tasks_by_job_id.pop(job.job_id, None)
+        task_cancel_requested = False
+        if task is not None and not task.done():
+            task.cancel()
+            task_cancel_requested = True
+        if task is not None:
+            self._background_tasks.discard(task)
+
+        remote_session_cleaned = await self._cleanup_remote_session(job.remote_session_id)
+        logger, _ = setup_job_logger(job.job_id, self.log_dir)
+        logger.warning(
+            "用户请求终止任务 user_id=%s platform=%s previous_status=%s task_cancel_requested=%s remote_session_cleaned=%s",
+            request.user_id,
+            request.platform,
+            previous_status,
+            task_cancel_requested,
+            remote_session_cleaned,
+        )
+        self.job_store.update(
+            job.job_id,
+            status=STATUS_FAILED,
+            error="任务已被用户终止",
+            live_url="",
+            login_url="",
+            remote_session_id="",
+        )
         return AutoTaskCreateResponse(
             code=200,
-            message="cookie cleared" if deleted else "cookie not found",
+            message="task cancelled",
             data={
                 "user_id": request.user_id,
                 "platform": request.platform,
-                "deleted": deleted,
+                "job_id": job.job_id,
+                "cancelled": True,
+                "previous_status": previous_status,
+                "task_cancel_requested": task_cancel_requested,
+                "remote_session_cleaned": remote_session_cleaned,
+            },
+        )
+
+    async def cleanup_account_data(self, request: LoginRequest) -> AutoTaskCreateResponse:
+        job = self._find_current_job(request)
+        cancel_data = {
+            "job_id": "",
+            "cancelled": False,
+            "task_cancel_requested": False,
+            "remote_session_cleaned": False,
+        }
+        if job is not None:
+            cancel_response = await self.cancel_current_task(request)
+            cancel_data.update(cancel_response.data)
+        cookie_deleted = self.cookie_store.delete(request.platform, request.user_id)
+        if cancel_data.get("job_id"):
+            logger, _ = setup_job_logger(str(cancel_data.get("job_id")), self.log_dir)
+            logger.warning(
+                "用户请求清理账号数据 user_id=%s platform=%s cookie_deleted=%s",
+                request.user_id,
+                request.platform,
+                cookie_deleted,
+            )
+        return AutoTaskCreateResponse(
+            code=200,
+            message="account data cleaned",
+            data={
+                "user_id": request.user_id,
+                "platform": request.platform,
+                "job_id": cancel_data.get("job_id", ""),
+                "deleted": {
+                    "cookie": cookie_deleted,
+                    "active_task_cancelled": bool(cancel_data.get("cancelled", False)),
+                    "remote_session_cleaned": bool(cancel_data.get("remote_session_cleaned", False)),
+                },
+                "task_cancel_requested": bool(cancel_data.get("task_cancel_requested", False)),
             },
         )
 
     def _schedule_publish(self, job_id: str, request: AutoPublishRequest) -> None:
         task = asyncio.create_task(self._publish_with_cookie(job_id, request))
         self._background_tasks.add(task)
+        self._background_tasks_by_job_id[job_id] = task
         task.add_done_callback(lambda done_task, job_id=job_id: self._on_background_publish_done(job_id, done_task))
 
     def _on_background_publish_done(self, job_id: str, task: asyncio.Task) -> None:
         self._background_tasks.discard(task)
+        self._background_tasks_by_job_id.pop(job_id, None)
         logger, _ = setup_job_logger(job_id, self.log_dir)
         try:
             task.result()
@@ -145,6 +228,30 @@ class PublishAgent:
         except Exception as exc:
             logger.exception("后台发布任务异常退出: %s", exc)
             self.job_store.update(job_id, status=STATUS_FAILED, error=str(exc))
+
+    def _find_current_job(self, request: LoginRequest):
+        running_statuses = {
+            STATUS_QUEUED,
+            STATUS_CHECKING_COOKIE,
+            STATUS_COOKIE_READY,
+            STATUS_STARTING_REMOTE_LOGIN,
+            STATUS_WAITING_COOKIE,
+            STATUS_PUBLISHING,
+        }
+        return self.job_store.find_latest_by_user_platform_statuses(
+            user_id=request.user_id,
+            platform=request.platform,
+            statuses=running_statuses,
+        )
+
+    async def _cleanup_remote_session(self, remote_session_id: str) -> bool:
+        if not remote_session_id or self.remote_runner is None:
+            return False
+        try:
+            await self.remote_runner.cleanup(remote_session_id)
+            return True
+        except Exception:
+            return False
 
     def close_stale_running_jobs_after_restart(self) -> int:
         stale_statuses = {

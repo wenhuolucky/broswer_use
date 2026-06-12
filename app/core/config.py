@@ -73,3 +73,10 @@ KASMVNC_WS_PING_TIMEOUT = _env_int("KASMVNC_WS_PING_TIMEOUT", 60, min_value=0)
 # 1m30s). Empty value disables the flag and keeps cloudflared defaults.
 CLOUDFLARED_PROXY_KEEPALIVE_TIMEOUT = os.getenv("CLOUDFLARED_PROXY_KEEPALIVE_TIMEOUT", "3600s").strip()
 VNC_HIDE_TOOLBAR = _env_bool("VNC_HIDE_TOOLBAR", True)
+
+# Detailed browser-use agent diagnostics. These only affect logging volume and
+# do not change publish behavior.
+AGENT_VERBOSE_LOG_ENABLED = _env_bool("AGENT_VERBOSE_LOG_ENABLED", True)
+AGENT_VERBOSE_LOG_MAX_CHARS = _env_int("AGENT_VERBOSE_LOG_MAX_CHARS", 12000)
+AGENT_VERBOSE_LOG_MESSAGE_MAX_CHARS = _env_int("AGENT_VERBOSE_LOG_MESSAGE_MAX_CHARS", 12000)
+AGENT_VERBOSE_LOG_INPUT_MODE = os.getenv("AGENT_VERBOSE_LOG_INPUT_MODE", "summary").strip().lower() or "summary"

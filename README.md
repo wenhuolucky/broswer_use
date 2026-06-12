@@ -40,11 +40,17 @@ LLM_BASE_URL=http://47.242.205.13:8110/v1
 LLM_MODEL=Qwen/Qwen3.5-397B-A17B
 BROWSER_USE_VISION=auto
 BROWSER_USE_VISION_DETAIL=low
+AGENT_VERBOSE_LOG_ENABLED=true
+AGENT_VERBOSE_LOG_INPUT_MODE=summary
+AGENT_VERBOSE_LOG_MAX_CHARS=12000
+AGENT_VERBOSE_LOG_MESSAGE_MAX_CHARS=12000
 SOHU_ACCOUNT_ID=
 SOHU_ACCOUNT_ID_MAP=
 ```
 
 `BROWSER_USE_VISION` 支持 `auto`、`true`、`false`；默认 `auto`，便于使用多模态模型时按需启用截图输入。`BROWSER_USE_VISION_DETAIL` 支持 `low`、`high`、`auto`，默认 `low` 以控制图片负载。
+
+Agent 详细诊断日志默认开启，会在任务日志中输出 `[AgentLLM:*]`、`[AgentStep:*]`、`[AgentState:*]`、`[AgentGuard:*]`、`[AgentTool:*]`、`[AgentFinal:*]` 等固定标志，方便排查 LLM 输出、动作选择、页面状态和最终结果。`AGENT_VERBOSE_LOG_INPUT_MODE` 支持 `summary`、`none`、`full`，默认 `summary` 只输出输入摘要。
 
 搜狐号发布会把后台预览链接转换为 `https://m.sohu.com/a/{article_id}_{account_id}?sec=wd`。单账号部署可配置 `SOHU_ACCOUNT_ID`；多账号部署可配置 `SOHU_ACCOUNT_ID_MAP`，格式为 `user1:122702850,user2:122580788`。
 
@@ -276,6 +282,26 @@ curl -X POST http://127.0.0.1:19000/api/v1/publish/savecookie/{job_id}
 | `404` | 任务或远程登录 session 不存在 |
 | `409` | 任务没有远程登录 session，或 Cookie 已保存，或任务已进入发布流程 |
 | `500` | 提取 Cookie 或继续发布时异常 |
+
+### 5. 终止任务和清理账号数据
+
+```http
+POST /api/v1/publish/cancel
+POST /api/v1/publish/cleanup
+```
+
+两个接口都使用相同请求体，并且需要 `Authorization: Bearer <PUBLISH_API_TOKEN>`：
+
+```json
+{
+  "user_id": "user1",
+  "platform": "toutiao"
+}
+```
+
+- `cancel`：终止指定用户和平台当前正在执行或等待登录的最新任务，任务会变为 `failed`，失败原因是 `任务已被用户终止`。该接口不会删除 Cookie。
+- `cleanup`：替代旧的 `clearcookie`。如果存在当前任务，会先执行终止逻辑，然后删除 `data/cookies/{platform}/{user_id}.json`，并尝试关闭关联的远程登录 session。
+- `/api/v1/publish/clearcookie` 已删除，不再作为兼容入口保留。
 
 ## 运行期目录
 

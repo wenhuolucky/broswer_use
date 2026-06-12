@@ -22,6 +22,7 @@ if sys.platform == "win32":
 from app.core.runtime import USER_DATA_DIR
 from app.cookies.normalize import normalize_cookie_list
 from app.core.request_logging import get_service_logger, setup_request_logger
+from app.publishing.agent_diagnostics import AgentDiagnosticsLogger, message_to_text
 from app.remote.login import _find_free_port
 from app.utils.urls import normalize_toutiao_article_url
 
@@ -531,17 +532,15 @@ class PublishService:
         from browser_use import Agent
 
         original_ainvoke = llm.ainvoke
+        diagnostics = AgentDiagnosticsLogger(logger)
+        llm_call_counter = {"value": 0}
 
         async def tracked_ainvoke(self_, messages, output_format=None, **kwargs):
-            input_text = ""
-            if isinstance(messages, list):
-                for msg in messages:
-                    if isinstance(msg, dict):
-                        input_text += f"\n[{msg.get('role', 'unknown')}]: {msg.get('content', '')[:500]}"
-                    else:
-                        input_text += f"\n[{type(msg).__name__}]: {str(msg)[:500]}"
-
+            llm_call_counter["value"] += 1
+            call_id = llm_call_counter["value"]
+            started_at = diagnostics.timed_call_start()
             response = await original_ainvoke(messages, output_format=output_format, **kwargs)
+            elapsed_ms = diagnostics.elapsed_ms(started_at)
 
             output_text = ""
             if hasattr(response, "content"):
@@ -553,41 +552,30 @@ class PublishService:
 
             try:
                 usage = getattr(response, "usage", None)
+                usage_dict = {
+                    "prompt_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
+                    "completion_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
+                    "total_tokens": getattr(usage, "total_tokens", 0) if usage else 0,
+                }
                 if usage:
-                    usage_dict = {
-                        "prompt_tokens": getattr(usage, "prompt_tokens", 0),
-                        "completion_tokens": getattr(usage, "completion_tokens", 0),
-                        "total_tokens": getattr(usage, "total_tokens", 0),
-                    }
                     tracker.record(
                         usage_dict,
                         tracker.model_name,
                         {
-                            "input_preview": input_text[:500] if input_text else "(empty)",
+                            "input_preview": self._build_llm_input_preview(messages),
                             "output_preview": output_text[:500] if output_text else "(empty)",
                             "tokens": usage_dict,
                         },
                     )
-                    logger.info("-" * 60)
-                    logger.info(f"LLM Call #{tracker.call_count}")
-                    logger.info(f"  模型: {tracker.model_name}")
-                    logger.info(f"  输入长度: {len(input_text)} 字符")
-                    logger.info(
-                        f"  输入预览: {input_text[:200]}..."
-                        if len(input_text) > 200
-                        else f"  输入: {input_text}"
-                    )
-                    logger.info(
-                        f"  输出预览: {output_text[:200]}..."
-                        if len(output_text) > 200
-                        else f"  输出: {output_text}"
-                    )
-                    logger.info(
-                        "  Token: 输入 {prompt_tokens:,} | 输出 {completion_tokens:,} | 合计 {total_tokens:,}".format(
-                            **usage_dict
-                        )
-                    )
-                    logger.info("-" * 60)
+                diagnostics.log_llm_call(
+                    call_id=call_id,
+                    model=tracker.model_name,
+                    output_format=getattr(output_format, "__name__", str(output_format or "None")),
+                    messages=list(messages or []),
+                    output=response,
+                    usage=usage_dict,
+                    elapsed_ms=elapsed_ms,
+                )
             except Exception as exc:
                 logger.warning(f"[LLM Token] 无法提取 token 信息: {exc}")
             return response
@@ -656,10 +644,10 @@ class PublishService:
                 try:
                     page_state = await self._capture_page_state(session, body_probe)
                 except Exception as exc:
-                    logger.warning(f"[StepDiag {step_number}] state capture failed: {exc}")
+                    logger.warning(f"[AgentState:ERROR] step={step_number} state_capture_failed={exc}")
                     page_state = {}
 
-                self._log_step_diagnostics(step_number, last_item, page_state, logger)
+                self._log_step_diagnostics(step_number, last_item, page_state, logger, diagnostics)
 
                 # 更新 publish_guard 中最近状态（用于失败摘要）
                 publish_guard["last_url"] = page_state.get("url", "") or ""
@@ -681,6 +669,15 @@ class PublishService:
                         f"editor_len_after={editor_len_after} probe_found={probe_found} "
                         f"editor_source={publish_guard['last_editor_source']}"
                     )
+                    diagnostics.log_guard(
+                        event="BODY_WRITE",
+                        step=step_number,
+                        attempt=publish_guard["body_paste_attempts"],
+                        editor_len_after=editor_len_after,
+                        probe_found=probe_found,
+                        editor_source=publish_guard["last_editor_source"],
+                        status="checking",
+                    )
                     # 必须 editor 真的有内容 + 探针字符串命中 才算成功
                     # 4738382 之前的 false positive：editor_len 来自 document.body（页面 chrome），
                     # 任何时候都 > 5，误判 paste_succeeded=True。修后必须 probe_found
@@ -689,11 +686,29 @@ class PublishService:
                         logger.info(
                             f"[BodyWrite] paste_succeeded: editor_len={editor_len_after}"
                         )
+                        diagnostics.log_guard(
+                            event="BODY_WRITE",
+                            step=step_number,
+                            attempt=publish_guard["body_paste_attempts"],
+                            editor_len_after=editor_len_after,
+                            probe_found=probe_found,
+                            editor_source=publish_guard["last_editor_source"],
+                            status="succeeded",
+                        )
                     else:
                         logger.warning(
                             f"[BodyWrite] paste_attempt_failed: "
                             f"editor_len={editor_len_after} probe_found={probe_found} "
                             f"editor_source={publish_guard['last_editor_source']}"
+                        )
+                        diagnostics.log_guard(
+                            event="BODY_WRITE",
+                            step=step_number,
+                            attempt=publish_guard["body_paste_attempts"],
+                            editor_len_after=editor_len_after,
+                            probe_found=probe_found,
+                            editor_source=publish_guard["last_editor_source"],
+                            status="failed",
                         )
 
                 # 跟踪步骤摘要（保留最近 10 步）
@@ -714,10 +729,17 @@ class PublishService:
                     if publish_guard["cover_action_count"] > 3:
                         publish_guard["cover_loop_exceeded"] = True
                         logger.warning("[PublishGuard] cover_loop_limit_exceeded_skip_cover")
+                        diagnostics.log_guard(
+                            event="COVER_LOOP",
+                            step=step_number,
+                            cover_action_count=publish_guard["cover_action_count"],
+                            status="limit_exceeded",
+                        )
                 # 原有确认发布检测
                 if self._did_execute_confirm_publish(last_item) and not publish_guard["confirm_publish_clicked"]:
                     publish_guard["confirm_publish_clicked"] = True
                     logger.info("[PublishGuard] confirm_publish_clicked")
+                    diagnostics.log_guard(event="CONFIRM_PUBLISH", step=step_number, status="clicked")
 
                 if publish_guard["confirm_publish_clicked"]:
                     failure = await self._detect_publish_failure(session, logger)
@@ -728,6 +750,13 @@ class PublishService:
                             f"{failure.get('signal', 'unknown')} | "
                             f"text={failure.get('matched_text', '')} | url={failure.get('page_url', '')}"
                         )
+                        diagnostics.log_guard(
+                            event="PUBLISH_FAILURE",
+                            step=step_number,
+                            signal=failure.get("signal", "unknown"),
+                            text=failure.get("matched_text", ""),
+                            url=failure.get("page_url", ""),
+                        )
                         self._log_final_summary(
                             publish_guard,
                             {
@@ -737,6 +766,8 @@ class PublishService:
                                 or failure.get("signal", ""),
                             },
                             logger,
+                            tracker,
+                            diagnostics,
                         )
                         agent_instance.state.stopped = True
             except Exception as exc:
@@ -750,13 +781,14 @@ class PublishService:
             detected_failure=publish_guard["failure_detected"],
         )
         self._apply_article_url_fallbacks(result, publish_guard, history, logger)
-        self._log_final_summary(publish_guard, result, logger)
+        self._log_final_summary(publish_guard, result, logger, tracker, diagnostics)
         return result
 
     def _build_publish_tools(self, logger, original_title: str = ""):
         from browser_use import ActionResult, Controller
 
         controller = Controller()
+        diagnostics = AgentDiagnosticsLogger(logger)
 
         @controller.action(
             "发布后调用此工具获取文章链接。输入本次发布标题 title。工具会打开作品管理页，最多查询 3 次同标题文章；"
@@ -764,6 +796,11 @@ class PublishService:
         )
         async def get_published_article_url(title: str, browser_session):
             lookup_title = (original_title or title or "").strip()
+            diagnostics.log_tool_call(
+                name="get_published_article_url",
+                title=title,
+                lookup_title=lookup_title,
+            )
             if logger and title and lookup_title != title:
                 logger.info(
                     "[PublishUrlTool] ignoring llm supplied title; "
@@ -771,7 +808,19 @@ class PublishService:
                     title,
                     lookup_title,
                 )
+                diagnostics.log_tool_event(
+                    event="TITLE_OVERRIDE",
+                    name="get_published_article_url",
+                    llm_title=title,
+                    lookup_title=lookup_title,
+                )
             result = await self._lookup_published_article_url(browser_session, lookup_title, logger)
+            diagnostics.log_tool_result(
+                name="get_published_article_url",
+                found=result.get("found", False),
+                article_url=result.get("article_url", ""),
+                reason=result.get("reason", ""),
+            )
             return ActionResult(
                 extracted_content=json.dumps(result, ensure_ascii=False),
                 include_in_memory=True,
@@ -1082,12 +1131,25 @@ class PublishService:
         )
         return any(marker in text for marker in markers)
 
+    def _build_llm_input_preview(self, messages) -> str:
+        if not isinstance(messages, list):
+            return "(empty)"
+        parts = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                parts.append(f"[{msg.get('role', 'unknown')}]: {str(msg.get('content', ''))[:500]}")
+            else:
+                parts.append(f"[{type(msg).__name__}]: {message_to_text(msg)[:500]}")
+        preview = "\n".join(parts)
+        return preview[:500] if preview else "(empty)"
+
     def _log_step_diagnostics(
         self,
         step_number: int,
         history_item,
         page_state: dict,
         logger,
+        diagnostics: AgentDiagnosticsLogger | None = None,
     ) -> None:
         """每步结束输出 [StepDiag N] 行，便于排查。"""
         url = page_state.get("url", "") or ""
@@ -1108,8 +1170,23 @@ class PublishService:
         result_summary = self._extract_result_summary(history_item)
         if result_summary:
             logger.info(f"[StepDiag {step_number}] result: {result_summary[:500]}")
+        if diagnostics:
+            diagnostics.log_step(
+                step=step_number,
+                history_count=step_number,
+                action_summary=action_summary,
+                result_summary=result_summary,
+            )
+            diagnostics.log_page_state(step=step_number, page_state=page_state)
 
-    def _log_final_summary(self, publish_guard: dict, result: dict, logger) -> None:
+    def _log_final_summary(
+        self,
+        publish_guard: dict,
+        result: dict,
+        logger,
+        tracker: LLMTokenTracker | None = None,
+        diagnostics: AgentDiagnosticsLogger | None = None,
+    ) -> None:
         """发布流程结束后输出最终诊断摘要：失败时尤其关键。"""
         success = bool(result.get("success"))
         step_summaries = publish_guard.get("step_summaries", []) or []
@@ -1149,6 +1226,25 @@ class PublishService:
                     f"url={s.get('url', '')} editor_len={s.get('editor_len', 0)} "
                     f"action={action!r}"
                 )
+        if diagnostics:
+            usage = tracker.to_dict() if tracker else {}
+            diagnostics.log_final_summary(
+                success=success,
+                steps=step_count,
+                article_url=article_url,
+                failure_reason=failure_reason,
+                state={
+                    "last_url": last_url,
+                    "last_editor_len": last_editor_len,
+                    "last_probe_found": last_probe_found,
+                },
+                llm_usage={
+                    "calls": usage.get("call_count", 0),
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "total_tokens": usage.get("total_tokens", 0),
+                },
+            )
         logger.info("=" * 60)
 
     async def _reload_page(self, page, logger) -> None:
