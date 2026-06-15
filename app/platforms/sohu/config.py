@@ -14,6 +14,11 @@ class SohuPlatform(PlatformConfig):
     publish_url: str = "https://mp.sohu.com"
     auth_domains: list = field(default_factory=lambda: [".sohu.com", "mp.sohu.com", "www.sohu.com"])
     account_cookies: list = field(default_factory=lambda: ["SUV", "ppinf", "ppmdig"])
+    # 搜狐登录态的标志性 cookie：passport 登录成功后才下发 ppinf/ppmdig。
+    # 不能留空——留空会让 has_login_cookie 把"任意 .sohu.com cookie"都当成已登录，
+    # 而搜狐在登录页加载时就会种下匿名 cookie（如 SUV），导致刚打开登录页、还没登录
+    # 就被自动绑定。SUV 是匿名访客标识，只用于 extract_native_key 兜底，不作登录依据。
+    login_cookie_names: list = field(default_factory=lambda: ["ppinf", "ppmdig"])
 
     def extract_native_key(self, cookies: list) -> str:
         # 搜狐用 passport 标识 ppinf 作为账号去重键，回退到 ppmdig / SUV。

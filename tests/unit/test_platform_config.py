@@ -29,6 +29,27 @@ class TestToutiaoArticleUrlAccountId:
         assert ToutiaoPlatform().article_url_account_id({"account_number": "x"}) == ""
 
 
+class TestSohuHasLoginCookie:
+    """回归：搜狐登录页一加载就种匿名 cookie（SUV），不能被当成已登录，
+    否则刚打开登录页、还没登录就被自动绑定（channel 直接变 bound）。"""
+
+    def test_anonymous_cookie_is_not_logged_in(self) -> None:
+        # SUV 是匿名访客标识，登录前就存在，绝不能判为已登录
+        anon = [{"name": "SUV", "value": "abc", "domain": ".sohu.com"}]
+        assert SohuPlatform().has_login_cookie(anon) is False
+
+    def test_passport_cookie_is_logged_in(self) -> None:
+        # ppinf/ppmdig 由 passport 在登录成功后下发
+        for name in ("ppinf", "ppmdig"):
+            cookies = [{"name": name, "value": "xyz", "domain": ".sohu.com"}]
+            assert SohuPlatform().has_login_cookie(cookies) is True
+
+    def test_native_key_still_falls_back_to_suv(self) -> None:
+        # 登录判定收紧，但去重键仍可回退到 SUV，互不影响
+        anon = [{"name": "SUV", "value": "abc", "domain": ".sohu.com"}]
+        assert SohuPlatform().extract_native_key(anon) == "abc"
+
+
 class TestBodyProbe:
     def test_strips_markdown_and_compacts(self) -> None:
         # 图片/链接/标题/强调符号被去掉，空白被压缩，截取前 30 字符

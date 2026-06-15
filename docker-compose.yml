@@ -10,6 +10,17 @@ services:
       - .env
     environment:
       TZ: Asia/Shanghai
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+    # 搜狐号登录页的渲染 bundle(app.js/chunk-libs.js 等)托管在 g1.itc.cn，该域名
+    # 返回 10 个 A 记录，但本机房只有 118.112.11.56/.61 两个 IP 有路由，其余 8 个
+    # (118.123.168.x、182.140.x)不可达。浏览器逐个试死 IP 卡超时 → 关键 bundle 迟迟
+    # 不执行 → 登录页长时间白屏。这里把 g1.itc.cn 钉到可达 IP 绕开死路由。
+    # 注：CDN IP 可能变动；若日后又白屏，重测 `getent ahosts g1.itc.cn` 后更新此处。
+    extra_hosts:
+      - "g1.itc.cn:118.112.11.56"
+      - "g1.itc.cn:118.112.11.61"
     ports:
       - "${HOST_PORT:-8833}:8833"
     volumes:
