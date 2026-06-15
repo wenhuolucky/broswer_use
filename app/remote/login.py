@@ -56,6 +56,20 @@ REMOTE_LOGIN_COOKIE_POLL_STABLE = int(os.getenv("REMOTE_LOGIN_COOKIE_POLL_STABLE
 # 避免被抛弃的会话在后台无限轮询。
 REMOTE_LOGIN_COOKIE_POLL_MAX_WAIT = float(os.getenv("REMOTE_LOGIN_COOKIE_POLL_MAX_WAIT", "600"))
 
+# ── 登录成功后的「宽限期」回收 ─────────────────────────────────
+# 抓到 cookie 后不再立刻拆会话，而是让 viewer 多停留一会：给用户「登录成功」的
+# 明确反馈、允许其自行关闭或简单查看，避免画面无征兆 fail-to-connect。会话在以下
+# 三者最早命中时被回收：
+#   · 空闲：无活跃 viewer WS 连接超过 IDLE 秒（用户已关掉页面）
+#   · 硬上限：自捕获起最多再保留 TTL 秒（兜底「开着页面不动」导致 slot 泄漏——
+#            只靠空闲判定会漏，因为 WS 一直连着就永远不空闲）
+#   · 显式：调用方主动 cleanup / cancel
+# 任一设为 0 即关闭对应判据。
+REMOTE_LOGIN_POST_CAPTURE_TTL = float(os.getenv("REMOTE_LOGIN_POST_CAPTURE_TTL", "90"))
+REMOTE_LOGIN_POST_CAPTURE_IDLE = float(os.getenv("REMOTE_LOGIN_POST_CAPTURE_IDLE", "30"))
+# 宽限会话回收巡检间隔（秒）
+REMOTE_LOGIN_REAP_INTERVAL = float(os.getenv("REMOTE_LOGIN_REAP_INTERVAL", "5"))
+
 _remote_display_pool = DisplayPool(
     size=REMOTE_LOGIN_MAX_SESSIONS,
     display_base=REMOTE_LOGIN_DISPLAY_BASE,
@@ -104,6 +118,66 @@ def _build_login_browser(user_data_dir: str, display: str):
     )
 
 
+# 头条等平台登录页背景是 autoplay+loop 的 <video>，持续运动会触发 KasmVNC「视频模式」
+# (服务端主动降分辨率 + 4:2:0 抽样)，导致整帧——连同登录框文字——发糊。命令行 -VideoArea
+# 在部分 KasmVNC 版本上禁不住视频模式；从源头消除运动最稳妥，且与 KasmVNC 版本/参数完全
+# 解耦：注入脚本把所有 <video> 暂停冻结、把 play() 改成空操作，并用 MutationObserver +
+# 短时轮询兜住延迟插入的视频。背景视频纯装饰，禁掉不影响登录功能。
+_VIDEO_SUPPRESS_JS = r"""
+(() => {
+  const freeze = (v) => {
+    try { v.autoplay = false; v.loop = false; v.muted = true; v.pause(); } catch (e) {}
+  };
+  const sweep = () => {
+    try { document.querySelectorAll('video').forEach(freeze); } catch (e) {}
+  };
+  try {
+    const proto = HTMLMediaElement.prototype;
+    if (!proto.__videoSuppressed) {
+      proto.__videoSuppressed = true;
+      proto.play = function () { try { this.pause(); } catch (e) {} return Promise.resolve(); };
+    }
+  } catch (e) {}
+  sweep();
+  try {
+    new MutationObserver(sweep).observe(document.documentElement, { childList: true, subtree: true });
+  } catch (e) {}
+  let n = 0;
+  const t = setInterval(() => { sweep(); if (++n > 40) clearInterval(t); }, 250);
+})();
+"""
+
+
+async def _suppress_background_video(session) -> None:
+    """禁掉登录页背景视频，避免 KasmVNC 进入视频模式致整帧发糊。
+
+    分两步、失败均不致命：
+    1) Page.addScriptToEvaluateOnNewDocument —— 对之后每次文档加载(含导航守卫的重新导航)
+       在脚本执行前生效，赶在 <video> autoplay 之前冻结；
+    2) Runtime.evaluate —— 对「注册前可能已加载」的当前页面立即清扫一次兜底。
+    注册必须在 navigate 之前调用，立即清扫在 navigate 之后调用。
+    """
+    try:
+        cdp = await session.get_or_create_cdp_session()
+        await cdp.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
+            params={"source": _VIDEO_SUPPRESS_JS}, session_id=cdp.session_id
+        )
+    except Exception:
+        pass
+
+
+async def _kill_background_video_now(session) -> None:
+    """对当前已加载页面立即清扫一次背景视频。失败不致命。"""
+    try:
+        cdp = await session.get_or_create_cdp_session()
+        await cdp.cdp_client.send.Runtime.evaluate(
+            params={"expression": _VIDEO_SUPPRESS_JS, "returnByValue": True},
+            session_id=cdp.session_id,
+        )
+    except Exception:
+        pass
+
+
 async def _open_login_browser(session, url: str, display: str) -> None:
     """启动浏览器并导航到 url。
 
@@ -120,7 +194,11 @@ async def _open_login_browser(session, url: str, display: str) -> None:
                 os.environ.pop("DISPLAY", None)
             else:
                 os.environ["DISPLAY"] = prev
+    # 注册必须早于 navigate：让脚本赶在登录页 <video> autoplay 之前冻结背景视频，
+    # 否则一旦视频先播放就会触发 KasmVNC 视频模式致画面发糊。
+    await _suppress_background_video(session)
     await session.navigate_to(url)
+    await _kill_background_video_now(session)
 
 
 # ── 导航守卫（后台轮询）─────────────────────────────────────────
@@ -176,6 +254,13 @@ class RemoteLoginSession:
     cookie_watcher: object | None = None
     # 导航守卫后台轮询任务（把跑出白名单的页面拽回登录页）；会话销毁时取消
     nav_guard: object | None = None
+    # ── 登录成功后的宽限期状态 ──────────────────────────────
+    # 进入「已完成、待回收」宽限期的时刻（time.monotonic()）；0 表示尚未捕获 cookie
+    completed_monotonic: float = 0.0
+    # 当前活跃的 viewer WS 连接数（由 vnc_proxy 进出时维护）；>0 表示用户还看着
+    active_connections: int = 0
+    # 最近一次活跃连接清零的时刻；配合 active_connections==0 计算空闲时长
+    idle_since_monotonic: float = 0.0
 
 
 class RemoteLoginRunner:
@@ -210,6 +295,8 @@ class RemoteLoginRunner:
         self._replenish_locks = {p: asyncio.Lock() for p in self._warm_platforms}
         self._replenish_tasks: set[asyncio.Task] = set()
         self._maintainer_task: asyncio.Task | None = None
+        # 宽限会话回收巡检任务（独立于预热池，预热关闭时也照常运行）
+        self._reaper_task: asyncio.Task | None = None
 
     async def start(self, platform: str, channel_id: str) -> RemoteLoginSession:
         if self._starter:
@@ -259,9 +346,19 @@ class RemoteLoginRunner:
         if session.status == "completed":
             return False
         session.status = "completed"
+        self._enter_linger(session)
         if self._on_cookie_ready:
             await self._on_cookie_ready(session_id, cookies)
         return True
+
+    def _enter_linger(self, session: RemoteLoginSession) -> None:
+        """Cookie 已捕获：进入宽限期等待回收，而非立即销毁。给 viewer 留出「登录成功」
+        的反馈与自行关闭的窗口；真正的拆会话交给 _reap_lingering_loop。幂等。"""
+        now = time.monotonic()
+        session.completed_monotonic = now
+        # 此刻起按「无人连着」计空闲：若用户仍连着，active_connections>0 不会被判空闲，
+        # 由 TTL 兜底；用户关掉页面后 vnc_proxy 会把计数清零并刷新 idle_since。
+        session.idle_since_monotonic = now
 
     def _begin_cookie_watch(self, session: RemoteLoginSession) -> None:
         """为真实登录会话起一个后台轮询：检测到平台登录 cookie 即自动绑定。
@@ -310,10 +407,10 @@ class RemoteLoginRunner:
                 len(cookies),
             )
             try:
-                # 已确认 cookie 合法，直接复用手中 cookie 走绑定+拆会话，
-                # 不再二次提取/校验。cleanup→_destroy 会跳过取消本任务（自身）。
-                if await self.complete_with_cookies(session_id, cookies):
-                    await self.cleanup(session_id)
+                # 已确认 cookie 合法，直接复用手中 cookie 走绑定。绑定后不立即拆会话，
+                # 而是进入宽限期（complete_with_cookies→_enter_linger），由回收巡检
+                # 按空闲/TTL 拆除；本轮询任务随后自然返回。
+                await self.complete_with_cookies(session_id, cookies)
             except Exception as exc:
                 # 自动绑定失败不致命：保留会话，用户仍可手动 save-cookie 兜底。
                 logger.warning("自动保存登录 cookie 失败，等待手动兜底: %s", exc)
@@ -334,7 +431,8 @@ class RemoteLoginRunner:
             # 手动保存路径：不通知 on_cookie_ready，由调用方拿到 cookies 后自行
             # 调 resume_after_cookie 完成绑定。
             session.status = "completed"
-        await self.cleanup(session_id)
+            self._enter_linger(session)
+        # 不立即拆会话：进入宽限期，由回收巡检按空闲/TTL 拆除（见 _enter_linger）。
         return cookies
 
     async def _extract_session_cookies(self, session: RemoteLoginSession) -> list[dict]:
@@ -399,10 +497,27 @@ class RemoteLoginRunner:
             raise
 
     async def cleanup(self, session_id: str) -> None:
-        session = self._sessions.get(session_id)
+        # 先从 _sessions 摘除再拆：拆除瞬间上游 Xvnc 已死，若条目还留着，vnc_proxy
+        # 会把请求转给死掉的上游而抛 500；摘除后 get() 返回 None，代理直接给 404。
+        session = self._sessions.pop(session_id, None)
         if not session:
             return
         await self._destroy(session)
+
+    def note_viewer_connect(self, session_id: str) -> None:
+        """vnc_proxy 在一条 viewer WS 建链成功后调用：标记有人正在看。"""
+        session = self._sessions.get(session_id)
+        if session is not None:
+            session.active_connections += 1
+
+    def note_viewer_disconnect(self, session_id: str) -> None:
+        """vnc_proxy 在一条 viewer WS 断开后调用：计数清零时刷新空闲起点。"""
+        session = self._sessions.get(session_id)
+        if session is None:
+            return
+        session.active_connections = max(0, session.active_connections - 1)
+        if session.active_connections == 0:
+            session.idle_since_monotonic = time.monotonic()
 
     async def _destroy(self, session: RemoteLoginSession) -> None:
         """彻底拆掉一个会话：取消后台轮询任务 → kill 浏览器 → 停 Xvnc →
@@ -435,6 +550,57 @@ class RemoteLoginRunner:
             shutil.rmtree(profile_dir, ignore_errors=True)
 
     # ------------------------------------------------------------------
+    # 宽限会话回收：登录成功后保留一段时间，按空闲/TTL 拆除
+    # ------------------------------------------------------------------
+    async def start_session_reaper(self) -> None:
+        """在 app 启动时调用，起一个常驻巡检回收进入宽限期的登录会话。与预热池相互
+        独立——预热默认关闭，但宽限回收始终需要。幂等。"""
+        if self._reaper_task is not None:
+            return
+        self._reaper_task = asyncio.create_task(self._reap_lingering_loop())
+
+    async def _reap_lingering_loop(self) -> None:
+        while True:
+            try:
+                await self._reap_lingering_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._warm_logger().warning("宽限会话回收巡检异常: %s", exc)
+            await asyncio.sleep(REMOTE_LOGIN_REAP_INTERVAL)
+
+    async def _reap_lingering_once(self) -> None:
+        now = time.monotonic()
+        expired: list[tuple[str, str]] = []
+        for session_id, session in list(self._sessions.items()):
+            # 只回收已捕获 cookie、进入宽限期的会话；登录中的会话不动。
+            if session.status != "completed" or not session.completed_monotonic:
+                continue
+            reason = self._linger_expiry_reason(session, now)
+            if reason:
+                expired.append((session_id, reason))
+        for session_id, reason in expired:
+            self._warm_logger().info(
+                "回收宽限登录会话 session_id=%s reason=%s", session_id, reason
+            )
+            await self.cleanup(session_id)
+
+    def _linger_expiry_reason(self, session: RemoteLoginSession, now: float) -> str:
+        """判定一个宽限会话是否到期回收，返回原因（ttl/idle）或空串。"""
+        if (
+            REMOTE_LOGIN_POST_CAPTURE_TTL > 0
+            and now - session.completed_monotonic > REMOTE_LOGIN_POST_CAPTURE_TTL
+        ):
+            return "ttl"
+        if (
+            session.active_connections <= 0
+            and REMOTE_LOGIN_POST_CAPTURE_IDLE > 0
+            and now - session.idle_since_monotonic > REMOTE_LOGIN_POST_CAPTURE_IDLE
+        ):
+            return "idle"
+        return ""
+
+    # ------------------------------------------------------------------
     # 预热池：后台维持每平台若干空闲会话，按需直接复用
     # ------------------------------------------------------------------
     async def start_warm_pool(self) -> None:
@@ -453,6 +619,13 @@ class RemoteLoginRunner:
 
     async def shutdown(self) -> None:
         """关停维护循环、拆掉所有预热会话。"""
+        if self._reaper_task is not None:
+            self._reaper_task.cancel()
+            try:
+                await self._reaper_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._reaper_task = None
         if self._maintainer_task is not None:
             self._maintainer_task.cancel()
             try:

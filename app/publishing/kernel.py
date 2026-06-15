@@ -89,7 +89,8 @@ class PublishService:
         request_id: str,
         cover_image_path: Optional[str] = None,
         cover_image_url: Optional[str] = None,
-        on_live_url_ready: Callable[[str], Awaitable[None]] | None = None,
+        # 回调入参是 viewer 的本机端口（int），由上层据此构造对外 live_url。
+        on_live_url_ready: Callable[[int], Awaitable[None]] | None = None,
     ) -> dict:
         """Execute article publish."""
         logger = setup_request_logger(request_id)
@@ -234,10 +235,10 @@ class PublishService:
                         publish_cdp_port,
                         viewer_port,
                     )
-                    # 发文是 LLM 自动操作、无需人盯，故实时查看仅供服务器侧本地调试
-                    # （http://127.0.0.1:{viewer_port}/），不再经 cloudflared 对外暴露，
-                    # 也不生成对外 live_url（on_live_url_ready 不再回调）。
-                    logger.info("[LiveViewer] 发布实时查看(仅本地)已启动: http://127.0.0.1:%s/", viewer_port)
+                    # viewer 绑定本机随机端口，把端口回调给上层（orchestrator）：由它登记
+                    # job_id→port 并构造经主服务反代的对外 live_url（见 publish_viewer_proxy）。
+                    logger.info("[LiveViewer] 发布实时查看已启动: 127.0.0.1:%s", viewer_port)
+                    await on_live_url_ready(viewer_port)
                 except Exception as exc:
                     logger.warning("[LiveViewer] 发布实时查看启动失败: %s", exc, exc_info=True)
             browser_elapsed = asyncio.get_event_loop().time() - browser_start

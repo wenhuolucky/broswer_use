@@ -96,7 +96,7 @@ uv run uvicorn app.server:app --host 127.0.0.1 --port 8833
 - 交互式 API 文档（Scalar）：`GET /scalar`
 - OpenAPI 描述：`GET /openapi.json`
 
-除 `/health` 与 `/api/v1/ready` 外，`/api/v1` 下的业务接口均需在请求头携带 Bearer Token：
+除 `/health` 外，`/api/v1` 下的业务接口均需在请求头携带 Bearer Token：
 
 ```text
 Authorization: Bearer <PUBLISH_API_TOKEN>
@@ -115,7 +115,6 @@ Authorization: Bearer <PUBLISH_API_TOKEN>
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|:---:|---|
 | `GET` | `/health` | 否 | 进程存活检查 |
-| `GET` | `/api/v1/ready` | 否 | 就绪检查（含存储类型） |
 | `GET` | `/api/v1/platforms` | 是 | 支持的平台列表 |
 | `POST` | `/api/v1/jobs` | 是 | 创建发文任务（传 `channel_id`，立即返回不阻塞） |
 | `GET` | `/api/v1/jobs` | 是 | 发文任务列表（支持 channel_id/status 过滤） |
@@ -123,13 +122,9 @@ Authorization: Bearer <PUBLISH_API_TOKEN>
 | `POST` | `/api/v1/jobs/{job_id}/save-cookie` | 是 | 发文任务登录后保存 Cookie 并续发 |
 | `POST` | `/api/v1/jobs/{job_id}/cancel` | 是 | 取消发文任务 |
 | `POST` | `/api/v1/login-sessions` | 是 | 创建登录会话（传 `platform`，签发新 `channel_id`） |
-| `GET` | `/api/v1/login-sessions` | 是 | 登录会话列表（支持 channel_id/status 过滤） |
 | `GET` | `/api/v1/login-sessions/{session_id}` | 是 | 查询登录会话状态（含 `channel_id`） |
-| `POST` | `/api/v1/login-sessions/{session_id}/save-cookie` | 是 | 登录完成后保存 Cookie |
 | `DELETE` | `/api/v1/login-sessions/{session_id}` | 是 | 取消登录会话（释放 Xvnc 显示槽） |
-| `GET` | `/api/v1/channels` | 是 | 渠道列表（支持 platform 过滤） |
 | `GET` | `/api/v1/channels/{channel_id}` | 是 | 查询渠道状态（平台/账号名/cookie 是否有效） |
-| `POST` | `/api/v1/channels/{channel_id}/relogin` | 是 | 渠道 cookie 失效后重新登录（channel_id 不变） |
 | `DELETE` | `/api/v1/channels/{channel_id}` | 是 | 删除渠道（含 cookie） |
 
 发文（LLM 自动操作）与登录（真人手动操作）是两套独立资源：发文走 `/jobs`，登录走 `/login-sessions`，两者底层共用 Job 存储但在接口上互不可见（拿发文 `job_id` 去访问 `/login-sessions/*` 会得到 404，反之亦然）。

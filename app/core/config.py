@@ -48,3 +48,12 @@ def _pg_dsn() -> str:
 PGSQL_DSN = _pg_dsn()
 
 PUBLISH_API_TOKEN = os.getenv("PUBLISH_API_TOKEN", "").strip()
+
+# 僵尸 pending 渠道清理：pending 渠道只在一次登录会话进行中存在，用户放弃登录
+# （关页面/超时）会留下无 cookie 的空渠道。运行期无其他 GC（cancel/回收巡检都不删
+# 渠道），故按 TTL 周期清扫：删除创建超过 TTL 仍未绑定的 pending 渠道。
+# TTL 取值需远大于真实登录耗时，避免误删正在登录中的渠道（默认 30 分钟）。
+PENDING_CHANNEL_TTL_SECONDS = float(os.getenv("PENDING_CHANNEL_TTL_SECONDS", "1800"))
+PENDING_CHANNEL_SWEEP_INTERVAL_SECONDS = float(
+    os.getenv("PENDING_CHANNEL_SWEEP_INTERVAL_SECONDS", "600")
+)

@@ -7,9 +7,14 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import Depends, FastAPI
 
-from app.api import vnc_proxy
-from app.api.routes import agent, public_router, router
-from app.api.schemas import HealthResponse
+from app.api import publish_viewer_proxy, vnc_proxy
+from app.api.deps import agent
+from app.api.v1.router import api_router
+from app.core.config import (
+    PENDING_CHANNEL_SWEEP_INTERVAL_SECONDS,
+    PENDING_CHANNEL_TTL_SECONDS,
+)
+from app.schemas.common import HealthResponse
 from app.core.auth import require_api_token
 from app.core.request_logging import (
     JOB_LOG_RETENTION_DAYS,
@@ -36,6 +41,26 @@ async def _job_log_cleanup_loop():
         except Exception as exc:
             _log.warning("清理任务日志目录失败: %s", exc)
         await asyncio.sleep(24 * 3600)
+
+
+async def _pending_channel_sweep_loop():
+    """周期清扫僵尸 pending 渠道（创建超过 PENDING_CHANNEL_TTL_SECONDS 仍未绑定）。
+
+    启动时的 purge_pending_channels 只清掉重启前的遗留；本任务覆盖运行期用户放弃
+    登录积累的空渠道。TTL<=0 时不删，仅按间隔空转。
+    """
+    while True:
+        await asyncio.sleep(PENDING_CHANNEL_SWEEP_INTERVAL_SECONDS)
+        try:
+            purged = agent.channel_store.purge_stale_pending_channels(PENDING_CHANNEL_TTL_SECONDS)
+            if purged:
+                _log.info(
+                    "清扫僵尸 pending 渠道 %d 个（创建超过 %.0f 秒未绑定）",
+                    purged,
+                    PENDING_CHANNEL_TTL_SECONDS,
+                )
+        except Exception as exc:
+            _log.warning("清扫僵尸 pending 渠道失败: %s", exc)
 
 
 @asynccontextmanager
@@ -65,11 +90,19 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         _log.warning("预热登录会话池启动失败: %s", exc)
 
+    # 宽限会话回收：登录成功后保留一段时间供用户查看/自行关闭，按空闲/TTL 拆除。
+    try:
+        await agent.remote_runner.start_session_reaper()
+    except Exception as exc:
+        _log.warning("启动登录会话回收巡检失败: %s", exc)
+
     cleanup_task = asyncio.create_task(_job_log_cleanup_loop())
+    pending_sweep_task = asyncio.create_task(_pending_channel_sweep_loop())
     try:
         yield
     finally:
         cleanup_task.cancel()
+        pending_sweep_task.cancel()
         try:
             await agent.remote_runner.shutdown()
         except Exception as exc:
@@ -91,13 +124,13 @@ async def health():
     return HealthResponse()
 
 
-# Public, unauthenticated routes (readiness).
-app.include_router(public_router, prefix="/api/v1")
 # Protected business routes — Bearer token enforced at the router level.
-app.include_router(router, prefix="/api/v1", dependencies=[Depends(require_api_token)])
+app.include_router(api_router, prefix="/api/v1", dependencies=[Depends(require_api_token)])
 app.state.remote_login_runner = agent.remote_runner
 # Internal VNC proxy (already include_in_schema=False).
 app.include_router(vnc_proxy.router)
+# 发文实时查看反代：把本机 viewer 端口经主服务暴露，鉴权依赖不可猜的 job_id（同 vnc_proxy）。
+app.include_router(publish_viewer_proxy.router)
 
 
 @app.get("/scalar", include_in_schema=False)

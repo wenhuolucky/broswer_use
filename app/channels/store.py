@@ -14,6 +14,7 @@ configs reached through ``app.platforms.registry``.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from threading import RLock
 from typing import Any
 
@@ -219,6 +220,38 @@ class ChannelStore(PgStoreMixin):
             rows = conn.execute(
                 "DELETE FROM channels WHERE status = %s RETURNING channel_id",
                 (STATUS_CHANNEL_PENDING,),
+            ).fetchall()
+        return len(rows)
+
+    def purge_stale_pending_channels(self, older_than_seconds: float) -> int:
+        """Delete ``pending`` channels older than ``older_than_seconds``.
+
+        运行期清扫僵尸 pending 渠道：用户发起登录会留下 pending 渠道，若用户放弃
+        登录（关页面/超时），该渠道永远停在 pending（无 cookie、发不了文）。TTL 须
+        远大于真实登录耗时，故到期的 pending 渠道几乎必然是被放弃的。"""
+        if older_than_seconds <= 0:
+            return 0
+        if self._pool is None:
+            cutoff = datetime.now(UTC) - timedelta(seconds=older_than_seconds)
+            with self._lock:
+                stale = []
+                for c in self._channels.values():
+                    if c.status != STATUS_CHANNEL_PENDING:
+                        continue
+                    try:
+                        created = datetime.fromisoformat(c.created_at)
+                    except ValueError:
+                        continue
+                    if created < cutoff:
+                        stale.append(c.channel_id)
+                for cid in stale:
+                    self.delete(cid)
+                return len(stale)
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "DELETE FROM channels WHERE status = %s "
+                "AND created_at < now() - make_interval(secs => %s) RETURNING channel_id",
+                (STATUS_CHANNEL_PENDING, older_than_seconds),
             ).fetchall()
         return len(rows)
 

@@ -64,7 +64,7 @@ def _runner(request_or_websocket):
     if runner is not None:
         return runner
     try:
-        from app.api.routes import agent
+        from app.api.deps import agent
 
         return agent.remote_runner
     except Exception:
@@ -107,7 +107,13 @@ async def vnc_http(session_id: str, path: str, request: Request) -> Response:
         params=dict(request.query_params),
         content=await request.body(),
     )
-    upstream_resp = await client.send(upstream_req, stream=True)
+    try:
+        upstream_resp = await client.send(upstream_req, stream=True)
+    except httpx.HTTPError:
+        # 会话已进入回收（Xvnc 已停）但条目尚未摘除的窗口，或上游瞬时不可达：
+        # 给一个干净的 410「会话已结束」而非裸 500，刷新页面语义正确、不报错。
+        await client.aclose()
+        return Response(status_code=410, content="session ended")
     headers = {
         key: value
         for key, value in upstream_resp.headers.items()
@@ -141,7 +147,8 @@ async def _aclose(resp: httpx.Response, client: httpx.AsyncClient) -> None:
 
 @router.websocket("/vnc/{session_id}/{path:path}")
 async def vnc_ws(websocket: WebSocket, session_id: str, path: str) -> None:
-    port = _session_port(_runner(websocket), session_id)
+    runner = _runner(websocket)
+    port = _session_port(runner, session_id)
     if port is None:
         await websocket.close(code=4404)
         return
@@ -168,7 +175,15 @@ async def vnc_ws(websocket: WebSocket, session_id: str, path: str) -> None:
             additional_headers={"Origin": f"http://127.0.0.1:{port}"},
         ) as upstream:
             await websocket.accept(subprotocol=upstream.subprotocol)
-            await _bridge(websocket, upstream)
+            # 标记「有人正在看」：宽限期回收据此判空闲——还连着就不按空闲拆，
+            # 断开后空闲计时才开始（见 RemoteLoginRunner.note_viewer_*）。
+            if runner is not None:
+                runner.note_viewer_connect(session_id)
+            try:
+                await _bridge(websocket, upstream)
+            finally:
+                if runner is not None:
+                    runner.note_viewer_disconnect(session_id)
     except Exception:
         try:
             await websocket.close()

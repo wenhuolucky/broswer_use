@@ -65,11 +65,11 @@ class PublishAgent:
         if channel is None:
             return self._task_response(
                 "",
-                "failed",
                 "渠道不存在，请先登录",
                 code=404,
                 channel_id=request.channel_id,
                 error_detail="channel not found",
+                status=STATUS_FAILED,
             )
 
         payload = request.model_dump()
@@ -91,7 +91,6 @@ class PublishAgent:
             self._schedule_publish(job.job_id)
             return self._task_response(
                 job.job_id,
-                "running",
                 "任务创建成功，发布任务正在后台执行",
                 channel_id=request.channel_id,
             )
@@ -101,7 +100,6 @@ class PublishAgent:
         if login_response.code >= 500:
             return self._task_response(
                 job.job_id,
-                "failed",
                 "任务创建失败",
                 code=500,
                 channel_id=request.channel_id,
@@ -111,7 +109,6 @@ class PublishAgent:
         current_job = self.job_store.get(job.job_id)
         return self._task_response(
             job.job_id,
-            "login_required",
             "任务创建成功，需要用户登录",
             channel_id=request.channel_id,
             live_url=(current_job.live_url or current_job.login_url) if current_job else "",
@@ -139,7 +136,6 @@ class PublishAgent:
         if login_response.code >= 500:
             return self._task_response(
                 job.job_id,
-                "failed",
                 "登录任务创建失败",
                 code=500,
                 channel_id=channel.channel_id,
@@ -149,50 +145,8 @@ class PublishAgent:
         current_job = self.job_store.get(job.job_id)
         return self._task_response(
             job.job_id,
-            "login_required",
             "登录任务创建成功，需要用户登录",
             channel_id=channel.channel_id,
-            live_url=(current_job.live_url or current_job.login_url) if current_job else "",
-        )
-
-    async def start_relogin(self, channel_id: str) -> AutoTaskCreateResponse:
-        # 重新登录一个已存在的渠道：复用同一个 channel_id，只刷新 cookie。
-        channel = self.channel_store.get(channel_id)
-        if channel is None:
-            return self._task_response(
-                "",
-                "failed",
-                "渠道不存在",
-                code=404,
-                channel_id=channel_id,
-                error_detail="channel not found",
-            )
-        payload = {
-            "platform": channel.platform,
-            "channel_id": channel_id,
-            "job_type": "login_only",
-        }
-        job = self.job_store.create(payload)
-        logger, log_path = setup_job_logger(job.job_id, self.log_dir)
-        self.job_store.update(job.job_id, log_file_path=str(log_path))
-        logger.info("收到渠道重新登录请求 platform=%s channel_id=%s", channel.platform, channel_id)
-
-        login_response = await self._start_remote_login(job.job_id, "relogin")
-        if login_response.code >= 500:
-            return self._task_response(
-                job.job_id,
-                "failed",
-                "登录任务创建失败",
-                code=500,
-                channel_id=channel_id,
-                error_detail=login_response.message,
-            )
-        current_job = self.job_store.get(job.job_id)
-        return self._task_response(
-            job.job_id,
-            "login_required",
-            "重新登录任务创建成功，需要用户登录",
-            channel_id=channel_id,
             live_url=(current_job.live_url or current_job.login_url) if current_job else "",
         )
 
@@ -209,6 +163,10 @@ class PublishAgent:
         self._background_tasks.discard(task)
         if self._tasks_by_job.get(job_id) is task:
             self._tasks_by_job.pop(job_id, None)
+        # viewer 随发文任务结束已被拆（kernel finally），摘除反代映射避免悬挂。
+        from app.api.publish_viewer_proxy import unregister_viewer
+
+        unregister_viewer(job_id)
         logger, _ = setup_job_logger(job_id, self.log_dir)
         try:
             task.result()
@@ -228,11 +186,18 @@ class PublishAgent:
             STATUS_PUBLISHING,
         }
         stale_jobs = self.job_store.list_by_statuses(stale_statuses)
-        reason = "服务已重启，运行中的浏览器会话和实时查看页面已失效，请重新创建发布任务"
+        # 登录会话与发布任务底层共用 Job 存储、靠 job.type 区分，对外是两套解耦资源；
+        # 重启清理的失败文案也要按类型给，避免登录会话拿到发布口径的提示。
+        reason_by_type = {
+            "login": "服务已重启，运行中的浏览器会话和实时查看页面已失效，请重新创建登录会话",
+            "publish": "服务已重启，运行中的浏览器会话和实时查看页面已失效，请重新创建发布任务",
+        }
         for job in stale_jobs:
+            reason = reason_by_type.get(job.type, reason_by_type["publish"])
             logger, _ = setup_job_logger(job.job_id, self.log_dir)
             logger.warning(
-                "服务启动时关闭遗留任务 status=%s live_url=%s remote_session_id=%s",
+                "服务启动时关闭遗留任务 type=%s status=%s live_url=%s remote_session_id=%s",
+                job.type,
                 job.status,
                 job.live_url,
                 job.remote_session_id,
@@ -250,19 +215,23 @@ class PublishAgent:
     def _task_response(
         self,
         job_id: str,
-        task_status: str,
         message: str,
         code: int = 200,
         channel_id: str = "",
         live_url: str = "",
         error_detail: str = "",
+        status: str = "",
     ) -> AutoTaskCreateResponse:
-        # 只回传调用方真正用得到的字段：job_id / channel_id / task_status、登录时的
-        # live_url、失败时的 error_detail。其余可由 job_id 推导或属内部信息，不下发。
+        # 只回传调用方真正用得到的字段：job_id / channel_id / status、登录时的 live_url、
+        # 失败时的 error_detail。status 为原始内部状态：有 job_id 时以 store 最新值为准，
+        # 否则用显式传入的兜底（如渠道不存在、尚无 job 时）。
+        if not status and job_id:
+            current = self.job_store.get(job_id)
+            status = current.status if current else ""
         data = {
             "job_id": job_id,
             "channel_id": channel_id,
-            "task_status": task_status,
+            "status": status,
             "live_url": live_url,
         }
         if error_detail:
@@ -336,7 +305,14 @@ class PublishAgent:
             config.article_url_account_id(channel.metadata) if (config and channel) else ""
         )
 
-        async def on_live_url_ready(live_url: str) -> None:
+        async def on_live_url_ready(viewer_port: int) -> None:
+            # 登记 job_id→viewer_port，并构造经主服务反代的对外 live_url——与登录 live_url
+            # 同一套 base（REMOTE_PUBLIC_BASE_URL 或本机主服务端口），故同样哪都能打开。
+            from app.api.publish_viewer_proxy import register_viewer
+            from app.remote.login import _public_base_url
+
+            register_viewer(job_id, viewer_port)
+            live_url = f"{_public_base_url()}/publish-viewer/{job_id}/"
             self.job_store.update(job_id, live_url=live_url)
             logger.info("发布实时查看链接已生成 live_url=%s", live_url)
 
@@ -610,9 +586,6 @@ class PublishAgent:
     # ------------------------------------------------------------------
     def get_channel(self, channel_id: str):
         return self.channel_store.get(channel_id)
-
-    def list_channels(self, platform: str | None = None, limit: int = 50, offset: int = 0):
-        return self.channel_store.list_channels(platform=platform, limit=limit, offset=offset)
 
     def channel_cookie_valid(self, channel_id: str) -> bool:
         return self.channel_store.has_valid_cookie(channel_id)
