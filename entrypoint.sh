@@ -9,7 +9,8 @@ set -euo pipefail
 
 # ---- 可配置项（均可通过环境变量覆盖）----
 SERVICE_WORKERS="${SERVICE_WORKERS:-1}"
-export DISPLAY
+# 发布浏览器使用的 Xvfb 显示号；未显式配置时默认 :99，避免 set -u 下因未绑定而崩溃。
+export DISPLAY="${DISPLAY:-:99}"
 
 log() { echo "[entrypoint] $*"; }
 

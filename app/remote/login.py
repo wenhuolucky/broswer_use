@@ -4,13 +4,10 @@ import asyncio
 import glob
 import os
 import shutil
-import signal
 import socket
-import subprocess
 import sys
 import time
 import uuid
-import urllib.request
 from dataclasses import dataclass
 from logging import LoggerAdapter
 from pathlib import Path
@@ -18,10 +15,6 @@ from typing import Awaitable, Callable
 from urllib.parse import quote, urlparse
 
 from app.core.config import REMOTE_PROFILE_DIR
-from app.remote.display_config import (
-    get_remote_browser_window_size,
-    get_remote_login_kasmvnc_options,
-)
 from app.streaming import kasmvnc
 from app.streaming.display_pool import DisplayPool, Slot
 
@@ -36,7 +29,7 @@ REMOTE_LOGIN_DISPLAY_BASE = int(os.getenv("DISPLAY_BASE", "100"))
 REMOTE_LOGIN_KASMVNC_PORT_BASE = int(os.getenv("KASMVNC_PORT_BASE", "6900"))
 REMOTE_LOGIN_KASMVNC_BIN = os.getenv("KASMVNC_BIN", "Xvnc")
 REMOTE_LOGIN_KASMVNC_WWW = os.getenv("KASMVNC_WWW", "")
-REMOTE_LOGIN_VNC_SCREEN = os.getenv("REMOTE_VNC_SCREEN", "1440x900x24")
+REMOTE_LOGIN_VNC_SCREEN = os.getenv("REMOTE_VNC_SCREEN", "1920x1080x24")
 # 登录 live url 对外暴露的公网 base（如 https://a2a.fans）。反向代理需把
 # {base}/vnc/{session_id}/ 转发到本服务端口。留空则回退到本机直连地址（本地开发）。
 REMOTE_PUBLIC_BASE_URL = os.getenv("REMOTE_PUBLIC_BASE_URL", "").strip().rstrip("/")
@@ -69,33 +62,74 @@ _remote_display_pool = DisplayPool(
     port_base=REMOTE_LOGIN_KASMVNC_PORT_BASE,
 )
 
-# 全局共享一个 Playwright driver（node 子进程）。每个登录会话只用它对自己的
-# CDP 端口 connect_over_cdp 拿一个 browser，而不是各起一个 driver——省掉每会话
-# 的 driver 启动延迟和常驻进程。driver 在进程内只起一次，关停由 shutdown() 负责。
-_shared_playwright = None
-_shared_playwright_lock = asyncio.Lock()
+# browser-use 0.12 启动 Chromium 的 create_subprocess_exec 不传 env=，子进程继承本
+# 进程的 os.environ。若不在 start() 那一刻把 DISPLAY 设成本会话的显示号，有头 Chromium
+# 会连不上对应 Xvnc 而崩溃。用一把全局锁串行化「设 DISPLAY → start() → 还原」临界区，
+# 锁只覆盖 fork 那一瞬，不影响并发会话各自的显示槽。
+_launch_lock = asyncio.Lock()
 
 
-async def _get_shared_playwright():
-    global _shared_playwright
-    if _shared_playwright is not None:
-        return _shared_playwright
-    async with _shared_playwright_lock:
-        if _shared_playwright is None:
-            from playwright.async_api import async_playwright
+def _build_login_browser(user_data_dir: str, display: str):
+    """构造（未启动的）browser-use BrowserSession，用于远程登录有头浏览器。
 
-            _shared_playwright = await async_playwright().start()
-        return _shared_playwright
+    渲染到 display 指定的 Xvnc 显示；--kiosk 全屏无壳（无地址栏/标签栏）。配合该显示
+    上的 openbox（见 kasmvnc.start_stream），桌面被客户端动态 resize 时全屏窗口会自动
+    跟随铺满，从而 1:1 清晰且铺满。
+    """
+    from browser_use import BrowserSession
+
+    width, height = _vnc_screen_window_size()
+    return BrowserSession(
+        user_data_dir=user_data_dir,
+        headless=False,
+        keep_alive=True,
+        chromium_sandbox=False,  # 容器内无 user namespace，需关沙箱
+        # browser-use 默认开"自动化优化扩展"(uBlock/cookie/ClearURLs)，启动时会去
+        # GitHub 下载，国内容器里会卡死；登录流用不到，直接关掉（等价 env
+        # BROWSER_USE_DISABLE_EXTENSIONS=1）。
+        enable_default_extensions=False,
+        executable_path=_find_browser_path(),
+        # 0.12 实际忽略 profile.env（不传给子进程），真正生效靠 _open_login_browser
+        # 在 start() 临界区临时设 os.environ["DISPLAY"]；这里保留仅作声明。
+        env={"DISPLAY": display},
+        window_size={"width": width, "height": height},
+        args=[
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--test-type",  # 压掉"仅供自动化测试"横幅
+            # 全屏无壳：无地址栏（用户不能乱输 URL）、无标签栏。kiosk 需要窗口管理器
+            # 才能正确全屏并跟随桌面 resize——该显示上的 openbox 负责这件事。
+            "--kiosk",
+        ],
+    )
 
 
-async def _stop_shared_playwright() -> None:
-    global _shared_playwright
-    if _shared_playwright is not None:
-        pw, _shared_playwright = _shared_playwright, None
+async def _open_login_browser(session, url: str, display: str) -> None:
+    """启动浏览器并导航到 url。
+
+    在 start() 临界区临时把 DISPLAY 设入本进程环境，让新 fork 的 Chromium 渲染到对应
+    Xvnc 显示，起完即还原。全局锁串行化，避免并发会话互相覆盖 DISPLAY。
+    """
+    async with _launch_lock:
+        prev = os.environ.get("DISPLAY")
+        os.environ["DISPLAY"] = display
         try:
-            await pw.stop()
-        except Exception:
-            pass
+            await session.start()
+        finally:
+            if prev is None:
+                os.environ.pop("DISPLAY", None)
+            else:
+                os.environ["DISPLAY"] = prev
+    await session.navigate_to(url)
+
+
+# ── 导航守卫（后台轮询）─────────────────────────────────────────
+# 周期性检查会话浏览器当前 URL，跑出平台白名单就 navigate_to 拽回登录页。
+REMOTE_LOGIN_NAV_GUARD_INTERVAL = float(os.getenv("REMOTE_LOGIN_NAV_GUARD_INTERVAL", "1.0"))
+# 安装守卫后的保护期（秒）：让 login_url 自身的重定向链跑完，避免误拦白屏
+REMOTE_LOGIN_NAV_GUARD_GRACE = float(os.getenv("REMOTE_LOGIN_NAV_GUARD_GRACE", "15"))
+# 同一会话拦截上限：超过则停止拦截，避免"拦截→跳回→又触发→又拦截"死循环把页面搞挂
+REMOTE_LOGIN_NAV_GUARD_MAX_INTERCEPTS = int(os.getenv("REMOTE_LOGIN_NAV_GUARD_MAX_INTERCEPTS", "5"))
 
 REMOTE_LOGIN_ALLOWED_HOSTS = {
     "toutiao": (
@@ -131,18 +165,17 @@ class RemoteLoginSession:
     channel_id: str
     login_url: str
     status: str = "waiting_cookie"
-    cdp_port: int = 0
     viewer_port: int = 0
-    chrome_proc: subprocess.Popen | None = None
-    playwright: object | None = None
+    # browser-use BrowserSession（有头，渲染到 slot 的 Xvnc 显示）
     browser: object | None = None
     stream: object | None = None
     slot: Slot | None = None
-    vnc_token: str = ""
     # 预热会话的构建时刻（time.monotonic()），用于 TTL 回收；真实会话填 0 不参与
     created_monotonic: float = 0.0
     # 自动检测登录 cookie 的后台轮询任务；会话销毁时取消。预热会话为 None
     cookie_watcher: object | None = None
+    # 导航守卫后台轮询任务（把跑出白名单的页面拽回登录页）；会话销毁时取消
+    nav_guard: object | None = None
 
 
 class RemoteLoginRunner:
@@ -305,63 +338,64 @@ class RemoteLoginRunner:
         return cookies
 
     async def _extract_session_cookies(self, session: RemoteLoginSession) -> list[dict]:
-        if session.browser and getattr(session.browser, "contexts", None):
-            return await session.browser.contexts[0].cookies()
-        raise RuntimeError("remote browser context unavailable")
+        browser = session.browser
+        if browser is None:
+            raise RuntimeError("remote browser unavailable")
+        # browser-use 0.12 的 cookies() 经 CDP Storage.getCookies 返回原始 dict；
+        # 统一归一为普通 dict，供 _has_platform_cookie / 下游 normalize 消费。
+        raw = await browser.cookies()
+        return [c.model_dump() if hasattr(c, "model_dump") else dict(c) for c in raw]
 
     async def _build_session(self, platform: str, channel_id: str) -> RemoteLoginSession:
-        """现场构建一个完整登录会话：占 slot → 起 Xvnc → 起 Chrome → 附加
-        Playwright → goto 登录页 → 装守卫。预热和按需走的都是这条路径。"""
+        """现场构建一个完整登录会话：占 slot → 起 Xvnc → 用 browser-use 起有头浏览器 →
+        goto 登录页 → 装导航守卫。预热和按需走的都是这条路径。"""
         session_id = uuid.uuid4().hex
         slot = await _remote_display_pool.acquire()
         stream = None
-        chrome_proc = None
         browser = None
+        profile_dir = REMOTE_PROFILE_DIR / session_id
         try:
-            cdp_port = _find_free_port()
             stream = await kasmvnc.start_stream(
                 slot,
                 kasmvnc_bin=REMOTE_LOGIN_KASMVNC_BIN,
                 screen=REMOTE_LOGIN_VNC_SCREEN,
                 www_dir=REMOTE_LOGIN_KASMVNC_WWW,
-                quality=get_remote_login_kasmvnc_options(),
             )
             login_url = _login_url_for(platform)
-            chrome_proc = await _launch_chrome(cdp_port, session_id, display=slot.display, app_url=login_url)
-            pw, browser, page = await _attach_browser(cdp_port, login_url)
-            _install_remote_navigation_guard(page, platform, login_url, self._logger(session_id))
-            await page.goto(login_url, timeout=30000, wait_until="domcontentloaded")
-            await _enforce_remote_navigation_guard(page, platform, login_url, self._logger(session_id))
-            return RemoteLoginSession(
+            if profile_dir.exists():
+                shutil.rmtree(profile_dir, ignore_errors=True)
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            browser = _build_login_browser(str(profile_dir), slot.display)
+            await _open_login_browser(browser, login_url, slot.display)
+            session = RemoteLoginSession(
                 session_id=session_id,
                 platform=platform,
                 channel_id=channel_id,
-                login_url=_build_vnc_url(_public_base_url(), session_id, session_id),
-                cdp_port=cdp_port,
+                login_url=_build_vnc_url(_public_base_url(), session_id),
                 viewer_port=slot.web_port,
-                chrome_proc=chrome_proc,
-                playwright=pw,
                 browser=browser,
                 stream=stream,
                 slot=slot,
-                vnc_token=session_id,
                 created_monotonic=time.monotonic(),
             )
+            session.nav_guard = asyncio.create_task(
+                _run_navigation_guard(session, platform, login_url, self._logger(session_id))
+            )
+            return session
         except Exception:
-            if browser:
+            if browser is not None:
                 try:
-                    await browser.close()
+                    await browser.kill()
                 except Exception:
                     pass
-            # 不要 stop 共享的 Playwright driver
-            if chrome_proc and chrome_proc.poll() is None:
-                _stop_process(chrome_proc)
             if stream:
                 try:
                     await stream.stop()
                 except Exception:
                     pass
             await _remote_display_pool.release(slot)
+            if profile_dir.exists():
+                shutil.rmtree(profile_dir, ignore_errors=True)
             raise
 
     async def cleanup(self, session_id: str) -> None:
@@ -371,22 +405,21 @@ class RemoteLoginRunner:
         await self._destroy(session)
 
     async def _destroy(self, session: RemoteLoginSession) -> None:
-        """彻底拆掉一个会话：取消 cookie 轮询 → 关浏览器连接 → 杀 Chrome →
-        停 Xvnc → 释放 slot → 删 profile。不 stop 共享 Playwright driver。幂等。"""
-        watcher = session.cookie_watcher
-        if watcher is not None:
-            session.cookie_watcher = None
-            # 若 _destroy 由 watcher 自身触发（自动绑定后 cleanup），不取消自己，
-            # 否则会给当前任务抛 CancelledError 打断收尾。
-            if watcher is not asyncio.current_task() and not watcher.done():
-                watcher.cancel()
-        if session.browser:
+        """彻底拆掉一个会话：取消后台轮询任务 → kill 浏览器 → 停 Xvnc →
+        释放 slot → 删 profile。幂等。"""
+        for attr in ("cookie_watcher", "nav_guard"):
+            task = getattr(session, attr, None)
+            if task is not None:
+                setattr(session, attr, None)
+                # 若 _destroy 由该任务自身触发（自动绑定后 cleanup），不取消自己，
+                # 否则会给当前任务抛 CancelledError 打断收尾。
+                if task is not asyncio.current_task() and not task.done():
+                    task.cancel()
+        if session.browser is not None:
             try:
-                await session.browser.close()
+                await session.browser.kill()
             except Exception:
                 pass
-        if session.chrome_proc and session.chrome_proc.poll() is None:
-            _stop_process(session.chrome_proc)
         if session.stream:
             try:
                 await session.stream.stop()
@@ -419,7 +452,7 @@ class RemoteLoginRunner:
         self._maintainer_task = asyncio.create_task(self._maintain_warm_pool_loop())
 
     async def shutdown(self) -> None:
-        """关停维护循环、拆掉所有预热会话、停掉共享 Playwright driver。"""
+        """关停维护循环、拆掉所有预热会话。"""
         if self._maintainer_task is not None:
             self._maintainer_task.cancel()
             try:
@@ -433,7 +466,6 @@ class RemoteLoginRunner:
                 self._warm[key] = []
         for session in buckets:
             await self._destroy(session)
-        await _stop_shared_playwright()
 
     async def _maintain_warm_pool_loop(self) -> None:
         while True:
@@ -524,7 +556,9 @@ class RemoteLoginRunner:
         return len(self._warm.get(platform, []))
 
     def _warm_session_alive(self, session: RemoteLoginSession) -> bool:
-        if session.chrome_proc is None or session.chrome_proc.poll() is not None:
+        browser = session.browser
+        # browser-use 0.12：用 CDP WebSocket 连接状态判活，等价于"浏览器进程还在"。
+        if browser is None or not getattr(browser, "is_cdp_connected", False):
             return False
         stream = session.stream
         if stream is not None:
@@ -562,13 +596,19 @@ def _public_base_url() -> str:
     return f"http://127.0.0.1:{REMOTE_LOGIN_SERVICE_PORT}"
 
 
-def _build_vnc_url(base_url: str, session_id: str, token: str) -> str:
+def _build_vnc_url(base_url: str, session_id: str) -> str:
+    # 鉴权完全依赖 session_id 不可猜（uuid4 的 32 位十六进制 = 128 bit 随机），URL 本身即凭证，
+    # 无需额外 token；vnc_proxy 只校验「会话存在」。
+    #
     # reconnect/reconnect_delay：noVNC 客户端在连接断开后自动重连（2s），用户无需手动
     # 在面板点 Connect——尤其是空闲时被中间链路掐断的情况，对非技术用户更友好。
+    #
+    # 保留 KasmVNC 默认的 remote-resize（桌面跟随浏览器视口）：配合该会话显示上的
+    # openbox + Chromium --kiosk，桌面=窗口=视口、1:1 像素，最清晰且铺满。
     ws_path = quote(f"vnc/{session_id}/websockify", safe="")
     return (
         f"{base_url.rstrip('/')}/vnc/{session_id}/"
-        f"?token={token}&path={ws_path}"
+        f"?path={ws_path}"
         f"&reconnect=true&reconnect_delay=2000"
     )
 
@@ -638,138 +678,61 @@ def _find_browser_path() -> str:
     raise RuntimeError("未找到 Chrome 或 Edge 浏览器")
 
 
-async def _launch_chrome(
-    cdp_port: int,
-    session_id: str,
-    display: str | None = None,
-    app_url: str = "about:blank",
-) -> subprocess.Popen:
-    profile_dir = REMOTE_PROFILE_DIR / session_id
-    if profile_dir.exists():
-        shutil.rmtree(profile_dir, ignore_errors=True)
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    window_width, window_height = get_remote_browser_window_size()
-    env = os.environ.copy()
-    if display:
-        env["DISPLAY"] = display
-    args = _build_chrome_args(
-        browser_path=_find_browser_path(),
-        cdp_port=cdp_port,
-        profile_dir=profile_dir,
-        window_size=(window_width, window_height),
-        app_url=app_url,
-    )
-    proc = subprocess.Popen(
-        args,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=env,
-    )
-    await _wait_for_cdp(cdp_port, proc)
-    return proc
+def _vnc_screen_window_size() -> tuple[int, int]:
+    """从 REMOTE_VNC_SCREEN（形如 "1920x1080x24"）解析出浏览器窗口宽高。
 
-
-def _build_chrome_args(
-    browser_path: str,
-    cdp_port: int,
-    profile_dir: Path,
-    window_size: tuple[int, int],
-    app_url: str,
-) -> list[str]:
-    window_width, window_height = window_size
-    return [
-        browser_path,
-        f"--remote-debugging-port={cdp_port}",
-        f"--user-data-dir={profile_dir}",
-        f"--window-size={window_width},{window_height}",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-blink-features=AutomationControlled",
-        "--disable-default-apps",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        f"--app={app_url}",
-    ]
-
-
-async def _attach_browser(cdp_port: int, login_url: str):
-    # 复用全局共享的 Playwright driver，只新建一个到本会话 CDP 端口的连接。
-    # 失败时不要 stop 这个 driver——它是共享的，停了会拖垮其他会话。
-    pw = await _get_shared_playwright()
-    browser = await asyncio.wait_for(
-        pw.chromium.connect_over_cdp(_cdp_http_url(cdp_port)),
-        timeout=15,
-    )
-    context = browser.contexts[0]
-    page = context.pages[0] if context.pages else await context.new_page()
-    return pw, browser, page
-
-
-def _install_remote_navigation_guard(page, platform: str, login_url: str, logger) -> None:
-    """安装远程登录 URL 守卫，防止用户点击链接跳转到非登录相关页面。
-
-    关键改进（2026-06-11 修白屏问题）：
-    - 增加 grace_period 机制：初始加载阶段（安装 guard 后的 15 秒内）
-      不触发拦截，避免 login_url 自身的重定向链被误拦截导致白屏。
-    - 只在用户主动点击链接触发的后续导航才拦截。
+    与 KasmVNC 显示几何严格一致，避免窗口小于画布留黑边。解析失败回退 1920x1080。
     """
-    grace_until = asyncio.get_event_loop().time() + 15.0  # 15 秒保护期
-    guard_state = {"last_intercepted_url": "", "intercept_count": 0}
-
-    def on_frame_navigated(frame):
-        if getattr(frame, "parent_frame", None):
-            return
-
-        # grace period 内不拦截（让初始加载和重定向链跑完）
-        now = asyncio.get_event_loop().time()
-        if now < grace_until:
-            return
-
-        try:
-            asyncio.create_task(
-                _enforce_remote_navigation_guard(page, platform, login_url, logger, guard_state)
-            )
-        except RuntimeError:
-            pass
-
+    parts = REMOTE_LOGIN_VNC_SCREEN.split("x")
     try:
-        page.on("framenavigated", on_frame_navigated)
-    except Exception as exc:
-        if logger:
-            logger.warning("远程登录 URL 守卫安装失败: %s", exc)
+        return int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return 1920, 1080
 
 
-async def _enforce_remote_navigation_guard(
-    page, platform: str, login_url: str, logger, guard_state: dict | None = None
-) -> None:
-    current_url = str(getattr(page, "url", "") or "")
-    if _is_remote_login_url_allowed(platform, current_url):
-        return
+async def _run_navigation_guard(session, platform: str, login_url: str, logger) -> None:
+    """后台轮询会话浏览器当前 URL，跑出平台白名单就 navigate_to 拽回登录页。
 
-    # 防止同一 URL 被反复拦截（避免"拦截 → goto → 又触发 guard → 又拦截"的死循环）
-    if guard_state is not None:
-        if current_url == guard_state.get("last_intercepted_url"):
-            return
-        guard_state["last_intercepted_url"] = current_url
-        guard_state["intercept_count"] = guard_state.get("intercept_count", 0) + 1
-        # 同一 session 拦截超过 5 次，停止拦截，避免死循环把页面搞挂
-        if guard_state["intercept_count"] > 5:
+    取代旧的 page.on("framenavigated") 事件钩子：browser-use 0.12 高层 API 不暴露稳定
+    的 Playwright page 事件，改用轮询 get_current_page_url() + navigate_to() 实现，版本
+    鲁棒、与 cookie 轮询同模式。沿用两个保护：
+    - grace period：装载后 15s 内不拦截，让 login_url 自身的重定向链跑完，避免误拦白屏；
+    - 拦截上限：同一会话拦截超过上限即停手，避免"拦截→跳回→又触发→又拦截"死循环。
+    """
+    grace_until = time.monotonic() + REMOTE_LOGIN_NAV_GUARD_GRACE
+    last_intercepted = ""
+    intercepts = 0
+    while True:
+        await asyncio.sleep(REMOTE_LOGIN_NAV_GUARD_INTERVAL)
+        browser = getattr(session, "browser", None)
+        if browser is None or session.status != "waiting_cookie":
+            return  # 会话已完成/失败/被销毁
+        if time.monotonic() < grace_until:
+            continue
+        try:
+            current_url = await browser.get_current_page_url()
+        except Exception:
+            continue  # 浏览器尚未就绪或临时读取失败，下个周期再试
+        if _is_remote_login_url_allowed(platform, current_url):
+            continue
+        # 防止同一 URL 被反复拦截
+        if current_url == last_intercepted:
+            continue
+        last_intercepted = current_url
+        intercepts += 1
+        if intercepts > REMOTE_LOGIN_NAV_GUARD_MAX_INTERCEPTS:
             if logger:
                 logger.warning(
-                    "远程登录 URL 守卫达到拦截上限，停止拦截 current_url=%s intercept_count=%s",
-                    current_url,
-                    guard_state["intercept_count"],
+                    "远程登录 URL 守卫达到拦截上限，停止拦截 current_url=%s", current_url
                 )
             return
-
-    if logger:
-        logger.warning("远程登录 URL 被拦截 platform=%s url=%s", platform, current_url)
-    try:
-        await page.goto(login_url, timeout=30000, wait_until="domcontentloaded")
-    except Exception as exc:
         if logger:
-            logger.warning("远程登录 URL 守卫跳回 login_url 失败: %s", exc)
+            logger.warning("远程登录 URL 被拦截 platform=%s url=%s", platform, current_url)
+        try:
+            await browser.navigate_to(login_url)
+        except Exception as exc:
+            if logger:
+                logger.warning("远程登录 URL 守卫跳回 login_url 失败: %s", exc)
 
 
 def _is_remote_login_url_allowed(platform: str, url: str) -> bool:
@@ -810,26 +773,6 @@ def _parse_warm_platforms(raw: str) -> list[str]:
     return result
 
 
-def _cdp_http_url(cdp_port: int) -> str:
-    return f"http://127.0.0.1:{cdp_port}"
-
-
-async def _wait_for_cdp(cdp_port: int, proc: subprocess.Popen, timeout_seconds: float = 10.0) -> None:
-    deadline = asyncio.get_event_loop().time() + timeout_seconds
-    url = f"{_cdp_http_url(cdp_port)}/json/version"
-    last_error: Exception | None = None
-    while asyncio.get_event_loop().time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"Chrome exited before CDP became ready (code={proc.poll()})")
-        try:
-            await asyncio.to_thread(lambda: urllib.request.urlopen(url, timeout=1).close())
-            return
-        except Exception as exc:
-            last_error = exc
-            await asyncio.sleep(0.2)
-    raise RuntimeError(f"Chrome CDP did not become ready at {_cdp_http_url(cdp_port)}: {last_error}")
-
-
 def _has_platform_cookie(platform: str, cookies: list[dict]) -> bool:
     # 登录态判定收敛到平台 config（registry），避免在这里重复维护各平台的
     # 域名 / cookie 名清单。
@@ -837,17 +780,3 @@ def _has_platform_cookie(platform: str, cookies: list[dict]) -> bool:
 
     config = registry.config_for(platform)
     return bool(config and config.has_login_cookie(cookies))
-
-
-def _stop_process(proc: subprocess.Popen) -> None:
-    if sys.platform == "win32":
-        try:
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
-        except Exception:
-            proc.kill()
-    else:
-        proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except Exception:
-        proc.kill()

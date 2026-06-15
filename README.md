@@ -139,7 +139,7 @@ Authorization: Bearer <PUBLISH_API_TOKEN>
 发文请求示例：
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/v1/jobs \
+curl -X POST http://127.0.0.1:8833/api/v1/jobs \
   -H "Authorization: Bearer <PUBLISH_API_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{

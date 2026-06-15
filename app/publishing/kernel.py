@@ -22,6 +22,7 @@ if sys.platform == "win32":
 
 from app.core.runtime import USER_DATA_DIR
 from app.cookies.normalize import normalize_cookie_list
+from app.platforms.base import PlatformConfig
 from app.core.request_logging import get_service_logger, setup_request_logger
 from app.remote.login import _find_free_port
 from app.utils.urls import normalize_toutiao_article_url
@@ -631,8 +632,8 @@ class PublishService:
             "step_summaries": [],
         }
 
-        # 正文存在性探针：与平台 _body_probe 算法一致，确保两边算出的字符串相同
-        body_probe = self._compute_body_probe(content)
+        # 正文存在性探针：与平台 prompt 共用 PlatformConfig.body_probe，确保两边算出的字符串相同
+        body_probe = PlatformConfig.body_probe(content)
 
         async def on_step_end(agent_instance):
             try:
@@ -1000,20 +1001,6 @@ class PublishService:
         except Exception:
             pass
         return state
-
-    @staticmethod
-    def _compute_body_probe(content: str) -> str:
-        """从原始 content 计算正文存在性探针，算法与各平台 _body_probe 一致。"""
-        import re
-        text = str(content or "")
-        text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
-        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-        text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
-        text = re.sub(r"[*_`>#-]+", "", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        text = text.strip()
-        compact = "".join(text.split())
-        return compact[:30]
 
     @staticmethod
     def _extract_action_summary(history_item) -> str:

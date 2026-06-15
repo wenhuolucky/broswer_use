@@ -2,6 +2,7 @@
 Platform base configuration and common interfaces.
 """
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -82,3 +83,23 @@ class PlatformConfig:
         override this. Keeps the channel store / job store platform-agnostic.
         """
         return ""
+
+    @staticmethod
+    def strip_markdown(content: str) -> str:
+        """将 Markdown 正文降级为纯文本：去掉图片/链接/标题/强调等标记符号。"""
+        text = str(content or "")
+        text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+        text = re.sub(r"[*_`>#-]+", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    @staticmethod
+    def body_probe(content: str) -> str:
+        """正文存在性探针：纯文本去除所有空白后的前 30 个字符。
+
+        发文内核与各平台 prompt 必须共用此算法，确保两边算出的探针字符串一致。
+        """
+        compact = "".join(PlatformConfig.strip_markdown(content).split())
+        return compact[:30]

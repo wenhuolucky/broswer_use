@@ -11,7 +11,6 @@ from starlette.responses import StreamingResponse
 
 router = APIRouter(tags=["vnc"])
 
-_COOKIE_PREFIX = "vncauth_"
 _HOP_BY_HOP = {
     "connection",
     "keep-alive",
@@ -27,10 +26,17 @@ _HOP_BY_HOP = {
 _RESP_DROP = _HOP_BY_HOP | {"server", "date"}
 
 # 登录 viewer 不需要 KasmVNC 左侧控制栏(Keys/Clipboard/Settings/Disconnect…)。
-# 整个面板及其边缘展开把手都挂在 #noVNC_control_bar_anchor 下，隐藏它即可，
-# 鼠标/键盘仍正常透传到远程浏览器。可用 REMOTE_VIEWER_HIDE_CONTROL_BAR=0 关闭注入。
+# 整个面板及其边缘展开把手都挂在 #noVNC_control_bar_anchor 下。
+#
+# 注意：不能用 display:none 把它整棵子树端掉——noVNC 真正捕获键盘输入的隐藏
+# <textarea id="noVNC_keyboardinput"> 就嵌在这棵子树里，display:none 的元素无法
+# 获得焦点、收不到键盘事件，会导致 live url 鼠标能点但敲键盘没反应。
+# 改为「视觉隐藏但保留在渲染树」：opacity:0 让面板不可见、keyboardinput 仍可聚焦；
+# pointer-events:none 让鼠标点击穿透到远程画面、同时屏蔽控制栏的悬停展开。
+# 可用 REMOTE_VIEWER_HIDE_CONTROL_BAR=0 关闭注入。
 _HIDE_CONTROL_BAR_CSS = (
-    "<style>#noVNC_control_bar_anchor{display:none!important;}</style>"
+    "<style>#noVNC_control_bar_anchor{"
+    "opacity:0!important;pointer-events:none!important;}</style>"
 )
 
 
@@ -65,25 +71,16 @@ def _runner(request_or_websocket):
         return None
 
 
-def _session_port_and_token(runner, session_id: str) -> tuple[int, str] | None:
+def _session_port(runner, session_id: str) -> int | None:
+    # 鉴权完全依赖 session_id 不可猜（uuid4 的 32 位十六进制 = 128 bit 随机），
+    # 它本来就在 URL 路径里，等价于 bearer 凭证；会话存在即放行，无需额外 token。
     if runner is None:
         return None
     session = runner.get(session_id)
     if session is None:
         return None
     port = int(getattr(session, "viewer_port", 0) or 0)
-    token = str(getattr(session, "vnc_token", "") or "")
-    if not port or not token:
-        return None
-    return port, token
-
-
-def _authorized(request: Request, session_id: str, token: str) -> bool:
-    query_token = request.query_params.get("token")
-    if query_token and query_token == token:
-        return True
-    cookie = request.cookies.get(_COOKIE_PREFIX + session_id)
-    return bool(cookie and cookie == token)
+    return port or None
 
 
 @router.api_route(
@@ -92,12 +89,9 @@ def _authorized(request: Request, session_id: str, token: str) -> bool:
     include_in_schema=False,
 )
 async def vnc_http(session_id: str, path: str, request: Request) -> Response:
-    details = _session_port_and_token(_runner(request), session_id)
-    if details is None:
+    port = _session_port(_runner(request), session_id)
+    if port is None:
         return Response(status_code=404, content="session not found")
-    port, token = details
-    if not _authorized(request, session_id, token):
-        return Response(status_code=401, content="unauthorized vnc access")
 
     upstream = f"http://127.0.0.1:{port}/{path}"
     fwd_headers = {
@@ -137,14 +131,6 @@ async def vnc_http(session_id: str, path: str, request: Request) -> Response:
             headers=headers,
             background=BackgroundTask(_aclose, upstream_resp, client),
         )
-    if request.query_params.get("token") == token:
-        response.set_cookie(
-            _COOKIE_PREFIX + session_id,
-            token,
-            path=f"/vnc/{session_id}/",
-            httponly=True,
-            samesite="lax",
-        )
     return response
 
 
@@ -155,14 +141,9 @@ async def _aclose(resp: httpx.Response, client: httpx.AsyncClient) -> None:
 
 @router.websocket("/vnc/{session_id}/{path:path}")
 async def vnc_ws(websocket: WebSocket, session_id: str, path: str) -> None:
-    details = _session_port_and_token(_runner(websocket), session_id)
-    if details is None:
+    port = _session_port(_runner(websocket), session_id)
+    if port is None:
         await websocket.close(code=4404)
-        return
-    port, token = details
-    provided = websocket.query_params.get("token") or websocket.cookies.get(_COOKIE_PREFIX + session_id)
-    if provided != token:
-        await websocket.close(code=4401)
         return
 
     requested = [

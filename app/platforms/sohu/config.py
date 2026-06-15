@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 
 from app.platforms.base import PlatformConfig
@@ -37,8 +36,8 @@ class SohuPlatform(PlatformConfig):
         is_markdown: bool,
         rich_html: str = None,
     ) -> str:
-        body = self._plain_text_body(content)
-        body_probe = self._body_probe(body)
+        body = self.strip_markdown(content)
+        body_probe = self.body_probe(content)
         if is_markdown and rich_html:
             return self._rich_html_ready_prompt(
                 title=title,
@@ -273,17 +272,3 @@ Agent 执行规则：
 - 上面 cover_instruction 中"本地上传"、"素材库 fallback"、"file input 上传"等 Toutiao 默认文案**不适用搜狐号**，必须按本节走"正文图片 + 第一张 + 立刻确认"。
 """
 
-    @staticmethod
-    def _plain_text_body(content: str) -> str:
-        text = str(content or "")
-        text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
-        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-        text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
-        text = re.sub(r"[*_`>#-]+", "", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text.strip()
-
-    @staticmethod
-    def _body_probe(body: str) -> str:
-        compact = "".join(str(body or "").split())
-        return compact[:30]

@@ -26,6 +26,8 @@ RUN sed -i \
 #   xvfb/x11-utils       —— entrypoint 起虚拟显示并用 xdpyinfo 等就绪(幂等，已装则跳过)
 #   fonts-noto-cjk/emoji —— 中文/表情渲染，否则登录页是豆腐块
 #   procps               —— 进程工具
+#   openbox              —— 远程登录会话的轻量窗口管理器：让 --kiosk 的 Chromium
+#                           随 KasmVNC 桌面 resize 自适应铺满(否则窗口跟不上、只剩左上角)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         curl \
@@ -33,6 +35,7 @@ RUN apt-get update \
         xvfb \
         x11-utils \
         procps \
+        openbox \
         fonts-noto-cjk \
         fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*

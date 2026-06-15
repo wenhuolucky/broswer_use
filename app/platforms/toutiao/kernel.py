@@ -26,11 +26,10 @@ class AutoToutiaoPublishService(PublishService):
 
         for attempt in range(1, self.article_lookup_attempts + 1):
             if logger:
-                if logger:
-                    logger.info(
-                        "[PublishGuard] navigating to articles page: "
-                        f"{articles_url} | attempt={attempt}/{self.article_lookup_attempts}"
-                    )
+                logger.info(
+                    "[PublishGuard] navigating to articles page: "
+                    f"{articles_url} | attempt={attempt}/{self.article_lookup_attempts}"
+                )
             await page.goto(articles_url)
             await asyncio.sleep(3)
 

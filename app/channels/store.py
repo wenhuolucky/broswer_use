@@ -17,7 +17,8 @@ import json
 from threading import RLock
 from typing import Any
 
-from app.core.config import PGSQL_DSN, PGSQL_POOL_MAX, PGSQL_POOL_MIN
+from app.core.config import PGSQL_DSN
+from app.core.pg_store import PgStoreMixin
 from app.domain.channel import (
     STATUS_CHANNEL_BOUND,
     STATUS_CHANNEL_PENDING,
@@ -54,8 +55,10 @@ _SELECT_COLUMNS = (
 )
 
 
-class ChannelStore:
+class ChannelStore(PgStoreMixin):
     """Channel registry backed by PostgreSQL when ``PGSQL_DSN`` is configured."""
+
+    _SCHEMA_DDL = _SCHEMA_DDL
 
     def __init__(self, dsn: str = PGSQL_DSN):
         self._pool = self._connect_pool(dsn) if dsn else None
@@ -241,45 +244,9 @@ class ChannelStore:
             raise KeyError(channel_id)
         return json.dumps(channel.cookie or {"cookies": [], "origins": []}, ensure_ascii=False)
 
-    def ready(self) -> bool:
-        if self._pool is None:
-            return True
-        with self._pool.connection() as conn:
-            conn.execute("SELECT 1")
-        return True
-
     # ------------------------------------------------------------------
     # PostgreSQL internals
     # ------------------------------------------------------------------
-    def _connect_pool(self, dsn: str):
-        try:
-            from psycopg.rows import dict_row
-            from psycopg_pool import ConnectionPool
-        except ImportError as exc:  # pragma: no cover - dependency missing
-            raise RuntimeError(
-                "PGSQL_DSN is configured, but the `psycopg[binary,pool]` package is not installed"
-            ) from exc
-
-        pool = ConnectionPool(
-            dsn,
-            min_size=PGSQL_POOL_MIN,
-            max_size=PGSQL_POOL_MAX,
-            kwargs={"row_factory": dict_row},
-            open=True,
-        )
-        with pool.connection() as conn:
-            conn.execute("SELECT 1")
-        return pool
-
-    def _ensure_schema(self) -> None:
-        with self._pool.connection() as conn:
-            conn.execute(_SCHEMA_DDL)
-
-    def _json(self, value: dict[str, Any]):
-        from psycopg.types.json import Jsonb
-
-        return Jsonb(value or {})
-
     def _update_pg(self, channel_id: str, **changes) -> Channel:
         set_parts: list[str] = ["updated_at = now()"]
         params: list[Any] = []

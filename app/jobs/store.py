@@ -4,11 +4,8 @@ import uuid
 from threading import RLock
 from typing import Any
 
-from app.core.config import (
-    PGSQL_DSN,
-    PGSQL_POOL_MAX,
-    PGSQL_POOL_MIN,
-)
+from app.core.config import PGSQL_DSN
+from app.core.pg_store import PgStoreMixin
 from app.domain.job import Job, STATUS_QUEUED
 from app.utils.urls import normalize_article_url
 
@@ -71,7 +68,7 @@ def _derive_article_url(platform: str, result: dict[str, Any]) -> str:
     return normalize_article_url(platform, raw, account_id="")
 
 
-class JobStore:
+class JobStore(PgStoreMixin):
     """Job registry backed by PostgreSQL when PGSQL_DSN is configured.
 
     Falls back to an in-memory dict when no DSN is set (local dev / tests).
@@ -79,6 +76,8 @@ class JobStore:
     business log. The public interface is intentionally synchronous: it is
     called synchronously from PublishAgent across ~30 sites.
     """
+
+    _SCHEMA_DDL = _SCHEMA_DDL
 
     def __init__(self, dsn: str = PGSQL_DSN):
         self._pool = self._connect_pool(dsn) if dsn else None
@@ -214,37 +213,6 @@ class JobStore:
     # ------------------------------------------------------------------
     # PostgreSQL internals
     # ------------------------------------------------------------------
-    def _connect_pool(self, dsn: str):
-        try:
-            from psycopg.rows import dict_row
-            from psycopg_pool import ConnectionPool
-        except ImportError as exc:  # pragma: no cover - dependency missing
-            raise RuntimeError(
-                "PGSQL_DSN is configured, but the `psycopg[binary,pool]` package is not installed"
-            ) from exc
-
-        pool = ConnectionPool(
-            dsn,
-            min_size=PGSQL_POOL_MIN,
-            max_size=PGSQL_POOL_MAX,
-            kwargs={"row_factory": dict_row},
-            open=True,
-        )
-        # Validate connectivity eagerly so a misconfigured DSN fails fast at
-        # startup rather than on the first request.
-        with pool.connection() as conn:
-            conn.execute("SELECT 1")
-        return pool
-
-    def _ensure_schema(self) -> None:
-        with self._pool.connection() as conn:
-            conn.execute(_SCHEMA_DDL)
-
-    def _json(self, value: dict[str, Any]):
-        from psycopg.types.json import Jsonb
-
-        return Jsonb(value or {})
-
     def _update_pg(self, job_id: str, **changes) -> Job:
         set_parts: list[str] = ["updated_at = now()"]
         params: list[Any] = []
@@ -342,11 +310,3 @@ class JobStore:
             self._remote_session_index.pop(old_remote_session_id, None)
         if job.remote_session_id:
             self._remote_session_index[job.remote_session_id] = job.job_id
-
-    def ready(self) -> bool:
-        """Lightweight readiness probe used by GET /api/v1/ready."""
-        if self._pool is None:
-            return True  # in-memory mode is always "ready"
-        with self._pool.connection() as conn:
-            conn.execute("SELECT 1")
-        return True

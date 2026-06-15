@@ -7,6 +7,8 @@ fallback 相关断言统一用 monkeypatch 强制走 fallback，避免日后装�
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from app.utils import markdown as md
@@ -15,7 +17,7 @@ from app.utils import markdown as md
 @pytest.fixture
 def force_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     """让 `import markdown` 抛 ImportError，强制 markdown_to_html 走 fallback。"""
-    monkeypatch.setitem(md.sys.modules, "markdown", None)
+    monkeypatch.setitem(sys.modules, "markdown", None)
 
 
 class TestMarkdownToHtml:

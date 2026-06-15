@@ -63,13 +63,15 @@ def config_for(platform: str) -> PlatformConfig | None:
     return spec.config if spec else None
 
 
-def kernel_for(platform: str, user_id: str = "") -> Any:
+def kernel_for(platform: str, article_account_id: str = "") -> Any:
     """Build the browser-driving publish kernel for a platform.
 
-    Raises ``ValueError`` for an unknown platform so callers surface a clean
-    error instead of silently no-op'ing.
+    ``article_account_id`` is platform-specific account metadata forwarded to
+    the kernel factory (only Sohu uses it, to build article URLs). Raises
+    ``ValueError`` for an unknown platform so callers surface a clean error
+    instead of silently no-op'ing.
     """
     spec = _REGISTRY.get((platform or "").strip())
     if spec is None:
         raise ValueError(f"unsupported platform: {platform}")
-    return spec.kernel_factory(user_id)
+    return spec.kernel_factory(article_account_id)
