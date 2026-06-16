@@ -17,7 +17,6 @@ dependencies = [
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
     "python-multipart>=0.0.9",
-    "psycopg[binary,pool]>=3.2.0",
     "scalar-fastapi>=1.0.0",
     "loguru>=0.7.3",
 ]

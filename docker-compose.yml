@@ -26,6 +26,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      - ./app:/app/app
     # Chrome 需要较大的 /dev/shm，否则标签页易崩。按并发登录会话数量调整：
     # 经验值约每会话 ~256MB，留足余量；如并发很高（如 40+）可上调到 16g。
     shm_size: "8gb"

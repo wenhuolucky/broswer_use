@@ -1,8 +1,8 @@
 """Channel store — durable home for the service-issued publishing channels.
 
 Replaces the old filesystem cookie store: a *channel* (handle + bound platform
-account + cookie) is now a first-class record living in PostgreSQL, mirroring
-``JobStore``. When ``PGSQL_DSN`` is empty it falls back to an in-memory dict for
+account + cookie) is now a first-class record living in SQLite, mirroring
+``JobStore``. When ``SQLITE_PATH`` is empty it falls back to an in-memory dict for
 local dev / tests (cookies are then lost on restart, same as jobs).
 
 The store is platform-agnostic: it keys dedup on the opaque ``native_key`` string
@@ -18,8 +18,8 @@ from datetime import UTC, datetime, timedelta
 from threading import RLock
 from typing import Any
 
-from app.core.config import PGSQL_DSN
-from app.core.pg_store import PgStoreMixin
+from app.core.config import SQLITE_PATH
+from app.core.sqlite_store import SqliteStoreMixin, now_iso
 from app.domain.channel import (
     STATUS_CHANNEL_BOUND,
     STATUS_CHANNEL_PENDING,
@@ -30,7 +30,7 @@ from app.platforms import registry
 
 # Text columns that map 1:1 to a Channel attribute and can be SET directly.
 _TEXT_COLUMNS = {"platform", "status", "account_name", "native_key"}
-# JSONB columns.
+# JSON (TEXT) columns.
 _JSON_COLUMNS = {"cookie", "metadata"}
 
 _SCHEMA_DDL = """
@@ -40,10 +40,10 @@ CREATE TABLE IF NOT EXISTS channels (
     status       TEXT NOT NULL DEFAULT 'pending',
     account_name TEXT NOT NULL DEFAULT '',
     native_key   TEXT NOT NULL DEFAULT '',
-    cookie       JSONB NOT NULL DEFAULT '{}'::jsonb,
-    metadata     JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    cookie       TEXT NOT NULL DEFAULT '{}',
+    metadata     TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_channels_platform_native
     ON channels (platform, native_key) WHERE native_key <> '';
@@ -56,17 +56,17 @@ _SELECT_COLUMNS = (
 )
 
 
-class ChannelStore(PgStoreMixin):
-    """Channel registry backed by PostgreSQL when ``PGSQL_DSN`` is configured."""
+class ChannelStore(SqliteStoreMixin):
+    """Channel registry backed by SQLite when ``SQLITE_PATH`` is configured."""
 
     _SCHEMA_DDL = _SCHEMA_DDL
 
-    def __init__(self, dsn: str = PGSQL_DSN):
-        self._pool = self._connect_pool(dsn) if dsn else None
+    def __init__(self, path: str = SQLITE_PATH):
+        self._lock = RLock()
+        self._conn = self._connect(path) if path else None
         self._channels: dict[str, Channel] = {}
         self._native_index: dict[tuple[str, str], str] = {}
-        self._lock = RLock()
-        if self._pool is not None:
+        if self._conn is not None:
             self._ensure_schema()
 
     # ------------------------------------------------------------------
@@ -75,48 +75,49 @@ class ChannelStore(PgStoreMixin):
     def create(self, platform: str) -> Channel:
         """Mint a fresh ``pending`` channel for an in-flight login."""
         channel_id = new_channel_id()
-        if self._pool is None:
+        if self._conn is None:
             channel = Channel(channel_id=channel_id, platform=platform, status=STATUS_CHANNEL_PENDING)
             with self._lock:
                 self._channels[channel_id] = channel
             return channel
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                f"INSERT INTO channels (channel_id, platform, status) VALUES (%s, %s, %s) "
-                f"RETURNING {_SELECT_COLUMNS}",
-                (channel_id, platform, STATUS_CHANNEL_PENDING),
+        ts = now_iso()
+        with self._lock:
+            row = self._conn.execute(
+                f"INSERT INTO channels (channel_id, platform, status, created_at, updated_at) "
+                f"VALUES (?, ?, ?, ?, ?) RETURNING {_SELECT_COLUMNS}",
+                (channel_id, platform, STATUS_CHANNEL_PENDING, ts, ts),
             ).fetchone()
         return self._row_to_channel(row)
 
     def get(self, channel_id: str) -> Channel | None:
         if not channel_id:
             return None
-        if self._pool is None:
+        if self._conn is None:
             with self._lock:
                 return self._channels.get(channel_id)
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                f"SELECT {_SELECT_COLUMNS} FROM channels WHERE channel_id = %s",
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM channels WHERE channel_id = ?",
                 (channel_id,),
             ).fetchone()
         return self._row_to_channel(row) if row else None
 
     def update(self, channel_id: str, **changes) -> Channel:
-        if self._pool is None:
+        if self._conn is None:
             return self._update_memory(channel_id, **changes)
-        return self._update_pg(channel_id, **changes)
+        return self._update_db(channel_id, **changes)
 
     def find_by_native(self, platform: str, native_key: str) -> Channel | None:
         if not native_key:
             return None
-        if self._pool is None:
+        if self._conn is None:
             with self._lock:
                 mapped = self._native_index.get((platform, native_key))
                 return self._channels.get(mapped) if mapped else None
-        with self._pool.connection() as conn:
-            row = conn.execute(
+        with self._lock:
+            row = self._conn.execute(
                 f"SELECT {_SELECT_COLUMNS} FROM channels "
-                "WHERE platform = %s AND native_key = %s ORDER BY created_at LIMIT 1",
+                "WHERE platform = ? AND native_key = ? ORDER BY created_at LIMIT 1",
                 (platform, native_key),
             ).fetchone()
         return self._row_to_channel(row) if row else None
@@ -170,7 +171,7 @@ class ChannelStore(PgStoreMixin):
     ) -> list[Channel]:
         limit = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
-        if self._pool is None:
+        if self._conn is None:
             with self._lock:
                 channels = list(self._channels.values())
             if platform is not None:
@@ -180,48 +181,48 @@ class ChannelStore(PgStoreMixin):
         clauses: list[str] = []
         params: list[Any] = []
         if platform is not None:
-            clauses.append("platform = %s")
+            clauses.append("platform = ?")
             params.append(platform)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         params.extend([limit, offset])
-        with self._pool.connection() as conn:
-            rows = conn.execute(
+        with self._lock:
+            rows = self._conn.execute(
                 f"SELECT {_SELECT_COLUMNS} FROM channels{where} "
-                "ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 params,
             ).fetchall()
         return [self._row_to_channel(row) for row in rows]
 
     def delete(self, channel_id: str) -> bool:
-        if self._pool is None:
+        if self._conn is None:
             with self._lock:
                 channel = self._channels.pop(channel_id, None)
                 if channel is None:
                     return False
                 self._native_index.pop((channel.platform, channel.native_key), None)
                 return True
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                "DELETE FROM channels WHERE channel_id = %s RETURNING channel_id",
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM channels WHERE channel_id = ?",
                 (channel_id,),
-            ).fetchone()
-        return row is not None
+            )
+            return cur.rowcount > 0
 
     def purge_pending_channels(self) -> int:
         """Delete all ``pending`` channels. Called at startup: a pending channel
         only exists during an active login session, which can't survive a restart."""
-        if self._pool is None:
+        if self._conn is None:
             with self._lock:
                 stale = [c.channel_id for c in self._channels.values() if c.status == STATUS_CHANNEL_PENDING]
                 for cid in stale:
                     self.delete(cid)
                 return len(stale)
-        with self._pool.connection() as conn:
-            rows = conn.execute(
-                "DELETE FROM channels WHERE status = %s RETURNING channel_id",
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM channels WHERE status = ?",
                 (STATUS_CHANNEL_PENDING,),
-            ).fetchall()
-        return len(rows)
+            )
+            return cur.rowcount
 
     def purge_stale_pending_channels(self, older_than_seconds: float) -> int:
         """Delete ``pending`` channels older than ``older_than_seconds``.
@@ -231,7 +232,7 @@ class ChannelStore(PgStoreMixin):
         远大于真实登录耗时，故到期的 pending 渠道几乎必然是被放弃的。"""
         if older_than_seconds <= 0:
             return 0
-        if self._pool is None:
+        if self._conn is None:
             cutoff = datetime.now(UTC) - timedelta(seconds=older_than_seconds)
             with self._lock:
                 stale = []
@@ -247,13 +248,14 @@ class ChannelStore(PgStoreMixin):
                 for cid in stale:
                     self.delete(cid)
                 return len(stale)
-        with self._pool.connection() as conn:
-            rows = conn.execute(
-                "DELETE FROM channels WHERE status = %s "
-                "AND created_at < now() - make_interval(secs => %s) RETURNING channel_id",
-                (STATUS_CHANNEL_PENDING, older_than_seconds),
-            ).fetchall()
-        return len(rows)
+        # created_at 为统一格式的 UTC ISO 字符串，字典序即时间序，直接按字符串比较。
+        cutoff = (datetime.now(UTC) - timedelta(seconds=older_than_seconds)).isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM channels WHERE status = ? AND created_at < ?",
+                (STATUS_CHANNEL_PENDING, cutoff),
+            )
+            return cur.rowcount
 
     # ------------------------------------------------------------------
     # cookie helpers (the seam the publish kernel consumes)
@@ -278,22 +280,22 @@ class ChannelStore(PgStoreMixin):
         return json.dumps(channel.cookie or {"cookies": [], "origins": []}, ensure_ascii=False)
 
     # ------------------------------------------------------------------
-    # PostgreSQL internals
+    # SQLite internals
     # ------------------------------------------------------------------
-    def _update_pg(self, channel_id: str, **changes) -> Channel:
-        set_parts: list[str] = ["updated_at = now()"]
-        params: list[Any] = []
+    def _update_db(self, channel_id: str, **changes) -> Channel:
+        set_parts: list[str] = ["updated_at = ?"]
+        params: list[Any] = [now_iso()]
         for key, value in changes.items():
             if key in _TEXT_COLUMNS:
-                set_parts.append(f"{key} = %s")
+                set_parts.append(f"{key} = ?")
                 params.append(value)
             elif key in _JSON_COLUMNS:
-                set_parts.append(f"{key} = %s")
+                set_parts.append(f"{key} = ?")
                 params.append(self._json(value))
         params.append(channel_id)
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                f"UPDATE channels SET {', '.join(set_parts)} WHERE channel_id = %s "
+        with self._lock:
+            row = self._conn.execute(
+                f"UPDATE channels SET {', '.join(set_parts)} WHERE channel_id = ? "
                 f"RETURNING {_SELECT_COLUMNS}",
                 params,
             ).fetchone()
@@ -301,19 +303,17 @@ class ChannelStore(PgStoreMixin):
             raise KeyError(channel_id)
         return self._row_to_channel(row)
 
-    def _row_to_channel(self, row: dict[str, Any]) -> Channel:
-        created_at = row.get("created_at")
-        updated_at = row.get("updated_at")
+    def _row_to_channel(self, row: Any) -> Channel:
         return Channel(
             channel_id=row["channel_id"],
-            platform=row.get("platform") or "",
-            status=row.get("status") or STATUS_CHANNEL_PENDING,
-            account_name=row.get("account_name") or "",
-            native_key=row.get("native_key") or "",
-            cookie=row.get("cookie") or {},
-            metadata=row.get("metadata") or {},
-            created_at=created_at.isoformat() if created_at is not None else "",
-            updated_at=updated_at.isoformat() if updated_at is not None else "",
+            platform=row["platform"] or "",
+            status=row["status"] or STATUS_CHANNEL_PENDING,
+            account_name=row["account_name"] or "",
+            native_key=row["native_key"] or "",
+            cookie=self._loads(row["cookie"]),
+            metadata=self._loads(row["metadata"]),
+            created_at=row["created_at"] or "",
+            updated_at=row["updated_at"] or "",
         )
 
     # ------------------------------------------------------------------

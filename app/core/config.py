@@ -23,29 +23,11 @@ REMOTE_PROFILE_DIR = _project_path(os.getenv("APP_REMOTE_PROFILE_DIR"), DATA_DIR
 
 DEFAULT_PLATFORM = "toutiao"
 
-# PostgreSQL-backed job store. The job store persists durable publish/login
-# records (no TTL); see app/jobs/store.py. When PGSQL_DSN is empty the store
-# falls back to an in-memory dict for local dev/tests.
-PGSQL_HOST = os.getenv("PGSQL_HOST", "").strip()
-PGSQL_PORT = int(os.getenv("PGSQL_PORT", "5432"))
-PGSQL_DB = os.getenv("PGSQL_DB", "").strip()
-PGSQL_USER = os.getenv("PGSQL_USER", "").strip()
-PGSQL_PASSWORD = os.getenv("PGSQL_PASSWORD", "")
-PGSQL_POOL_MIN = int(os.getenv("PGSQL_POOL_MIN", "1"))
-PGSQL_POOL_MAX = int(os.getenv("PGSQL_POOL_MAX", "10"))
-
-
-def _pg_dsn() -> str:
-    if not (PGSQL_HOST and PGSQL_DB and PGSQL_USER):
-        return ""
-    from urllib.parse import quote
-
-    user = quote(PGSQL_USER, safe="")  # user may contain '-' etc.
-    pw = quote(PGSQL_PASSWORD, safe="")
-    return f"postgresql://{user}:{pw}@{PGSQL_HOST}:{PGSQL_PORT}/{PGSQL_DB}"
-
-
-PGSQL_DSN = _pg_dsn()
+# SQLite-backed job/channel store. 单节点自部署：作业与渠道持久化用一个文件型
+# SQLite（取代 PostgreSQL），持久记录无 TTL（见 app/jobs/store.py）。SQLITE_PATH
+# 留空则回退到内存 dict（仅本地开发/测试，重启即丢）。
+_sqlite_raw = os.getenv("SQLITE_PATH", "").strip()
+SQLITE_PATH = str(_project_path(_sqlite_raw, DATA_DIR / "app.db")) if _sqlite_raw else ""
 
 PUBLISH_API_TOKEN = os.getenv("PUBLISH_API_TOKEN", "").strip()
 

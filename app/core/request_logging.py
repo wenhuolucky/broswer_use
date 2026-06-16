@@ -77,6 +77,10 @@ class _InterceptHandler(logging.Handler):
     """把标准库 logging 的记录转发给 loguru。"""
 
     def emit(self, record: logging.LogRecord) -> None:
+        # 屏蔽健康检查 /health 的访问日志，避免刷屏。
+        if record.name == "uvicorn.access" and "/health" in record.getMessage():
+            return
+
         # 将标准库 level 映射为 loguru level 名称。
         try:
             level = _loguru.level(record.levelname).name

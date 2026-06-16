@@ -22,7 +22,7 @@ async def create_publish_job(request: CreatePublishJobRequest):
     if resp.code == 404:
         detail = str((resp.data or {}).get("error_detail") or "") or "渠道不存在，请先登录"
         raise HTTPException(status_code=404, detail=detail)
-    return job_created_from(resp, job_type="publish")
+    return job_created_from(resp)
 
 
 @router.get("/{job_id}", response_model=JobResponse)

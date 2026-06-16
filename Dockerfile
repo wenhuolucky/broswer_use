@@ -12,6 +12,8 @@ WORKDIR /app
 ARG TARGETARCH
 ARG KASMVNC_VERSION=1.4.0
 ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+ARG PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV UV_DEFAULT_INDEX=${PIP_MIRROR}
 
 RUN sed -i \
         -e "s|archive.ubuntu.com|${APT_MIRROR}|g" \
@@ -45,7 +47,7 @@ RUN set -eux; \
     fi; \
     rm -f /tmp/kasmvnc.deb
 
-RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple uv
+RUN pip install --no-cache-dir -i ${PIP_MIRROR} uv
 
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \

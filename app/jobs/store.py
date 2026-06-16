@@ -4,8 +4,8 @@ import uuid
 from threading import RLock
 from typing import Any
 
-from app.core.config import PGSQL_DSN
-from app.core.pg_store import PgStoreMixin
+from app.core.config import SQLITE_PATH
+from app.core.sqlite_store import SqliteStoreMixin, now_iso
 from app.domain.job import Job, STATUS_QUEUED
 from app.utils.urls import normalize_article_url
 
@@ -36,17 +36,17 @@ CREATE TABLE IF NOT EXISTS jobs (
     article_url       TEXT NOT NULL DEFAULT '',
     error             TEXT NOT NULL DEFAULT '',
     log_file_path     TEXT NOT NULL DEFAULT '',
-    payload           JSONB NOT NULL DEFAULT '{}'::jsonb,
-    result            JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    payload           TEXT NOT NULL DEFAULT '{}',
+    result            TEXT NOT NULL DEFAULT '{}',
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status);
 CREATE INDEX IF NOT EXISTS idx_jobs_remote_session ON jobs (remote_session_id) WHERE remote_session_id <> '';
 CREATE INDEX IF NOT EXISTS idx_jobs_channel_created ON jobs (channel_id, created_at DESC);
 """
 
-# Columns selected and mapped back to Job (order independent thanks to dict_row).
+# Columns selected and mapped back to Job (order independent thanks to dict keys).
 _SELECT_COLUMNS = (
     "job_id, type, channel_id, platform, title, status, remote_session_id, "
     "login_url, live_url, article_url, error, log_file_path, payload, result, "
@@ -68,10 +68,10 @@ def _derive_article_url(platform: str, result: dict[str, Any]) -> str:
     return normalize_article_url(platform, raw, account_id="")
 
 
-class JobStore(PgStoreMixin):
-    """Job registry backed by PostgreSQL when PGSQL_DSN is configured.
+class JobStore(SqliteStoreMixin):
+    """Job registry backed by SQLite when SQLITE_PATH is configured.
 
-    Falls back to an in-memory dict when no DSN is set (local dev / tests).
+    Falls back to an in-memory dict when no path is set (local dev / tests).
     Records are durable (no TTL) — the table doubles as the publish/login
     business log. The public interface is intentionally synchronous: it is
     called synchronously from PublishAgent across ~30 sites.
@@ -79,13 +79,13 @@ class JobStore(PgStoreMixin):
 
     _SCHEMA_DDL = _SCHEMA_DDL
 
-    def __init__(self, dsn: str = PGSQL_DSN):
-        self._pool = self._connect_pool(dsn) if dsn else None
-        # In-memory fallback state (only used when no DSN is configured).
+    def __init__(self, path: str = SQLITE_PATH):
+        self._lock = RLock()
+        self._conn = self._connect(path) if path else None
+        # In-memory fallback state (only used when no path is configured).
         self._jobs: dict[str, Job] = {}
         self._remote_session_index: dict[str, str] = {}
-        self._lock = RLock()
-        if self._pool is not None:
+        if self._conn is not None:
             self._ensure_schema()
 
     # ------------------------------------------------------------------
@@ -99,7 +99,7 @@ class JobStore(PgStoreMixin):
         platform = str(payload.get("platform", "") or "")
         title = str(payload.get("title", "") or "")
 
-        if self._pool is None:
+        if self._conn is None:
             job = Job(
                 job_id=job_id,
                 status=STATUS_QUEUED,
@@ -110,59 +110,61 @@ class JobStore(PgStoreMixin):
                 self._jobs[job_id] = job
             return job
 
-        with self._pool.connection() as conn:
-            row = conn.execute(
+        ts = now_iso()
+        with self._lock:
+            row = self._conn.execute(
                 f"""
-                INSERT INTO jobs (job_id, type, channel_id, platform, title, status, payload)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO jobs (job_id, type, channel_id, platform, title, status, payload, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING {_SELECT_COLUMNS}
                 """,
-                (job_id, job_type, channel_id, platform, title, STATUS_QUEUED, self._json(payload)),
+                (job_id, job_type, channel_id, platform, title, STATUS_QUEUED, self._json(payload), ts, ts),
             ).fetchone()
         return self._row_to_job(row)
 
     def get(self, job_id: str) -> Job | None:
-        if self._pool is None:
+        if self._conn is None:
             with self._lock:
                 return self._jobs.get(job_id)
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                f"SELECT {_SELECT_COLUMNS} FROM jobs WHERE job_id = %s",
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM jobs WHERE job_id = ?",
                 (job_id,),
             ).fetchone()
         return self._row_to_job(row) if row else None
 
     def update(self, job_id: str, **changes) -> Job:
-        if self._pool is None:
+        if self._conn is None:
             return self._update_memory(job_id, **changes)
-        return self._update_pg(job_id, **changes)
+        return self._update_db(job_id, **changes)
 
     def find_by_remote_session(self, session_id: str) -> Job | None:
         if not session_id:
             return None
-        if self._pool is None:
+        if self._conn is None:
             with self._lock:
                 mapped = self._remote_session_index.get(session_id)
                 return self._jobs.get(mapped) if mapped else None
-        with self._pool.connection() as conn:
-            row = conn.execute(
+        with self._lock:
+            row = self._conn.execute(
                 f"SELECT {_SELECT_COLUMNS} FROM jobs "
-                "WHERE remote_session_id = %s ORDER BY created_at DESC LIMIT 1",
+                "WHERE remote_session_id = ? ORDER BY created_at DESC LIMIT 1",
                 (session_id,),
             ).fetchone()
         return self._row_to_job(row) if row else None
 
     def list_by_statuses(self, statuses: set[str]) -> list[Job]:
         statuses = set(statuses or set())
-        if self._pool is None:
+        if self._conn is None:
             with self._lock:
                 return [job for job in self._jobs.values() if job.status in statuses]
         if not statuses:
             return []
-        with self._pool.connection() as conn:
-            rows = conn.execute(
-                f"SELECT {_SELECT_COLUMNS} FROM jobs WHERE status = ANY(%s)",
-                (list(statuses),),
+        placeholders = ", ".join("?" for _ in statuses)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM jobs WHERE status IN ({placeholders})",
+                tuple(statuses),
             ).fetchall()
         return [self._row_to_job(row) for row in rows]
 
@@ -177,7 +179,7 @@ class JobStore(PgStoreMixin):
     ) -> list[Job]:
         limit = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
-        if self._pool is None:
+        if self._conn is None:
             with self._lock:
                 jobs = list(self._jobs.values())
             if channel_id is not None:
@@ -192,59 +194,61 @@ class JobStore(PgStoreMixin):
         clauses: list[str] = []
         params: list[Any] = []
         if channel_id is not None:
-            clauses.append("channel_id = %s")
+            clauses.append("channel_id = ?")
             params.append(channel_id)
         if statuses:
-            clauses.append("status = ANY(%s)")
-            params.append(list(statuses))
+            placeholders = ", ".join("?" for _ in statuses)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(statuses)
         if job_type is not None:
-            clauses.append("type = %s")
+            clauses.append("type = ?")
             params.append(job_type)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         params.extend([limit, offset])
-        with self._pool.connection() as conn:
-            rows = conn.execute(
+        with self._lock:
+            rows = self._conn.execute(
                 f"SELECT {_SELECT_COLUMNS} FROM jobs{where} "
-                "ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 params,
             ).fetchall()
         return [self._row_to_job(row) for row in rows]
 
     # ------------------------------------------------------------------
-    # PostgreSQL internals
+    # SQLite internals
     # ------------------------------------------------------------------
-    def _update_pg(self, job_id: str, **changes) -> Job:
-        set_parts: list[str] = ["updated_at = now()"]
-        params: list[Any] = []
+    def _update_db(self, job_id: str, **changes) -> Job:
+        set_parts: list[str] = ["updated_at = ?"]
+        params: list[Any] = [now_iso()]
 
         for key, value in changes.items():
             if key in _TEXT_COLUMNS:
-                set_parts.append(f"{key} = %s")
+                set_parts.append(f"{key} = ?")
                 params.append(value)
             elif key == "payload":
                 payload = value or {}
-                set_parts.append("payload = %s")
+                set_parts.append("payload = ?")
                 params.append(self._json(payload))
                 # keep derived/queryable columns in sync with the payload
-                set_parts.append("type = %s")
+                set_parts.append("type = ?")
                 params.append(_job_type_from_payload(payload))
-                set_parts.append("channel_id = %s")
+                set_parts.append("channel_id = ?")
                 params.append(str(payload.get("channel_id", "") or ""))
-                set_parts.append("platform = %s")
+                set_parts.append("platform = ?")
                 params.append(str(payload.get("platform", "") or ""))
-                set_parts.append("title = %s")
+                set_parts.append("title = ?")
                 params.append(str(payload.get("title", "") or ""))
             elif key == "result":
-                # `result` is set alone (without payload), so read platform/user_id
-                # from the row to derive the normalized article_url column.
-                result = value or {}
-                set_parts.append("result = %s")
-                params.append(self._json(result))
+                # `result` is set alone (without payload), so read platform from the
+                # row to derive the normalized article_url column.
+                set_parts.append("result = ?")
+                params.append(self._json(value or {}))
 
-        with self._pool.connection() as conn, conn.transaction():
+        # 单连接 + self._lock 串行化：读 platform 与写 UPDATE 之间无并发，等价于原先
+        # PG 的 SELECT ... FOR UPDATE 事务，故无需显式行锁。
+        with self._lock:
             if "result" in changes and "article_url" not in changes:
-                meta = conn.execute(
-                    "SELECT platform FROM jobs WHERE job_id = %s FOR UPDATE",
+                meta = self._conn.execute(
+                    "SELECT platform FROM jobs WHERE job_id = ?",
                     (job_id,),
                 ).fetchone()
                 if meta is None:
@@ -253,12 +257,12 @@ class JobStore(PgStoreMixin):
                     str(meta["platform"] or ""),
                     changes["result"] or {},
                 )
-                set_parts.append("article_url = %s")
+                set_parts.append("article_url = ?")
                 params.append(article_url)
 
             params.append(job_id)
-            row = conn.execute(
-                f"UPDATE jobs SET {', '.join(set_parts)} WHERE job_id = %s "
+            row = self._conn.execute(
+                f"UPDATE jobs SET {', '.join(set_parts)} WHERE job_id = ? "
                 f"RETURNING {_SELECT_COLUMNS}",
                 params,
             ).fetchone()
@@ -266,23 +270,21 @@ class JobStore(PgStoreMixin):
             raise KeyError(job_id)
         return self._row_to_job(row)
 
-    def _row_to_job(self, row: dict[str, Any]) -> Job:
-        created_at = row.get("created_at")
-        updated_at = row.get("updated_at")
+    def _row_to_job(self, row: Any) -> Job:
         return Job(
             job_id=row["job_id"],
             status=row["status"],
-            payload=row.get("payload") or {},
-            created_at=created_at.isoformat() if created_at is not None else "",
-            updated_at=updated_at.isoformat() if updated_at is not None else "",
-            login_url=row.get("login_url") or "",
-            remote_session_id=row.get("remote_session_id") or "",
-            live_url=row.get("live_url") or "",
-            log_file_path=row.get("log_file_path") or "",
-            result=row.get("result") or {},
-            error=row.get("error") or "",
-            type=row.get("type") or "publish",
-            article_url=row.get("article_url") or "",
+            payload=self._loads(row["payload"]),
+            created_at=row["created_at"] or "",
+            updated_at=row["updated_at"] or "",
+            login_url=row["login_url"] or "",
+            remote_session_id=row["remote_session_id"] or "",
+            live_url=row["live_url"] or "",
+            log_file_path=row["log_file_path"] or "",
+            result=self._loads(row["result"]),
+            error=row["error"] or "",
+            type=row["type"] or "publish",
+            article_url=row["article_url"] or "",
         )
 
     # ------------------------------------------------------------------
