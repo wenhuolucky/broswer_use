@@ -102,7 +102,7 @@ def get_browser_path(browser: str = "auto") -> str:
 
     Args:
         browser: "auto"（自动检测）/ "edge" / "chrome"
-                 auto 时优先检测 Edge，其次 Chrome
+                 auto 时优先检测 Chrome，其次 Edge
     """
     # 如果 .env 显式指定了路径，优先使用
     env_path = os.getenv("BROWSER_EXECUTABLE_PATH")

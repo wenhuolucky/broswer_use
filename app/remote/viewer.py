@@ -59,7 +59,10 @@ VIEWER_HTML = """<!DOCTYPE html>
 </div>
 <script>
 const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-const ws = new WebSocket(wsProto + location.host + '/ws');
+// WS 路径相对当前页面：直连本机时 pathname='/' → '/ws'；经主服务反代时
+// pathname='/publish-viewer/<job_id>/' → '/publish-viewer/<job_id>/ws'。
+const wsBase = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
+const ws = new WebSocket(wsProto + location.host + wsBase + 'ws');
 const img = document.getElementById('screen');
 const overlay = document.getElementById('overlay');
 const status = document.getElementById('status');

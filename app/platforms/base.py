@@ -2,6 +2,7 @@
 Platform base configuration and common interfaces.
 """
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -14,6 +15,10 @@ class PlatformConfig:
     publish_url: str
     auth_domains: list
     account_cookies: list = field(default_factory=list)
+    # Cookie names that prove a *logged-in* session. Empty means "any cookie on
+    # an auth domain counts" (used by platforms like Sohu that don't expose a
+    # single canonical session cookie name).
+    login_cookie_names: list = field(default_factory=list)
 
     def get_agent_prompt(
         self,
@@ -34,8 +39,67 @@ class PlatformConfig:
                     return True
         return False
 
+    def has_login_cookie(self, cookies: list) -> bool:
+        """Whether ``cookies`` carry a valid logged-in session for this platform.
+
+        Stricter than :meth:`validate_cookies`: when ``login_cookie_names`` is
+        set, at least one of those named cookies must sit on an auth domain.
+        This is the single source of truth for "is this channel logged in",
+        used by the channel store and the remote-login completion check.
+        """
+        names = set(self.login_cookie_names)
+        for cookie in cookies:
+            if names and cookie.get("name") not in names:
+                continue
+            domain = str(cookie.get("domain", ""))
+            if any(auth_domain in domain or domain in auth_domain for auth_domain in self.auth_domains):
+                return True
+        return False
+
     def extract_account_name(self, cookies: list) -> str:
         for cookie in cookies:
             if cookie.get("name") in self.account_cookies:
                 return cookie.get("value", "")
         return ""
+
+    def extract_native_key(self, cookies: list) -> str:
+        """A stable per-account identifier derived from the cookie, used to
+        detect "the same platform account logging in again" for dedup.
+
+        Default: the value of the first present ``account_cookies`` entry.
+        Platforms override when a different cookie better identifies the account.
+        Returns ``""`` when it can't be determined (caller then skips dedup).
+        """
+        for cookie in cookies:
+            if cookie.get("name") in self.account_cookies and cookie.get("value"):
+                return str(cookie.get("value"))
+        return ""
+
+    def article_url_account_id(self, metadata: dict) -> str:
+        """Platform-specific account id needed to build a public article URL,
+        read out of the channel's platform-specific ``metadata`` bag.
+
+        Default is empty (most platforms don't need one); platforms like Sohu
+        override this. Keeps the channel store / job store platform-agnostic.
+        """
+        return ""
+
+    @staticmethod
+    def strip_markdown(content: str) -> str:
+        """将 Markdown 正文降级为纯文本：去掉图片/链接/标题/强调等标记符号。"""
+        text = str(content or "")
+        text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+        text = re.sub(r"[*_`>#-]+", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    @staticmethod
+    def body_probe(content: str) -> str:
+        """正文存在性探针：纯文本去除所有空白后的前 30 个字符。
+
+        发文内核与各平台 prompt 必须共用此算法，确保两边算出的探针字符串一致。
+        """
+        compact = "".join(PlatformConfig.strip_markdown(content).split())
+        return compact[:30]

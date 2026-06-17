@@ -2,23 +2,41 @@ services:
   publish:
     build:
       context: .
-      dockerfile: Dockerfile
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
+        PIP_MIRROR: ${PIP_MIRROR:-https://pypi.org/simple}
     image: browser-publish-service:latest
     container_name: browser-publish-service
+    # init 进程负责回收 Chrome / Xvfb 等子进程产生的僵尸进程
+    init: true
     env_file:
       - .env
     environment:
-      APP_DATA_DIR: /app/data
-      APP_LOG_DIR: /app/logs
-      APP_REMOTE_PROFILE_DIR: /app/data/remote_profiles
-      CLOUDFLARED_PATH: /usr/local/bin/cloudflared
-      REDIS_URL: ${REDIS_URL:-}
-      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-browser_use:publish}
-      REDIS_JOB_TTL_SECONDS: ${REDIS_JOB_TTL_SECONDS:-86400}
       TZ: Asia/Shanghai
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+    # 搜狐号登录页的渲染 bundle(app.js/chunk-libs.js 等)托管在 g1.itc.cn，该域名
+    # 返回 10 个 A 记录，但本机房只有 118.112.11.56/.61 两个 IP 有路由，其余 8 个
+    # (118.123.168.x、182.140.x)不可达。浏览器逐个试死 IP 卡超时 → 关键 bundle 迟迟
+    # 不执行 → 登录页长时间白屏。这里把 g1.itc.cn 钉到可达 IP 绕开死路由。
+    # 注：CDN IP 可能变动；若日后又白屏，重测 `getent ahosts g1.itc.cn` 后更新此处。
+    extra_hosts:
+      - "g1.itc.cn:118.112.11.56"
+      - "g1.itc.cn:118.112.11.61"
     ports:
-      - "8000:19000"
+      - "${HOST_PORT:-8833}:8833"
     volumes:
-      - .:/app
-    shm_size: "64gb"
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./app:/app/app
+    # Chrome 需要较大的 /dev/shm，否则标签页易崩。按并发登录会话数量调整：
+    # 经验值约每会话 ~256MB，留足余量；如并发很高（如 40+）可上调到 16g。
+    shm_size: "8gb"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8833/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped

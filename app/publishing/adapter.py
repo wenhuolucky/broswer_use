@@ -13,23 +13,18 @@ class PublishServiceAdapter:
         self._publisher_factory = publisher_factory
         self._publisher_factories = publisher_factories
 
-    def _publisher(self, platform: str, user_id: str = ""):
+    def _publisher(self, platform: str, article_account_id: str = ""):
         platform = (platform or "toutiao").strip()
+        # Test/override seams take precedence over the real registry.
         if self._publisher_factories is not None:
             if platform not in self._publisher_factories:
                 raise ValueError(f"unsupported platform: {platform}")
             return self._publisher_factories[platform]()
         if self._publisher_factory:
             return self._publisher_factory()
-        if platform == "sohu":
-            from app.publishing.sohu_service import AutoSohuPublishService
+        from app.platforms import registry
 
-            return AutoSohuPublishService(user_id=user_id)
-        if platform != "toutiao":
-            raise ValueError(f"unsupported platform: {platform}")
-        from app.publishing.toutiao_service import AutoToutiaoPublishService
-
-        return AutoToutiaoPublishService()
+        return registry.kernel_for(platform, article_account_id=article_account_id)
 
     async def publish(
         self,
@@ -38,12 +33,13 @@ class PublishServiceAdapter:
         content: str,
         cookie: str,
         request_id: str,
-        user_id: str = "",
+        article_account_id: str = "",
         cover_image_url: str | None = None,
         cover_image_path: str | None = None,
         on_live_url_ready=None,
+        channel_id: str = "",
     ) -> dict:
-        return await self._publisher(platform, user_id=user_id).publish(
+        return await self._publisher(platform, article_account_id=article_account_id).publish(
             title=title,
             content=content,
             cookie=cookie,
@@ -51,4 +47,5 @@ class PublishServiceAdapter:
             cover_image_path=cover_image_path,
             cover_image_url=cover_image_url,
             on_live_url_ready=on_live_url_ready,
+            channel_id=channel_id,
         )

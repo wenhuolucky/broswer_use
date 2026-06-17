@@ -1,27 +1,28 @@
-FROM mcr.microsoft.com/playwright/python:v1.50.0-noble
+FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    APP_DATA_DIR=/app/data \
-    APP_LOG_DIR=/app/logs \
-    APP_REMOTE_PROFILE_DIR=/app/data/remote_profiles \
-    CLOUDFLARED_PATH=/usr/local/bin/cloudflared \
-    KASMVNC_BIN=Xvnc \
-    MAX_REMOTE_LOGIN_SESSIONS=4 \
-    DISPLAY_BASE=100 \
-    KASMVNC_PORT_BASE=6900 \
-    REMOTE_VNC_SCREEN=1440x900x24 \
-    REMOTE_BROWSER_WINDOW_WIDTH=1440 \
-    REMOTE_BROWSER_WINDOW_HEIGHT=900 \
-    REMOTE_VIEWER_MAX_WIDTH=1440 \
-    REMOTE_VIEWER_MAX_HEIGHT=900 \
-    REMOTE_VIEWER_JPEG_QUALITY=85
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    UV_LINK_MODE=copy \
+    PATH=/app/.venv/bin:$PATH
 
 WORKDIR /app
 
 ARG TARGETARCH
 ARG KASMVNC_VERSION=1.4.0
+# 默认不强制替换 apt 源，避免特定镜像站对服务器网络返回 403；需要加速时通过 APT_MIRROR 显式指定。
+ARG APT_MIRROR=
+ARG PIP_MIRROR=https://pypi.org/simple
+ENV UV_DEFAULT_INDEX=${PIP_MIRROR}
+
+RUN if [ -n "$APT_MIRROR" ]; then \
+        sed -i \
+            -e "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g" \
+            -e "s|http://security.ubuntu.com/ubuntu|${APT_MIRROR}|g" \
+            -e "s|http://ports.ubuntu.com/ubuntu-ports|${APT_MIRROR}-ports|g" \
+            /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true; \
+    fi
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -30,40 +31,38 @@ RUN apt-get update \
         xvfb \
         x11-utils \
         procps \
+        openbox \
         fonts-noto-cjk \
         fonts-noto-color-emoji \
-        libnss3 \
-        libxss1 \
-        libasound2t64 \
-        libgbm1 \
-        libxrandr2 \
-        libxdamage1 \
-        libxcomposite1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
-    url="https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/kasmvncserver_bookworm_${KASMVNC_VERSION}_${TARGETARCH:-amd64}.deb"; \
+    url="https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/kasmvncserver_noble_${KASMVNC_VERSION}_${TARGETARCH:-amd64}.deb"; \
     if curl -fsSL -o /tmp/kasmvnc.deb "$url"; then \
-        apt-get update && apt-get install -y --no-install-recommends /tmp/kasmvnc.deb; \
+        # 重试 apt-get update,避免镜像源个别 component(如 universe)瞬时拉取失败导致依赖缺失;
+        # KasmVNC 仅用于远程登录串流,属可选组件,装不上时降级告警而非中断构建。
+        ( apt-get update || apt-get update || apt-get update ) \
+            && apt-get install -y --no-install-recommends /tmp/kasmvnc.deb \
+            || echo "WARN: KasmVNC install failed; remote login streaming will be unavailable"; \
         rm -rf /var/lib/apt/lists/*; \
     else \
         echo "WARN: KasmVNC download failed ($url); remote login streaming will be unavailable"; \
     fi; \
     rm -f /tmp/kasmvnc.deb
 
-RUN curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-    -o /usr/local/bin/cloudflared \
-    && chmod +x /usr/local/bin/cloudflared
+RUN pip install --no-cache-dir -i ${PIP_MIRROR} uv
 
-COPY requirements.txt .
-RUN python -m pip install -U pip \
-    && pip install -r requirements.txt \
-    && python -m playwright install chromium
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
 
-COPY . .
+COPY app ./app
+COPY entrypoint.sh ./
+RUN chmod +x /app/entrypoint.sh
 
-RUN mkdir -p /app/data /app/logs
+EXPOSE 8833
 
-EXPOSE 19000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD curl -fsS "http://127.0.0.1:${SERVICE_PORT:-8833}/health" || exit 1
 
-CMD ["sh", "-c", "Xvfb ${DISPLAY:-:99} -screen 0 ${XVFB_SCREEN:-1920x1080x24} -nolisten tcp & export DISPLAY=${DISPLAY:-:99}; exec python -m uvicorn app.server:app --host 0.0.0.0 --port 19000 --workers 1"]
+ENTRYPOINT ["/app/entrypoint.sh"]
