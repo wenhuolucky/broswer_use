@@ -11,15 +11,18 @@ WORKDIR /app
 
 ARG TARGETARCH
 ARG KASMVNC_VERSION=1.4.0
-ARG APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+# 默认不强制替换 apt 源，避免特定镜像站对服务器网络返回 403；需要加速时通过 APT_MIRROR 显式指定。
+ARG APT_MIRROR=
 ARG PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple
 ENV UV_DEFAULT_INDEX=${PIP_MIRROR}
 
-RUN sed -i \
-        -e "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g" \
-        -e "s|http://security.ubuntu.com/ubuntu|${APT_MIRROR}|g" \
-        -e "s|http://ports.ubuntu.com/ubuntu-ports|${APT_MIRROR}-ports|g" \
-        /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+RUN if [ -n "$APT_MIRROR" ]; then \
+        sed -i \
+            -e "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g" \
+            -e "s|http://security.ubuntu.com/ubuntu|${APT_MIRROR}|g" \
+            -e "s|http://ports.ubuntu.com/ubuntu-ports|${APT_MIRROR}-ports|g" \
+            /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true; \
+    fi
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
