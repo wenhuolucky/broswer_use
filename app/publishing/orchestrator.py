@@ -326,6 +326,7 @@ class PublishAgent:
                 article_account_id=article_account_id,
                 cover_image_url=payload.get("cover_image_url"),
                 on_live_url_ready=on_live_url_ready,
+                channel_id=channel_id,
             )
         except Exception as exc:
             logger.exception("自动化发文服务异常: %s", exc)

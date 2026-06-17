@@ -68,6 +68,9 @@ class PublishService:
     def __init__(self):
         self._service_logger = get_service_logger()
         self._url_lookup_retry_delays = (0, 3, 5)
+        # 发文渠道句柄：用于按渠道获取绑定的代理 IP。由 publish() 入参注入，
+        # 默认空串（代理未启用 / 无渠道时直连）。
+        self._channel_id = ""
         self._publish_failure_texts = (
             "发布失败",
             "提交失败",
@@ -91,8 +94,11 @@ class PublishService:
         cover_image_url: Optional[str] = None,
         # 回调入参是 viewer 的本机端口（int），由上层据此构造对外 live_url。
         on_live_url_ready: Callable[[int], Awaitable[None]] | None = None,
+        # 发文渠道句柄：用于按渠道获取绑定的代理 IP（代理未启用/空串时直连）。
+        channel_id: str = "",
     ) -> dict:
         """Execute article publish."""
+        self._channel_id = channel_id or ""
         logger = setup_request_logger(request_id)
         tracker = LLMTokenTracker()
         start_time = asyncio.get_event_loop().time()
@@ -481,6 +487,18 @@ class PublishService:
         from app.utils.browser import get_browser_path
         from playwright.async_api import async_playwright
 
+        # 按渠道获取绑定的代理（代理未启用/无渠道时返回 (None, None)，直连）。
+        # 严格模式：代理获取失败会向上抛出，不 fallback 直连，保护真实 IP。
+        from app.proxy.browser import get_channel_proxy
+
+        proxy_dict, proxy_info = await get_channel_proxy(self._channel_id)
+        if proxy_dict:
+            logger.info(
+                "[Proxy] 发布浏览器走代理: server=%s auth=%s",
+                proxy_dict.get("server"),
+                "是" if proxy_dict.get("username") else "否",
+            )
+
         playwright = await async_playwright().start()
         temp_dir = tempfile.mkdtemp(prefix="browser_service_")
         logger.info(f"[Browser] 使用临时 profile: {temp_dir}")
@@ -489,6 +507,7 @@ class PublishService:
             headless=False,
             executable_path=get_browser_path(),
             viewport={"width": 1440, "height": 1000},
+            proxy=proxy_dict,  # None 时 Playwright 忽略，等价直连
             args=[
                 f"--remote-debugging-port={cdp_port}",
                 "--no-sandbox",
@@ -496,6 +515,10 @@ class PublishService:
                 "--disable-gpu",
             ],
         )
+        # 出口 IP 验证：确认浏览器实际出口 IP 与代理一致（受 defaults.verify_exit_ip 开关
+        # 控制）。调试期失败仅 warning 不阻断，避免误杀；严格化可改为抛出。
+        if proxy_info is not None:
+            await self._verify_exit_ip(context, proxy_info, logger)
         try:
             await context.grant_permissions(
                 ["clipboard-read", "clipboard-write"],
@@ -518,6 +541,24 @@ class PublishService:
                 await context.add_cookies(cookies)
                 logger.info(f"[Browser] 注入 {len(cookies)} 条 cookie")
         return playwright, context, temp_dir
+
+    async def _verify_exit_ip(self, context, proxy_info, logger) -> None:
+        """校验浏览器实际出口 IP 是否等于代理 IP。
+
+        受代理配置 defaults.verify_exit_ip 开关控制；关闭时直接跳过。调试期验证失败
+        仅记录 warning 不阻断流程（避免 ip 探测站临时不可用误杀发文）。
+        """
+        from app.proxy.assignment import get_assignment_manager
+        from app.proxy.verifier import ExitIPVerifier
+
+        mgr = get_assignment_manager()
+        if mgr is None or not mgr.config.defaults.verify_exit_ip:
+            return
+        check_url = mgr.config.defaults.exit_ip_check_url
+        try:
+            await ExitIPVerifier().verify(context, proxy_info, check_url=check_url)
+        except Exception as exc:
+            logger.warning("[Proxy] 出口 IP 验证未通过（不阻断发文）: %s", exc)
 
     async def _run_agent(self, title, content, cover_path, llm, session, logger, tracker):
         from browser_use import Agent

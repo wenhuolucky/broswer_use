@@ -3,6 +3,8 @@
 .env
 .env.*
 !.env.example
+# 代理配置含真实 IP/账密，仅保留模板 proxies.yaml.example。
+proxies.yaml
 
 # ---- Python ----
 __pycache__/

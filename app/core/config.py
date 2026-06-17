@@ -39,3 +39,15 @@ PENDING_CHANNEL_TTL_SECONDS = float(os.getenv("PENDING_CHANNEL_TTL_SECONDS", "18
 PENDING_CHANNEL_SWEEP_INTERVAL_SECONDS = float(
     os.getenv("PENDING_CHANNEL_SWEEP_INTERVAL_SECONDS", "600")
 )
+
+# ── 多 IP 代理模块 ────────────────────────────────────────────────
+# 每个渠道（channel）绑定一个独立静态代理 IP，登录和发文都通过同一 IP 出口，
+# 避免多账号共用本机 IP 被平台识别为工作室触发风控。
+# PROXY_ENABLED=false（默认）时全部直连，行为与未集成代理时完全一致。
+PROXY_ENABLED = os.getenv("PROXY_ENABLED", "false").lower() in ("true", "1", "yes")
+# 代理配置文件（ip_pool + defaults），默认项目根目录 proxies.yaml
+PROXY_CONFIG_PATH = str(_project_path(os.getenv("PROXY_CONFIG_PATH"), PROJECT_ROOT / "proxies.yaml"))
+# 渠道→IP 绑定关系持久化路径，默认 data/proxy_assignments.json
+PROXY_ASSIGNMENTS_PATH = str(
+    _project_path(os.getenv("PROXY_ASSIGNMENTS_PATH"), DATA_DIR / "proxy_assignments.json")
+)

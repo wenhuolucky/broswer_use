@@ -76,46 +76,95 @@ _remote_display_pool = DisplayPool(
     port_base=REMOTE_LOGIN_KASMVNC_PORT_BASE,
 )
 
-# browser-use 0.12 启动 Chromium 的 create_subprocess_exec 不传 env=，子进程继承本
-# 进程的 os.environ。若不在 start() 那一刻把 DISPLAY 设成本会话的显示号，有头 Chromium
-# 会连不上对应 Xvnc 而崩溃。用一把全局锁串行化「设 DISPLAY → start() → 还原」临界区，
-# 锁只覆盖 fork 那一瞬，不影响并发会话各自的显示槽。
-_launch_lock = asyncio.Lock()
+# 登录浏览器由 Playwright 启动（launch_persistent_context），DISPLAY 通过 env= 直接传给
+# 子进程、各会话隔离，故不再需要旧的「设 os.environ['DISPLAY'] → start() → 还原」全局锁。
 
 
-def _build_login_browser(user_data_dir: str, display: str):
-    """构造（未启动的）browser-use BrowserSession，用于远程登录有头浏览器。
+async def _launch_login_browser(
+    profile_dir: str,
+    display: str,
+    cdp_port: int,
+    proxy_dict: dict | None,
+    logger,
+):
+    """用 Playwright 启动有头登录浏览器（注入代理 + DISPLAY），返回 (playwright, context)。
 
-    渲染到 display 指定的 Xvnc 显示；--kiosk 全屏无壳（无地址栏/标签栏）。配合该显示
-    上的 openbox（见 kasmvnc.start_stream），桌面被客户端动态 resize 时全屏窗口会自动
-    跟随铺满，从而 1:1 清晰且铺满。
+    代理注入在 Playwright 这一层（launch_persistent_context(proxy=...)，原生支持账密），
+    之后由 browser-use 通过 CDP 连接做页面导航/cookie 捕获——与发文路径同模式。
+
+    DISPLAY 通过 Playwright env= 直接传给浏览器子进程（替代旧的 os.environ 全局锁 hack），
+    各会话各传各的、天然隔离，故无需 _launch_lock 串行化、可并发启动。--kiosk 全屏无壳，
+    配合该显示上的 openbox 跟随桌面 resize 铺满。
     """
-    from browser_use import BrowserSession
+    from playwright.async_api import async_playwright
 
     width, height = _vnc_screen_window_size()
-    return BrowserSession(
-        user_data_dir=user_data_dir,
+    playwright = await async_playwright().start()
+    # env= 会替换整个子进程环境，必须并入当前 os.environ 再覆盖 DISPLAY，否则浏览器
+    # 丢失 PATH 等必要变量。
+    env = {**os.environ, "DISPLAY": display}
+    if proxy_dict:
+        logger.info(
+            "[Proxy] 登录浏览器走代理: server=%s auth=%s",
+            proxy_dict.get("server"),
+            "是" if proxy_dict.get("username") else "否",
+        )
+    context = await playwright.chromium.launch_persistent_context(
+        user_data_dir=profile_dir,
         headless=False,
-        keep_alive=True,
         chromium_sandbox=False,  # 容器内无 user namespace，需关沙箱
-        # browser-use 默认开"自动化优化扩展"(uBlock/cookie/ClearURLs)，启动时会去
-        # GitHub 下载，国内容器里会卡死；登录流用不到，直接关掉（等价 env
-        # BROWSER_USE_DISABLE_EXTENSIONS=1）。
-        enable_default_extensions=False,
         executable_path=_find_browser_path(),
-        # 0.12 实际忽略 profile.env（不传给子进程），真正生效靠 _open_login_browser
-        # 在 start() 临界区临时设 os.environ["DISPLAY"]；这里保留仅作声明。
-        env={"DISPLAY": display},
-        window_size={"width": width, "height": height},
+        env=env,
+        proxy=proxy_dict,  # None 时 Playwright 忽略，等价直连
+        viewport=None,  # 用真实窗口尺寸，不固定 viewport
         args=[
+            f"--remote-debugging-port={cdp_port}",
+            f"--window-size={width},{height}",
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--test-type",  # 压掉"仅供自动化测试"横幅
-            # 全屏无壳：无地址栏（用户不能乱输 URL）、无标签栏。kiosk 需要窗口管理器
+            # browser-use 默认开"自动化优化扩展"会去 GitHub 下载、国内容器卡死；
+            # 登录流用不到，且这里用 Playwright 直接启动也不会带那些扩展。
+            # 全屏无壳：无地址栏（用户不能乱输 URL）、无标签栏。kiosk 需窗口管理器
             # 才能正确全屏并跟随桌面 resize——该显示上的 openbox 负责这件事。
             "--kiosk",
         ],
     )
+    return playwright, context
+
+
+async def _connect_login_browser(cdp_port: int):
+    """browser-use 通过 CDP 连接已由 Playwright 启动的登录浏览器。
+
+    返回连接好的 BrowserSession，供下游 navigate_to / cookies / 导航守卫复用——
+    这些高层 API 与浏览器由谁启动无关，只要 CDP 连上即可。
+    """
+    from browser_use import BrowserSession
+    from app.utils.browser import get_cdp_url
+
+    session = BrowserSession(cdp_url=get_cdp_url(cdp_port))
+    await session.connect()
+    return session
+
+
+async def _verify_login_exit_ip(context, proxy_info, logger) -> None:
+    """校验登录浏览器实际出口 IP 是否等于代理 IP（受 verify_exit_ip 开关控制）。
+
+    失败仅 warning 不阻断登录（避免 ip 探测站临时不可用误杀登录会话）。
+    """
+    from app.proxy.assignment import get_assignment_manager
+    from app.proxy.verifier import ExitIPVerifier
+
+    mgr = get_assignment_manager()
+    if mgr is None or proxy_info is None or not mgr.config.defaults.verify_exit_ip:
+        return
+    try:
+        await ExitIPVerifier().verify(
+            context, proxy_info, check_url=mgr.config.defaults.exit_ip_check_url
+        )
+    except Exception as exc:
+        if logger:
+            logger.warning("[Proxy] 登录出口 IP 验证未通过（不阻断登录）: %s", exc)
 
 
 # 头条等平台登录页背景是 autoplay+loop 的 <video>，持续运动会触发 KasmVNC「视频模式」
@@ -178,22 +227,12 @@ async def _kill_background_video_now(session) -> None:
         pass
 
 
-async def _open_login_browser(session, url: str, display: str) -> None:
-    """启动浏览器并导航到 url。
+async def _open_login_browser(session, url: str) -> None:
+    """登录浏览器已由 Playwright 启动、browser-use 已 CDP 连上：导航到登录页并抑制背景视频。
 
-    在 start() 临界区临时把 DISPLAY 设入本进程环境，让新 fork 的 Chromium 渲染到对应
-    Xvnc 显示，起完即还原。全局锁串行化，避免并发会话互相覆盖 DISPLAY。
+    DISPLAY 已在 Playwright 启动时通过 env= 注入（不再需要旧的 os.environ 全局锁），
+    故此处只做导航相关工作。
     """
-    async with _launch_lock:
-        prev = os.environ.get("DISPLAY")
-        os.environ["DISPLAY"] = display
-        try:
-            await session.start()
-        finally:
-            if prev is None:
-                os.environ.pop("DISPLAY", None)
-            else:
-                os.environ["DISPLAY"] = prev
     # 注册必须早于 navigate：让脚本赶在登录页 <video> autoplay 之前冻结背景视频，
     # 否则一旦视频先播放就会触发 KasmVNC 视频模式致画面发糊。
     await _suppress_background_video(session)
@@ -244,8 +283,11 @@ class RemoteLoginSession:
     login_url: str
     status: str = "waiting_cookie"
     viewer_port: int = 0
-    # browser-use BrowserSession（有头，渲染到 slot 的 Xvnc 显示）
+    # browser-use BrowserSession（CDP 连接到由 Playwright 启动的有头浏览器）
     browser: object | None = None
+    # Playwright 实例与 context：由本会话用 launch_persistent_context 启动，cleanup 时关闭
+    playwright: object | None = None
+    context: object | None = None
     stream: object | None = None
     slot: Slot | None = None
     # 预热会话的构建时刻（time.monotonic()），用于 TTL 回收；真实会话填 0 不参与
@@ -283,6 +325,18 @@ class RemoteLoginRunner:
         self._warm_target = (
             warm_per_platform if warm_per_platform is not None else REMOTE_LOGIN_WARM_PER_PLATFORM
         )
+        # 启用多 IP 代理时强制关闭预热池：预热会话在 channel_id 未知时就启动浏览器，
+        # 无法注入「该渠道绑定的代理 IP」。改为全部按需构建（_build_session 时已知
+        # channel_id，能正确注入代理）。代理未启用时预热行为不变。
+        from app.core.config import PROXY_ENABLED as _PROXY_ENABLED
+
+        if _PROXY_ENABLED and self._warm_target > 0:
+            from app.core.request_logging import get_service_logger
+
+            get_service_logger().info(
+                "多 IP 代理已启用，预热登录会话池被禁用（登录会话改为按需构建以正确绑定代理 IP）。"
+            )
+            self._warm_target = 0
         self._warm_platforms = (
             warm_platforms
             if warm_platforms is not None
@@ -445,14 +499,27 @@ class RemoteLoginRunner:
         return [c.model_dump() if hasattr(c, "model_dump") else dict(c) for c in raw]
 
     async def _build_session(self, platform: str, channel_id: str) -> RemoteLoginSession:
-        """现场构建一个完整登录会话：占 slot → 起 Xvnc → 用 browser-use 起有头浏览器 →
-        goto 登录页 → 装导航守卫。预热和按需走的都是这条路径。"""
+        """现场构建一个完整登录会话：占 slot → 起 Xvnc → 按渠道取代理 → 用 Playwright 起
+        有头浏览器（注入代理 + DISPLAY）→ browser-use CDP 连接 → goto 登录页 → 装导航守卫。
+
+        预热会话 channel_id="" 不绑代理（直连）；但启用代理时预热池已被禁用（见 start_warm_pool），
+        故真实登录会话总是带着已知 channel_id 进来、能正确注入代理。
+        """
         session_id = uuid.uuid4().hex
         slot = await _remote_display_pool.acquire()
         stream = None
         browser = None
+        playwright = None
+        context = None
         profile_dir = REMOTE_PROFILE_DIR / session_id
+        logger = self._logger(session_id)
         try:
+            # 按渠道获取代理（channel_id="" 或代理未启用时返回 (None, None)，直连）。
+            # 严格模式：代理获取失败会向上抛出，不 fallback 直连。
+            from app.proxy.browser import get_channel_proxy
+
+            proxy_dict, proxy_info = await get_channel_proxy(channel_id)
+
             stream = await kasmvnc.start_stream(
                 slot,
                 kasmvnc_bin=REMOTE_LOGIN_KASMVNC_BIN,
@@ -463,8 +530,16 @@ class RemoteLoginRunner:
             if profile_dir.exists():
                 shutil.rmtree(profile_dir, ignore_errors=True)
             profile_dir.mkdir(parents=True, exist_ok=True)
-            browser = _build_login_browser(str(profile_dir), slot.display)
-            await _open_login_browser(browser, login_url, slot.display)
+
+            cdp_port = _find_free_port()
+            playwright, context = await _launch_login_browser(
+                str(profile_dir), slot.display, cdp_port, proxy_dict, logger
+            )
+            # 出口 IP 验证（在 browser-use 连接前用 Playwright context 直接验，最省事）。
+            await _verify_login_exit_ip(context, proxy_info, logger)
+
+            browser = await _connect_login_browser(cdp_port)
+            await _open_login_browser(browser, login_url)
             session = RemoteLoginSession(
                 session_id=session_id,
                 platform=platform,
@@ -472,6 +547,8 @@ class RemoteLoginRunner:
                 login_url=_build_vnc_url(_public_base_url(), session_id),
                 viewer_port=slot.web_port,
                 browser=browser,
+                playwright=playwright,
+                context=context,
                 stream=stream,
                 slot=slot,
                 created_monotonic=time.monotonic(),
@@ -484,6 +561,16 @@ class RemoteLoginRunner:
             if browser is not None:
                 try:
                     await browser.kill()
+                except Exception:
+                    pass
+            if context is not None:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+            if playwright is not None:
+                try:
+                    await playwright.stop()
                 except Exception:
                     pass
             if stream:
@@ -533,6 +620,18 @@ class RemoteLoginRunner:
         if session.browser is not None:
             try:
                 await session.browser.kill()
+            except Exception:
+                pass
+        # 关闭由本会话用 Playwright 启动的 context 与实例（kill() 走 CDP 关进程，
+        # 但 Playwright 端的 context/driver 需各自显式关闭以释放资源）。
+        if getattr(session, "context", None) is not None:
+            try:
+                await session.context.close()
+            except Exception:
+                pass
+        if getattr(session, "playwright", None) is not None:
+            try:
+                await session.playwright.stop()
             except Exception:
                 pass
         if session.stream:

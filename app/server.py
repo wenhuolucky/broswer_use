@@ -13,6 +13,9 @@ from app.api.v1.router import api_router
 from app.core.config import (
     PENDING_CHANNEL_SWEEP_INTERVAL_SECONDS,
     PENDING_CHANNEL_TTL_SECONDS,
+    PROXY_ASSIGNMENTS_PATH,
+    PROXY_CONFIG_PATH,
+    PROXY_ENABLED,
 )
 from app.schemas.common import HealthResponse
 from app.core.auth import require_api_token
@@ -77,6 +80,24 @@ async def lifespan(app: FastAPI):
     closed_count = agent.close_stale_running_jobs_after_restart()
     if closed_count:
         _log.info("Closed %d stale running job(s) after service restart.", closed_count)
+
+    # 多 IP 代理：PROXY_ENABLED=true 时初始化分配管理器。proxies.yaml 缺失/格式错误
+    # 直接抛异常阻止启动——严格模式，避免带着无效代理配置上线后任务全失败。
+    if PROXY_ENABLED:
+        from app.proxy.assignment import init_assignment_manager
+
+        try:
+            mgr = init_assignment_manager(PROXY_CONFIG_PATH, PROXY_ASSIGNMENTS_PATH)
+            _log.info(
+                "多 IP 代理已启用：ip_pool=%d, 已绑定渠道=%d",
+                len(mgr.config.ip_pool),
+                len(mgr.assignments),
+            )
+        except Exception as exc:
+            _log.error("代理模块初始化失败（PROXY_ENABLED=true）: %s", exc, exc_info=True)
+            raise
+    else:
+        _log.info("多 IP 代理未启用（PROXY_ENABLED=false），所有渠道直连。")
 
     # 重启后清理遗留的 pending 渠道：它们只在一次登录会话进行中存在，
     # 会话已随重启失效（对应的 login job 上一步已被置为 failed）。

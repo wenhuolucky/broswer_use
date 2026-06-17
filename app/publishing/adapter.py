@@ -37,6 +37,7 @@ class PublishServiceAdapter:
         cover_image_url: str | None = None,
         cover_image_path: str | None = None,
         on_live_url_ready=None,
+        channel_id: str = "",
     ) -> dict:
         return await self._publisher(platform, article_account_id=article_account_id).publish(
             title=title,
@@ -46,4 +47,5 @@ class PublishServiceAdapter:
             cover_image_path=cover_image_path,
             cover_image_url=cover_image_url,
             on_live_url_ready=on_live_url_ready,
+            channel_id=channel_id,
         )

@@ -1,0 +1,31 @@
+# 多 IP 代理配置模板
+#
+# 复制为 proxies.yaml 并填入真实代理信息（proxies.yaml 已被 .gitignore 忽略）。
+# 启用代理需同时在 .env 设置 PROXY_ENABLED=true。
+#
+# 每个渠道（channel）按「最少绑定优先」分配一个 ip_pool 条目，永久绑定、持久化到
+# data/proxy_assignments.json。新增 IP 只需在 ip_pool 追加条目，新渠道自动流向它。
+
+defaults:
+  # HTTP 优先：Chromium 支持 HTTP 代理的账密认证；SOCKS5 不支持账密认证。
+  protocol: http
+  # 浏览器启动后访问 exit_ip_check_url，校验实际出口 IP 是否等于代理 IP。
+  verify_exit_ip: true
+  exit_ip_check_url: "https://api.ip.sb/ip"
+  cache_ttl_seconds: 300
+
+ip_pool:
+  # 固定代理服务器（静态共享，用户名密码认证）
+  - provider: fixed_auth
+    ip: "YOUR_PROXY_IP"
+    port: 2018
+    username: "YOUR_USERNAME"
+    password: "YOUR_PASSWORD"
+    protocol: http
+    label: "静态代理-1"
+
+  # 巨量 IP 独享代理（通过 API 动态获取，订单期内 IP 不变）—— 按需启用
+  # - provider: juliangip
+  #   trade_no: "YOUR_TRADE_NO"
+  #   api_key: "YOUR_API_KEY"
+  #   label: "独享IP-1"
