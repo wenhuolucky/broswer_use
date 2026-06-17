@@ -35,8 +35,3 @@ addopts = "-ra -q"
 
 [tool.uv]
 package = false
-
-[[tool.uv.index]]
-# 国内镜像源，加速依赖下载；如在海外可删除此段回退默认 PyPI
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
-default = true

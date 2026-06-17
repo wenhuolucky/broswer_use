@@ -13,7 +13,7 @@ ARG TARGETARCH
 ARG KASMVNC_VERSION=1.4.0
 # 默认不强制替换 apt 源，避免特定镜像站对服务器网络返回 403；需要加速时通过 APT_MIRROR 显式指定。
 ARG APT_MIRROR=
-ARG PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_MIRROR=https://pypi.org/simple
 ENV UV_DEFAULT_INDEX=${PIP_MIRROR}
 
 RUN if [ -n "$APT_MIRROR" ]; then \
