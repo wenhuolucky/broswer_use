@@ -11,14 +11,14 @@ WORKDIR /app
 
 ARG TARGETARCH
 ARG KASMVNC_VERSION=1.4.0
-ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+ARG APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ubuntu
 ARG PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple
 ENV UV_DEFAULT_INDEX=${PIP_MIRROR}
 
 RUN sed -i \
-        -e "s|archive.ubuntu.com|${APT_MIRROR}|g" \
-        -e "s|security.ubuntu.com|${APT_MIRROR}|g" \
-        -e "s|ports.ubuntu.com|${APT_MIRROR}|g" \
+        -e "s|http://archive.ubuntu.com/ubuntu|${APT_MIRROR}|g" \
+        -e "s|http://security.ubuntu.com/ubuntu|${APT_MIRROR}|g" \
+        -e "s|http://ports.ubuntu.com/ubuntu-ports|${APT_MIRROR}-ports|g" \
         /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
 
 RUN apt-get update \
