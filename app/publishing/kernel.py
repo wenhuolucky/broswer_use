@@ -12,6 +12,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
@@ -23,6 +24,7 @@ if sys.platform == "win32":
 from app.core.runtime import USER_DATA_DIR
 from app.cookies.normalize import normalize_cookie_list
 from app.platforms.base import PlatformConfig
+from app.publishing.agent_trace import AgentTraceState, llm_trace_line, log_step_trace
 from app.core.request_logging import get_service_logger, setup_request_logger
 from app.remote.login import _find_free_port
 from app.utils.urls import normalize_toutiao_article_url
@@ -564,6 +566,14 @@ class PublishService:
         from browser_use import Agent
 
         original_ainvoke = llm.ainvoke
+        trace_state = AgentTraceState()
+        trace_summary = {
+            "repeat_warnings": [],
+            "last_intent": "",
+            "last_action": "",
+            "llm_calls": [],
+        }
+        current_step_ref = {"step": None}
 
         async def tracked_ainvoke(self_, messages, output_format=None, **kwargs):
             input_text = ""
@@ -574,7 +584,9 @@ class PublishService:
                     else:
                         input_text += f"\n[{type(msg).__name__}]: {str(msg)[:500]}"
 
+            llm_start = time.perf_counter()
             response = await original_ainvoke(messages, output_format=output_format, **kwargs)
+            llm_elapsed = time.perf_counter() - llm_start
 
             output_text = ""
             if hasattr(response, "content"):
@@ -601,9 +613,20 @@ class PublishService:
                             "tokens": usage_dict,
                         },
                     )
+                    trace_summary["llm_calls"].append(llm_elapsed)
+                    logger.info(
+                        llm_trace_line(
+                            call=tracker.call_count,
+                            step=current_step_ref.get("step"),
+                            duration_seconds=llm_elapsed,
+                            model=tracker.model_name,
+                            usage=usage_dict,
+                        )
+                    )
                     logger.info("-" * 60)
                     logger.info(f"LLM Call #{tracker.call_count}")
                     logger.info(f"  模型: {tracker.model_name}")
+                    logger.info(f"  耗时: {llm_elapsed:.2f}s")
                     logger.info(f"  输入长度: {len(input_text)} 字符")
                     logger.info(
                         f"  输入预览: {input_text[:200]}..."
@@ -684,6 +707,7 @@ class PublishService:
                     return
                 last_item = history_items[-1]
                 step_number = len(history_items)
+                current_step_ref["step"] = step_number
 
                 # 每步抓取页面状态用于诊断
                 try:
@@ -691,6 +715,17 @@ class PublishService:
                 except Exception as exc:
                     logger.warning(f"[StepDiag {step_number}] state capture failed: {exc}")
                     page_state = {}
+
+                trace = log_step_trace(
+                    logger=logger,
+                    step_number=step_number,
+                    history_item=last_item,
+                    page_state=page_state,
+                    state=trace_state,
+                )
+                trace_summary["last_intent"] = trace.intent
+                trace_summary["last_action"] = trace.action_signature
+                trace_summary["repeat_warnings"].extend(trace.repeat_warnings)
 
                 self._log_step_diagnostics(step_number, last_item, page_state, logger)
 
@@ -782,7 +817,7 @@ class PublishService:
             logger=logger,
             detected_failure=publish_guard["failure_detected"],
         )
-        self._log_final_summary(publish_guard, result, logger)
+        self._log_final_summary(publish_guard, result, logger, trace_summary=trace_summary)
         return result
 
     def _build_publish_tools(self, logger, original_title: str = ""):
@@ -795,6 +830,7 @@ class PublishService:
             "found=true 时必须用 article_url 调用 done(success=true)；found=false 时必须用 reason 调用 done(success=false)。"
         )
         async def get_published_article_url(title: str, browser_session):
+            tool_start = time.perf_counter()
             lookup_title = (original_title or title or "").strip()
             if logger and title and lookup_title != title:
                 logger.info(
@@ -804,6 +840,18 @@ class PublishService:
                     lookup_title,
                 )
             result = await self._lookup_published_article_url(browser_session, lookup_title, logger)
+            tool_elapsed = time.perf_counter() - tool_start
+            if logger:
+                logger.info(
+                    "[AgentTool] name=get_published_article_url duration=%.2fs "
+                    "title=%r attempts=%s found=%s article_url=%s reason=%r",
+                    tool_elapsed,
+                    lookup_title[:80],
+                    result.get("attempts", ""),
+                    result.get("found"),
+                    result.get("article_url", ""),
+                    str(result.get("reason", "") or "")[:160],
+                )
             return ActionResult(
                 extracted_content=json.dumps(result, ensure_ascii=False),
                 include_in_memory=True,
@@ -1127,8 +1175,15 @@ class PublishService:
         if result_summary:
             logger.info(f"[StepDiag {step_number}] result: {result_summary[:500]}")
 
-    def _log_final_summary(self, publish_guard: dict, result: dict, logger) -> None:
+    def _log_final_summary(
+        self,
+        publish_guard: dict,
+        result: dict,
+        logger,
+        trace_summary: dict | None = None,
+    ) -> None:
         """发布流程结束后输出最终诊断摘要：失败时尤其关键。"""
+        trace_summary = trace_summary or {}
         success = bool(result.get("success"))
         step_summaries = publish_guard.get("step_summaries", []) or []
         step_count = len(step_summaries)
@@ -1143,6 +1198,8 @@ class PublishService:
         body_paste_succeeded = bool(publish_guard.get("body_paste_succeeded", False))
         failure_reason = str(result.get("failure_reason", "") or "")
         article_url = str(result.get("article_url", "") or "")
+        repeat_warnings = trace_summary.get("repeat_warnings", []) or []
+        llm_calls = trace_summary.get("llm_calls", []) or []
 
         logger.info("=" * 60)
         logger.info("[FinalDiag] 发布结果诊断")
@@ -1155,6 +1212,27 @@ class PublishService:
         logger.info(f"  最后正文预览: {last_editor_preview!r}")
         logger.info(f"  失败原因: {failure_reason or '(无)'}")
         logger.info(f"  Article URL: {article_url or '(无)'}")
+        logger.info(
+            "[AgentFinal] status=%s steps=%s repeats=%s last_intent=%r last_action=%r article_url=%s",
+            "succeeded" if success else "failed",
+            step_count,
+            len(repeat_warnings),
+            trace_summary.get("last_intent", ""),
+            trace_summary.get("last_action", ""),
+            article_url or "",
+        )
+        if llm_calls:
+            logger.info(
+                "[AgentTiming] phase=llm_calls count=%d total=%.2fs avg=%.2fs max=%.2fs",
+                len(llm_calls),
+                sum(llm_calls),
+                sum(llm_calls) / len(llm_calls),
+                max(llm_calls),
+            )
+        if repeat_warnings:
+            logger.warning("[AgentFinal] repeat_warnings=%d", len(repeat_warnings))
+            for warning in repeat_warnings[-5:]:
+                logger.warning("[AgentFinal] recent_repeat %s", warning)
         if body_paste_attempts > 0:
             logger.info(f"  正文粘贴尝试次数: {body_paste_attempts}")
             logger.info(f"  正文粘贴是否成功: {body_paste_succeeded}")
