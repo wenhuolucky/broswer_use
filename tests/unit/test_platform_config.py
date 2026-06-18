@@ -68,6 +68,23 @@ class TestToutiaoPrompt:
         assert "确认发布”后不要再次点击“预览并发布”或“确认发布”" in prompt
         assert "直接调用 get_published_article_url" in prompt
 
+    def test_plain_text_prompt_prefers_clipboard_paste_with_input_fallback(self) -> None:
+        prompt = ToutiaoPlatform().get_agent_prompt(
+            title="测试标题",
+            content="这是用于正文探针的测试正文",
+            cover_instruction="封面设置：不需要手动设置封面。",
+            body_image_instruction="",
+            is_markdown=False,
+        )
+
+        assert "navigator.clipboard.writeText" in prompt
+        assert 'send_keys("Control+v")' in prompt
+        assert "正文探针" in prompt
+        assert "粘贴失败" in prompt
+        assert "input/type" in prompt
+        assert "禁止使用 editor.innerHTML" in prompt
+        assert "DOM 注入" in prompt
+
 
 class TestPlatformTitleMatching:
     def test_ignores_internal_whitespace_when_matching_toutiao_article_title(self) -> None:

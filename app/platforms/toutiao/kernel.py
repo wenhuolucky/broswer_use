@@ -34,6 +34,39 @@ class AutoToutiaoPublishService(PublishService):
             await page.goto(articles_url)
             await asyncio.sleep(3)
 
+            if logger:
+                logger.info(
+                    "[PublishGuard] article_candidates_fast_probe_start "
+                    f"attempt={attempt}/{self.article_lookup_attempts}"
+                )
+            fast_items = await self._extract_article_candidates(page, logger)
+            fast_selected = self._select_candidate_article(fast_items, normalized_expected)
+            fast_href = str(fast_selected.get("href", "") or "").strip()
+            fast_text = str(fast_selected.get("text", "") or "").strip()
+            if fast_href:
+                if logger:
+                    logger.info(
+                        "[PublishGuard] article_candidates_fast_probe_hit "
+                        f"attempt={attempt} href={fast_href} | text={fast_text}"
+                    )
+                if self._is_preview_article_url(fast_href):
+                    return {
+                        "matched": True,
+                        "article_url": fast_href,
+                        "detail_title": fast_text,
+                    }
+                if logger:
+                    logger.info(
+                        "[PublishGuard] article_candidates_fast_probe_non_preview_defer "
+                        f"attempt={attempt} href={fast_href}"
+                    )
+            if logger:
+                logger.info(
+                    "[PublishGuard] article_candidates_fast_probe_miss "
+                    f"attempt={attempt} count={len([item for item in fast_items if isinstance(item, dict)])}"
+                )
+                logger.info(f"[PublishGuard] fallback_wait_for_article_entries attempt={attempt}")
+
             article_count = await self._wait_for_article_entries(page, logger, attempt)
             items = await self._extract_article_candidates(page, logger)
             self._log_article_candidates(items, logger, attempt, article_count)
@@ -57,34 +90,16 @@ class AutoToutiaoPublishService(PublishService):
                     f"href={selected_href} | text={selected_text}"
                 )
 
-            if self._is_preview_article_url(selected_href):
-                return {
-                    "matched": True,
-                    "article_url": selected_href,
-                    "detail_title": selected_text,
-                }
-
-            await page.goto(selected_href)
-            await asyncio.sleep(2)
-            detail_url = await session.get_current_page_url()
-            if "/item/" not in detail_url and "/item/" in selected_href:
-                detail_url = selected_href
-            detail_title = await self._read_article_detail_title(page, logger)
-
-            normalized_actual = (detail_title or selected_text or "").strip()
-            matched = self._title_matches(normalized_expected, normalized_actual)
-            if logger:
-                logger.info(
-                    "[PublishGuard] article detail verification: "
-                    f"expected={normalized_expected} | actual={normalized_actual} | matched={matched} | url={detail_url}"
-                )
-
-            if matched:
-                return {
-                    "matched": True,
-                    "article_url": detail_url,
-                    "detail_title": normalized_actual,
-                }
+            result = await self._verify_candidate_article(
+                page,
+                session,
+                selected_href,
+                selected_text,
+                normalized_expected,
+                logger,
+            )
+            if result.get("matched"):
+                return result
             if attempt < self.article_lookup_attempts:
                 await asyncio.sleep(self.article_lookup_retry_delay_seconds)
 
@@ -94,6 +109,45 @@ class AutoToutiaoPublishService(PublishService):
                 f"expected={normalized_expected} | attempts={self.article_lookup_attempts}"
             )
         return {"matched": False, "article_url": "", "detail_title": ""}
+
+    async def _verify_candidate_article(
+        self,
+        page,
+        session,
+        selected_href: str,
+        selected_text: str,
+        normalized_expected: str,
+        logger,
+    ) -> dict:
+        if self._is_preview_article_url(selected_href):
+            return {
+                "matched": True,
+                "article_url": selected_href,
+                "detail_title": selected_text,
+            }
+
+        await page.goto(selected_href)
+        await asyncio.sleep(2)
+        detail_url = await session.get_current_page_url()
+        if "/item/" not in detail_url and "/item/" in selected_href:
+            detail_url = selected_href
+        detail_title = await self._read_article_detail_title(page, logger)
+
+        normalized_actual = (detail_title or selected_text or "").strip()
+        matched = self._title_matches(normalized_expected, normalized_actual)
+        if logger:
+            logger.info(
+                "[PublishGuard] article detail verification: "
+                f"expected={normalized_expected} | actual={normalized_actual} | matched={matched} | url={detail_url}"
+            )
+
+        if matched:
+            return {
+                "matched": True,
+                "article_url": detail_url,
+                "detail_title": normalized_actual,
+            }
+        return {"matched": False, "article_url": "", "detail_title": normalized_actual}
 
     async def _wait_for_article_entries(self, page, logger, attempt: int) -> int:
         if logger:

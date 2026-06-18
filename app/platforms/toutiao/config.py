@@ -159,6 +159,7 @@ async (htmlContent) => {{
 """
 
     def _plain_text_prompt(self, title: str, content: str, cover_instruction: str) -> str:
+        body_probe = self.body_probe(content)
         return f"""你在头条号后台操作。请按顺序发布文章：
 
 {self._agent_recovery_rules()}
@@ -167,7 +168,35 @@ async (htmlContent) => {{
 2. 确认已登录，并读取账号显示名记为 account_name。
 3. 打开发布页：{self.publish_url}
 4. 输入标题："{title}"
-5. 在正文编辑器输入以下内容：
+5. 正文写入优先使用剪贴板粘贴，严格按顺序执行：
+   - 点击正文编辑器，使其获得焦点。
+   - 使用 evaluate 执行下面的 JavaScript，把 `<content>` 中的纯文本写入浏览器剪贴板：
+```javascript
+async (bodyText) => {{
+  try {{
+    if (navigator.clipboard && navigator.clipboard.writeText) {{
+      await navigator.clipboard.writeText(bodyText);
+      return {{ ok: true, method: "navigator.clipboard.writeText" }};
+    }}
+  }} catch (error) {{}}
+  const textarea = document.createElement("textarea");
+  textarea.value = bodyText;
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  return {{ ok: !!ok, method: "execCommand" }};
+}}
+```
+   - 保持正文编辑器焦点，执行 `send_keys("Control+v")` 粘贴正文。
+   - 粘贴后必须读取正文编辑器自身的可见文本，确认正文探针 "{body_probe}" 已出现。
+   - 如果粘贴失败，或者正文探针未命中，再使用 input/type 方式写入正文。
+   - 使用 input/type 回退后仍必须确认正文探针 "{body_probe}" 已出现。
+   - 禁止使用 editor.innerHTML、DOM 注入、直接替换节点、直接设置正文 DOM 等方式伪造正文写入成功。
+   - 正文探针未命中时禁止继续点击封面、预览或发布。
+正文内容：
 <content>
 {content}
 </content>
