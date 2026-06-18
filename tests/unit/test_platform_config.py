@@ -54,6 +54,20 @@ class TestToutiaoPrompt:
         assert "不要点击文章正文区域的“预览”按钮" in prompt
         assert "上传后先确认图片缩略图已出现或“确定”按钮已可点击" in prompt
 
+    def test_plain_text_prompt_requires_real_title_input_and_post_confirm_lookup(self) -> None:
+        prompt = ToutiaoPlatform().get_agent_prompt(
+            title="测试标题",
+            content="测试正文",
+            cover_instruction="封面设置：不需要手动设置封面。",
+            body_image_instruction="",
+            is_markdown=False,
+        )
+
+        assert "不要用 evaluate 或直接设置 textarea.value 作为标题输入成功依据" in prompt
+        assert "标题计数正常且页面没有“标题不能为空”" in prompt
+        assert "确认发布”后不要再次点击“预览并发布”或“确认发布”" in prompt
+        assert "直接调用 get_published_article_url" in prompt
+
 
 class TestPlatformTitleMatching:
     def test_ignores_internal_whitespace_when_matching_toutiao_article_title(self) -> None:

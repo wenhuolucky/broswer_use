@@ -684,6 +684,8 @@ class PublishService:
         logger.info(f"开始发布文章: {title}")
         publish_guard = {
             "confirm_publish_clicked": False,
+            "post_confirm_lookup_done": False,
+            "forced_result": None,
             "failure_detected": None,
             "done_action_seen_at": 0.0,
             "done_action_step": 0,
@@ -793,7 +795,7 @@ class PublishService:
                     publish_guard["confirm_publish_clicked"] = True
                     logger.info("[PublishGuard] confirm_publish_clicked")
 
-                if publish_guard["confirm_publish_clicked"]:
+                if publish_guard["confirm_publish_clicked"] and not publish_guard["post_confirm_lookup_done"]:
                     failure = await self._detect_publish_failure(session, logger)
                     if failure.get("failed"):
                         publish_guard["failure_detected"] = failure
@@ -813,6 +815,33 @@ class PublishService:
                             logger,
                         )
                         agent_instance.state.stopped = True
+                        return
+
+                    publish_guard["post_confirm_lookup_done"] = True
+                    logger.info(
+                        "[PublishGuard] post_confirm_lookup_start title=%r wait_before_lookup=6s",
+                        title[:80],
+                    )
+                    await asyncio.sleep(6)
+                    lookup_start = time.perf_counter()
+                    lookup_result = await self._lookup_published_article_url(session, title, logger)
+                    lookup_elapsed = time.perf_counter() - lookup_start
+                    forced_result = self._build_post_confirm_lookup_result(lookup_result)
+                    publish_guard["forced_result"] = forced_result
+                    if forced_result["success"]:
+                        logger.info(
+                            "[PublishGuard] post_confirm_lookup_found duration=%.2fs article_url=%s",
+                            lookup_elapsed,
+                            forced_result.get("article_url", ""),
+                        )
+                    else:
+                        logger.warning(
+                            "[PublishGuard] post_confirm_lookup_miss duration=%.2fs reason=%r",
+                            lookup_elapsed,
+                            forced_result.get("failure_reason", ""),
+                        )
+                    logger.info("[PublishGuard] stop_after_confirm_lookup")
+                    agent_instance.state.stopped = True
             except Exception as exc:
                 logger.warning(f"[PublishGuard] step_end detect failed: {exc}")
 
@@ -836,6 +865,8 @@ class PublishService:
             logger=logger,
             detected_failure=publish_guard["failure_detected"],
         )
+        if publish_guard.get("forced_result"):
+            result.update(publish_guard["forced_result"])
         self._log_final_summary(publish_guard, result, logger, trace_summary=trace_summary)
         return result
 
@@ -1555,6 +1586,27 @@ class PublishService:
             result["failure_reason"] = detected_failure.get("matched_text", "") or detected_failure.get("signal", "")
 
         return result
+
+    @staticmethod
+    def _build_post_confirm_lookup_result(lookup_result: dict) -> dict:
+        article_url = (lookup_result or {}).get("article_url", "") or ""
+        if (lookup_result or {}).get("found") and article_url:
+            return {
+                "success": True,
+                "article_url": article_url,
+                "account": "",
+                "failure_reason": "",
+                "publish_signal": "post_confirm_lookup_found",
+            }
+
+        reason = (lookup_result or {}).get("reason", "") or "post_confirm_lookup_miss"
+        return {
+            "success": False,
+            "article_url": "",
+            "account": "",
+            "failure_reason": reason,
+            "publish_signal": "post_confirm_lookup_miss",
+        }
 
     def _extract_article_url_from_text(self, text: str) -> str:
         urls = re.findall(r"https?://[^\s<>\"'，。；、)）\]]+", text or "")

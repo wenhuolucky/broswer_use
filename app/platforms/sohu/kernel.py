@@ -27,6 +27,22 @@ class AutoSohuPublishService(PublishService):
     def _account_id(self) -> str:
         return self.account_id
 
+    def _did_execute_confirm_publish(self, history_item) -> bool:
+        if super()._did_execute_confirm_publish(history_item):
+            return True
+        for text in self._iter_history_result_texts(history_item):
+            normalized_text = text or ""
+            if not normalized_text or not self._looks_like_click_result(normalized_text):
+                continue
+            if (
+                "button '发布'" in normalized_text
+                or 'button "发布"' in normalized_text
+                or "按钮“发布”" in normalized_text
+                or "按钮'发布'" in normalized_text
+            ):
+                return True
+        return False
+
     async def _open_latest_article_from_articles_page(self, session, title: str, logger) -> dict:
         page = await session.get_current_page()
         if page is None:

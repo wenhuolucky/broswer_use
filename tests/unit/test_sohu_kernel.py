@@ -5,6 +5,30 @@ from __future__ import annotations
 from app.platforms.sohu.kernel import AutoSohuPublishService
 
 
+class TestSohuPublishActionDetection:
+    def test_detects_final_publish_click(self) -> None:
+        class Result:
+            extracted_content = "Clicked button '发布'"
+            long_term_memory = ""
+            error = ""
+
+        class HistoryItem:
+            result = [Result()]
+
+        assert AutoSohuPublishService()._did_execute_confirm_publish(HistoryItem())
+
+    def test_does_not_treat_navigation_to_publish_entry_as_final_publish(self) -> None:
+        class Result:
+            extracted_content = "Clicked link '发布文章'"
+            long_term_memory = ""
+            error = ""
+
+        class HistoryItem:
+            result = [Result()]
+
+        assert not AutoSohuPublishService()._did_execute_confirm_publish(HistoryItem())
+
+
 class TestSohuArticleLookup:
     async def test_opens_sohu_content_management_first_page(self, monkeypatch) -> None:
         async def no_sleep(_seconds):
