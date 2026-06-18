@@ -11,6 +11,7 @@ class AutoToutiaoPublishService(PublishService):
 
     article_lookup_attempts = 3
     article_lookup_retry_delay_seconds = 5
+    article_candidate_poll_seconds = 8
 
     def __init__(self):
         super().__init__()
@@ -100,7 +101,7 @@ class AutoToutiaoPublishService(PublishService):
                 "[PublishGuard] waiting for .article-card, /item/, or preview links to render... "
                 f"attempt={attempt}"
             )
-        for _ in range(20):
+        for _ in range(self.article_candidate_poll_seconds):
             article_count = await page.evaluate(
                 """() => {
                     const cards = document.querySelectorAll('.article-card').length;
@@ -119,8 +120,8 @@ class AutoToutiaoPublishService(PublishService):
             await asyncio.sleep(1)
         if logger:
             logger.warning(
-                "[PublishGuard] work manage did not render .article-card, /item/, or preview links within 20s "
-                f"| attempt={attempt}"
+                "[PublishGuard] work manage did not render .article-card, /item/, or preview links "
+                f"within {self.article_candidate_poll_seconds}s | attempt={attempt}"
             )
         return 0
 

@@ -29,6 +29,32 @@ class TestToutiaoArticleUrlAccountId:
         assert ToutiaoPlatform().article_url_account_id({"account_number": "x"}) == ""
 
 
+class TestToutiaoPrompt:
+    def test_plain_text_prompt_avoids_category_scroll_loop(self) -> None:
+        prompt = ToutiaoPlatform().get_agent_prompt(
+            title="测试标题",
+            content="测试正文",
+            cover_instruction="封面设置：不需要手动设置封面。",
+            body_image_instruction="",
+            is_markdown=False,
+        )
+
+        assert "如果页面没有明确提示分类必填，不要为了寻找分类反复滚动" in prompt
+        assert "不要因为找不到分类而阻塞发布" in prompt
+
+    def test_plain_text_prompt_warns_not_to_click_article_preview_for_cover(self) -> None:
+        prompt = ToutiaoPlatform().get_agent_prompt(
+            title="测试标题",
+            content="测试正文",
+            cover_instruction="设置封面图片，严格按顺序执行：\n- 在封面设置区域找到并点击加号图标。",
+            body_image_instruction="",
+            is_markdown=False,
+        )
+
+        assert "不要点击文章正文区域的“预览”按钮" in prompt
+        assert "上传后先确认图片缩略图已出现或“确定”按钮已可点击" in prompt
+
+
 class TestPlatformTitleMatching:
     def test_ignores_internal_whitespace_when_matching_toutiao_article_title(self) -> None:
         assert PlatformConfig.title_matches(

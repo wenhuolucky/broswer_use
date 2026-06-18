@@ -685,6 +685,8 @@ class PublishService:
         publish_guard = {
             "confirm_publish_clicked": False,
             "failure_detected": None,
+            "done_action_seen_at": 0.0,
+            "done_action_step": 0,
             "cover_action_count": 0,
             "cover_loop_exceeded": False,
             "body_paste_attempts": 0,
@@ -740,6 +742,10 @@ class PublishService:
 
                 # 跟踪正文粘贴尝试
                 action_summary = self._extract_action_summary(last_item)
+                if self._action_summary_is_done(action_summary) and not publish_guard["done_action_seen_at"]:
+                    publish_guard["done_action_seen_at"] = time.perf_counter()
+                    publish_guard["done_action_step"] = step_number
+                    logger.info("[AgentRun] done_action_seen step=%s", step_number)
                 if action_summary and self._looks_like_paste_action(action_summary):
                     publish_guard["body_paste_attempts"] += 1
                     editor_len_after = publish_guard["last_editor_text_len"]
@@ -810,7 +816,20 @@ class PublishService:
             except Exception as exc:
                 logger.warning(f"[PublishGuard] step_end detect failed: {exc}")
 
+        agent_run_start = time.perf_counter()
+        logger.info("[AgentRun] start max_steps=80")
         history = await agent.run(max_steps=80, on_step_end=on_step_end)
+        agent_run_elapsed = time.perf_counter() - agent_run_start
+        if publish_guard["done_action_seen_at"]:
+            done_return_elapsed = time.perf_counter() - publish_guard["done_action_seen_at"]
+            logger.info(
+                "[AgentRun] returned duration=%.2fs done_to_return=%.2fs done_step=%s",
+                agent_run_elapsed,
+                done_return_elapsed,
+                publish_guard["done_action_step"],
+            )
+        else:
+            logger.info("[AgentRun] returned duration=%.2fs done_seen=false", agent_run_elapsed)
         result = self._parse_agent_outcome(
             history,
             tracker=tracker,
@@ -915,10 +934,13 @@ class PublishService:
                 "   - 如果当前是三封面、五封面或其它多封面模式，必须切回单封面。\n"
                 "   - 不要选择三封面或五封面。\n"
                 "   - 在封面设置区域找到并点击加号图标。\n"
+                "   - 不要点击文章正文区域的“预览”按钮，也不要点击页面底部的“预览并发布”。\n"
                 "   - 在弹出的对话框中选择本地上传。\n"
                 "   - 使用 file input 上传下面这个本地文件：\n"
                 f"     {cover_path}\n"
-                "   - 等待上传完成，并确认页面上显示的是单封面预览。\n"
+                "   - 本地上传后图片可能需要处理时间；上传后先确认图片缩略图已出现或“确定”按钮已可点击。\n"
+                "   - 如果按钮暂不可点，等待 2 秒后重新检查；最多检查 3 次，不要无限等待。\n"
+                "   - 确认页面上显示的是单封面预览后，再点击“确定”。\n"
             )
         else:
             cover_instruction = (
@@ -1108,6 +1130,15 @@ class PublishService:
             return str(action)[:300]
         except Exception:
             return ""
+
+    @staticmethod
+    def _action_summary_is_done(action_summary: str) -> bool:
+        normalized = str(action_summary or "").strip().lower()
+        return bool(
+            normalized == "done"
+            or "doneactionmodel" in normalized
+            or "doneaction(" in normalized
+        )
 
     @staticmethod
     def _extract_result_summary(history_item) -> str:
