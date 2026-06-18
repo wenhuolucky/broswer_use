@@ -38,7 +38,8 @@ class ToutiaoPlatform(PlatformConfig):
 
 发布后 URL 获取硬性规则：
 - 点击“确认发布”后，不要直接调用 done。
-- 必须调用工具 `get_published_article_url`，参数 title="{title}"。
+- 点击“确认发布”后不要再次点击“预览并发布”或“确认发布”，即使页面停留在发布页、loading、骨架屏或没有成功提示。
+- 点击“确认发布”后，直接调用 get_published_article_url 工具，参数 title="{title}"。
 - 该工具会在内部最多查询 3 次作品列表。
 - 如果工具返回 found=true，必须用工具返回的 article_url 调用 done，并返回 success=true。
 - found=true 时 article_url 不允许为空，必须原样填写工具返回的 article_url。
@@ -53,6 +54,12 @@ class ToutiaoPlatform(PlatformConfig):
 - 遇到不可恢复问题时不要重试，立即调用 done 返回失败 JSON。不可恢复问题包括：账号被禁言、账号异常、账号无发布权限、登录失效、需要重新登录、验证码/风控验证、内容违规/审核拦截、平台明确提示禁止发布、网络长时间不可用。
 - 如果页面异常回到首页、登录页、发布页初始状态，且没有明确的“发布成功/提交成功/文章已发布”证据，不要认为已经发布成功；先尝试恢复到当前步骤，最多 2 次，仍无法确认则返回失败。
 - 不要因为已经点击“确认发布”就直接认为成功。只有看到明确成功提示、文章管理页出现同标题文章、或拿到有效文章 URL，才返回 success=true。
+- 如果页面没有明确提示分类必填，不要为了寻找分类反复滚动；不要因为找不到分类而阻塞发布。
+- 如果点击“预览并发布”后页面明确提示分类/字段必填，再按页面提示补齐；没有提示时继续确认发布。
+- 处理封面时，不要点击文章正文区域的“预览”按钮；只有进入发布前最终确认时才点击“预览并发布”。
+- 本地上传封面后，上传后先确认图片缩略图已出现或“确定”按钮已可点击；如果仍在上传中，等待 2 秒后重查，最多 3 次。
+- 输入标题必须使用真实点击标题输入框后的 input/type/paste/send_keys 操作，不要用 evaluate 或直接设置 textarea.value 作为标题输入成功依据。
+- 点击“预览并发布”前，必须确认标题计数正常且页面没有“标题不能为空”或“还需输入”提示。
 - 如果看到明确失败提示，failure_reason 必须尽量使用页面原文；如果没有页面原文，再用简短中文总结原因。
 - done 返回必须是合法 JSON 字符串，格式为：
   {"success": false, "account_name": "已读取到则填写", "article_url": "", "failure_reason": "失败原因"}
@@ -115,9 +122,9 @@ async (htmlContent) => {{
 11. 如果第 8 步后正文完全没有进入编辑器，返回：`failure_reason="richtext_paste_failed"`。
 12. 绝对不要使用 `innerHTML` 或任何 DOM 注入方式伪造粘贴成功。
 13. {cover_instruction.strip()}
-14. 检查分类等必填项。
+14. 只有页面明确显示分类等字段必填时才补齐；如果没有明确必填提示，不要反复滚动寻找分类。
 15. 点击“预览并发布”，再点击“确认发布”。
-16. 点击“确认发布”后不要立即假定成功；等待并确认出现明确成功证据。确认成功后调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
+16. 点击“确认发布”后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
     {{"success": true, "account_name": "步骤3读到的账号名", "article_url": "工具返回的 article_url", "failure_reason": ""}}
 
 完整 HTML 长度：{html_length} 字符
@@ -142,9 +149,9 @@ async (htmlContent) => {{
 4. 输入标题："{title}"
 5. 找到正文编辑器，粘贴或输入正文内容。
 6. {cover_instruction.strip()}
-7. 完成分类等必填项。
+7. 只有页面明确显示分类等字段必填时才补齐；如果没有明确必填提示，不要反复滚动寻找分类。
 8. 点击“预览并发布”，再点击“确认发布”。
-9. 点击“确认发布”后不要立即假定成功；等待并确认出现明确成功证据。确认成功后调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
+9. 点击“确认发布”后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
    {{"success": true, "account_name": "步骤2读到的账号名", "article_url": "工具返回的 article_url", "failure_reason": ""}}
 
 正文长度：{content_length} 字符
@@ -165,8 +172,8 @@ async (htmlContent) => {{
 {content}
 </content>
 6. {cover_instruction.strip()}
-7. 完成分类等必填项。
+7. 只有页面明确显示分类等字段必填时才补齐；如果没有明确必填提示，不要反复滚动寻找分类。
 8. 点击“预览并发布”，再点击“确认发布”。
-9. 点击“确认发布”后不要立即假定成功；等待并确认出现明确成功证据。确认成功后调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
+9. 点击“确认发布”后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
    {{"success": true, "account_name": "步骤2读到的账号名", "article_url": "工具返回的 article_url", "failure_reason": ""}}
 """

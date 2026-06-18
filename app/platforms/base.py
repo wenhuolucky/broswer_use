@@ -103,3 +103,28 @@ class PlatformConfig:
         """
         compact = "".join(PlatformConfig.strip_markdown(content).split())
         return compact[:30]
+
+    @staticmethod
+    def normalize_title_for_match(text: str) -> str:
+        """Normalize platform-rendered titles for publish URL lookup.
+
+        Management pages may insert spaces into titles, especially before a
+        numeric suffix, while the requested title has no such spaces. Removing
+        all whitespace keeps matching stable across Toutiao, Sohu, and shared
+        article-list fallback logic.
+        """
+        return "".join(str(text or "").split())
+
+    @staticmethod
+    def title_matches(expected: str, actual: str) -> bool:
+        normalized_expected = PlatformConfig.normalize_title_for_match(expected)
+        normalized_actual = PlatformConfig.normalize_title_for_match(actual)
+        return bool(
+            normalized_expected
+            and normalized_actual
+            and (
+                normalized_expected == normalized_actual
+                or normalized_expected in normalized_actual
+                or normalized_actual in normalized_expected
+            )
+        )
