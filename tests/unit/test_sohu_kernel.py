@@ -6,6 +6,46 @@ from app.platforms.sohu.kernel import AutoSohuPublishService
 
 
 class TestSohuArticleLookup:
+    async def test_opens_sohu_content_management_first_page(self, monkeypatch) -> None:
+        async def no_sleep(_seconds):
+            return None
+
+        class FakePage:
+            def __init__(self):
+                self.gotos = []
+
+            async def goto(self, url: str):
+                self.gotos.append(url)
+
+            async def evaluate(self, _script: str):
+                return [
+                    {
+                        "href": "https://mp.sohu.com/mpfe/v4/contentManagement/first/page/news/articlepreview?id=666&accountId=777",
+                        "text": "把养生过成日常：真正有效的健康 001 审核中",
+                    }
+                ]
+
+        class FakeSession:
+            def __init__(self, page):
+                self.page = page
+
+            async def get_current_page(self):
+                return self.page
+
+        page = FakePage()
+        service = AutoSohuPublishService(account_id="999")
+        monkeypatch.setattr("app.platforms.sohu.kernel.asyncio.sleep", no_sleep)
+
+        result = await service._open_latest_article_from_articles_page(
+            FakeSession(page),
+            "把养生过成日常：真正有效的健康001",
+            logger=None,
+        )
+
+        assert page.gotos == ["https://mp.sohu.com/mpfe/v4/contentManagement/first/page"]
+        assert result["matched"] is True
+        assert result["article_url"] == "https://www.sohu.com/a/666_999"
+
     def test_selects_candidate_when_platform_inserts_title_whitespace(self) -> None:
         service = AutoSohuPublishService(account_id="999")
 

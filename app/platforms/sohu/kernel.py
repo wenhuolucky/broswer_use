@@ -32,7 +32,7 @@ class AutoSohuPublishService(PublishService):
         if page is None:
             return {"matched": False, "article_url": "", "detail_title": ""}
 
-        articles_url = "https://mp.sohu.com/mpfe/v4/contentManagement"
+        articles_url = "https://mp.sohu.com/mpfe/v4/contentManagement/first/page"
         expected_title = (title or "").strip()
 
         for attempt in range(1, self.article_lookup_attempts + 1):
