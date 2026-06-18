@@ -29,6 +29,26 @@ class TestToutiaoArticleUrlAccountId:
         assert ToutiaoPlatform().article_url_account_id({"account_number": "x"}) == ""
 
 
+class TestPlatformTitleMatching:
+    def test_ignores_internal_whitespace_when_matching_toutiao_article_title(self) -> None:
+        assert PlatformConfig.title_matches(
+            "把养生过成日常：真正有效的健康001",
+            "把养生过成日常：真正有效的健康 001 06-18 10:27 审核中 修改 删除作品",
+        )
+
+    def test_ignores_internal_whitespace_when_matching_sohu_article_title(self) -> None:
+        assert PlatformConfig.title_matches(
+            "把养生过成日常：真正有效的健康001",
+            "把养生过成日常：真正有效的健康 001 已发布 预览 修改",
+        )
+
+    def test_does_not_match_unrelated_article_title(self) -> None:
+        assert not PlatformConfig.title_matches(
+            "把养生过成日常：真正有效的健康001",
+            "完全不同的文章标题 已发布 预览 修改",
+        )
+
+
 class TestSohuHasLoginCookie:
     """回归：搜狐登录页一加载就种匿名 cookie（SUV），不能被当成已登录，
     否则刚打开登录页、还没登录就被自动绑定（channel 直接变 bound）。"""

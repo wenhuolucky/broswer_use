@@ -75,7 +75,10 @@ class SohuPlatform(PlatformConfig):
 - 必须获取真实 URL，不要编造 URL。
 - 可接受的 URL 包括：
   1. https://mp.sohu.com/h5/v2/newsPreview?id=...&type=article
-  2. https://m.sohu.com/a/...
+  2. https://mp.sohu.com/mpfe/v4/contentManagement/.../news/articlepreview?id=...&accountId=...
+  3. https://m.sohu.com/a/...
+  4. https://www.sohu.com/a/...
+- 如果发布成功页没有直接显示 URL，必须调用工具 `get_published_article_url(title="{title}")` 回查作品列表；found=true 时使用工具返回的 article_url。
 - 如果只看到提交审核成功但没有拿到 URL，必须返回 success=false。
 - 搜狐号编辑器对 Ctrl+V 粘贴富文本友好，标题、加粗、列表、链接、图片都会自动渲染。
 - 本次正文导入只允许一条路径：先写入浏览器剪贴板，再执行 Ctrl+V 粘贴。
@@ -152,8 +155,8 @@ async (htmlContent) => {{
 13. 完成分类等必填项。摘要可以从正文前 80 到 120 字生成。
 14. 点击"发布"。
 15. 发布后确认出现提交审核、审核中或发布成功信号。
-16. 获取文章预览链接或移动端文章链接。
-17. 拿到 URL 后，调用 done 返回合法 JSON 字符串：
+16. 获取文章预览链接或移动端文章链接；如果页面没有直接给 URL，调用工具 `get_published_article_url(title="{title}")` 回查同标题文章。
+17. 拿到 URL（包括工具返回的 article_url）后，调用 done 返回合法 JSON 字符串：
     {{"success": true, "account_name": "步骤3读到的账号名", "article_url": "拿到的搜狐文章URL", "failure_reason": "", "publish_signal": "submitted_for_review"}}
 18. 如果没有拿到 URL，调用 done 返回：
     {{"success": false, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": "搜狐号提交审核成功，但未获取到文章 URL", "publish_signal": ""}}
@@ -186,7 +189,10 @@ async (htmlContent) => {{
 - 必须获取真实 URL，不要编造 URL。
 - 可接受的 URL 包括：
   1. https://mp.sohu.com/h5/v2/newsPreview?id=...&type=article
-  2. https://m.sohu.com/a/...
+  2. https://mp.sohu.com/mpfe/v4/contentManagement/.../news/articlepreview?id=...&accountId=...
+  3. https://m.sohu.com/a/...
+  4. https://www.sohu.com/a/...
+- 如果发布成功页没有直接显示 URL，必须调用工具 `get_published_article_url(title="{title}")` 回查作品列表；found=true 时使用工具返回的 article_url。
 - 如果只看到提交审核成功但没有拿到 URL，必须返回 success=false。
 - 本次系统没有提供富文本 HTML。只能使用纯文本写入正文。
 - 不要把 HTML 源码写入搜狐号编辑器。
@@ -237,8 +243,8 @@ Agent 执行规则：
 10. 完成分类等必填项。摘要可以从正文前 80 到 120 字生成。
 11. 点击"发布"。
 12. 发布后确认出现提交审核、审核中或发布成功信号。
-13. 获取文章预览链接或移动端文章链接。
-14. 拿到 URL 后，调用 done 返回合法 JSON 字符串：
+13. 获取文章预览链接或移动端文章链接；如果页面没有直接给 URL，调用工具 `get_published_article_url(title="{title}")` 回查同标题文章。
+14. 拿到 URL（包括工具返回的 article_url）后，调用 done 返回合法 JSON 字符串：
     {{"success": true, "account_name": "步骤3读到的账号名", "article_url": "拿到的搜狐文章URL", "failure_reason": "", "publish_signal": "submitted_for_review"}}
 15. 如果没有拿到 URL，调用 done 返回：
     {{"success": false, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": "搜狐号提交审核成功，但未获取到文章 URL", "publish_signal": ""}}
@@ -276,4 +282,3 @@ Agent 执行规则：
 - 任何情况下都必须保持**单封面**，不要选三封面或五封面。
 - 上面 cover_instruction 中"本地上传"、"素材库 fallback"、"file input 上传"等 Toutiao 默认文案**不适用搜狐号**，必须按本节走"正文图片 + 第一张 + 立刻确认"。
 """
-

@@ -255,6 +255,4 @@ class AutoToutiaoPublishService(PublishService):
         return "/profile_v4/graphic/preview" in (url or "") and "pgc_id=" in (url or "")
 
     def _title_matches(self, expected: str, actual: str) -> bool:
-        return bool(expected and actual and (
-            expected == actual or expected in actual or actual in expected
-        ))
+        return self._platform().title_matches(expected, actual)

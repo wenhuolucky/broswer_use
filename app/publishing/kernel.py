@@ -1341,13 +1341,7 @@ class PublishService:
         if "/item/" in selected_href:
             normalized_expected = (title or "").strip()
             normalized_actual = selected_text
-            matched = bool(
-                normalized_expected and normalized_actual and (
-                    normalized_expected == normalized_actual
-                    or normalized_expected in normalized_actual
-                    or normalized_actual in normalized_expected
-                )
-            )
+            matched = self._platform().title_matches(normalized_expected, normalized_actual)
             if logger:
                 logger.info(
                     "[PublishGuard] article URL extracted from href: "
@@ -1402,14 +1396,8 @@ class PublishService:
 
         normalized_expected = (title or "").strip()
         normalized_actual = (detail_title or "").strip()
-        # 放宽匹配：精确相等或双向子串包含
-        matched = bool(
-            normalized_expected and normalized_actual and (
-                normalized_expected == normalized_actual
-                or normalized_expected in normalized_actual
-                or normalized_actual in normalized_expected
-            )
-        )
+        # 放宽匹配：忽略平台列表页插入的空白，并允许双向子串包含。
+        matched = self._platform().title_matches(normalized_expected, normalized_actual)
 
         if logger:
             logger.info(
