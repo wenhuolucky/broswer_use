@@ -19,6 +19,7 @@ from app.publishing.tools.body_writer import (
 def test_plain_text_clipboard_js_uses_clipboard_without_dom_body_injection() -> None:
     script = build_clipboard_text_js()
 
+    assert script.strip().startswith("(...args) =>")
     assert "navigator.clipboard.writeText" in script
     assert "document.execCommand('copy')" in script
     assert ".innerHTML" not in script
@@ -28,6 +29,7 @@ def test_plain_text_clipboard_js_uses_clipboard_without_dom_body_injection() -> 
 def test_rich_html_clipboard_js_uses_clipboard_item_without_editor_injection() -> None:
     script = build_clipboard_html_js()
 
+    assert script.strip().startswith("(...args) =>")
     assert "ClipboardItem" in script
     assert "'text/html'" in script
     assert "'text/plain'" in script
@@ -148,6 +150,55 @@ async def test_body_writer_accepts_json_string_evaluate_results() -> None:
     assert result["ok"] is True
     assert result["method"] == "navigator.clipboard.writeText"
     assert result["editor_text_length"] == len(expected_text.replace(" ", ""))
+
+
+@pytest.mark.asyncio
+async def test_body_writer_uses_browser_use_compatible_parameterized_evaluate_scripts() -> None:
+    expected_text = "complete body text " * 20
+
+    class FakeKeyboard:
+        async def press(self, _keys):
+            return None
+
+    class FakePage:
+        keyboard = FakeKeyboard()
+
+        def __init__(self):
+            self.calls = 0
+
+        async def evaluate(self, script, arg=None):
+            self.calls += 1
+            if arg is not None and not script.strip().startswith("(...args) =>"):
+                raise ValueError(f"JavaScript code must start with (...args) => format. Got: {script.strip()[:30]}")
+            if self.calls == 1:
+                return {"ok": True, "reason": ""}
+            if self.calls == 2:
+                return {"ok": True, "method": "navigator.clipboard.writeText"}
+            return {
+                "editor_text_length": len(expected_text),
+                "editor_source": "contenteditable",
+                "probe_found": True,
+                "preview": expected_text[:120],
+                "text": expected_text,
+            }
+
+    class FakeSession:
+        async def get_current_page(self):
+            return FakePage()
+
+    writer = BodyWriter(
+        BodyWritePayload(
+            plain_text=expected_text,
+            rich_html="",
+            body_probe=expected_text[:30],
+            platform_name="toutiao",
+        )
+    )
+
+    result = await writer.paste_plain_text_body(FakeSession())
+
+    assert result["ok"] is True
+    assert result["method"] == "navigator.clipboard.writeText"
 
 
 @pytest.mark.asyncio

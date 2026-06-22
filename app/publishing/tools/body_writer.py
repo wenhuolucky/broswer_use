@@ -139,11 +139,14 @@ def normalize_evaluate_result(value: Any) -> dict | None:
 
 def build_clipboard_text_js() -> str:
     return r"""
-async (bodyText) => {
+(...args) => {
+  const bodyText = args[0] || '';
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(bodyText);
-      return { ok: true, method: 'navigator.clipboard.writeText' };
+      return navigator.clipboard.writeText(bodyText).then(
+        () => ({ ok: true, method: 'navigator.clipboard.writeText' }),
+        () => ({ ok: false, method: 'navigator.clipboard.writeText' })
+      );
     }
   } catch (error) {}
   try {
@@ -166,7 +169,8 @@ async (bodyText) => {
 
 def build_clipboard_html_js() -> str:
     return r"""
-async (payload) => {
+(...args) => {
+  const payload = args[0] || {};
   const htmlContent = payload.html || '';
   const plainText = payload.text || '';
   try {
@@ -175,8 +179,10 @@ async (payload) => {
         'text/html': new Blob([htmlContent], { type: 'text/html' }),
         'text/plain': new Blob([plainText], { type: 'text/plain' })
       });
-      await navigator.clipboard.write([item]);
-      return { ok: true, method: 'ClipboardItem' };
+      return navigator.clipboard.write([item]).then(
+        () => ({ ok: true, method: 'ClipboardItem' }),
+        () => ({ ok: false, method: 'ClipboardItem' })
+      );
     }
   } catch (error) {}
   try {
@@ -229,8 +235,8 @@ FOCUS_EDITOR_JS = r"""
 
 
 READ_EDITOR_STATE_JS = r"""
-(contentProbe) => {
-  const probe = contentProbe || '';
+(...args) => {
+  const probe = args[0] || '';
   let best = null;
   const editables = Array.from(document.querySelectorAll('[contenteditable="true"], textarea'));
   for (const node of editables) {
