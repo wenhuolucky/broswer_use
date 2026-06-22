@@ -44,19 +44,107 @@ class SohuPlatform(PlatformConfig):
         body = self.strip_markdown(content)
         body_probe = self.body_probe(content)
         if is_markdown and rich_html:
-            return self._rich_html_ready_prompt(
+            return self._tool_rich_html_prompt(
                 title=title,
+                body=body,
                 body_probe=body_probe,
                 cover_instruction=cover_instruction,
                 rich_html=rich_html,
             )
-        return self._plain_text_prompt(
+        return self._tool_plain_text_prompt(
             title=title,
             body=body,
             content=content,
             body_probe=body_probe,
             cover_instruction=cover_instruction,
         )
+
+    def _tool_rich_html_prompt(
+        self,
+        title: str,
+        body: str,
+        body_probe: str,
+        cover_instruction: str,
+        rich_html: str,
+    ) -> str:
+        return f"""请在搜狐号后台发布一篇文章。
+关键规则：
+- 平台是搜狐号，不是今日头条。
+- 外部接口要求成功结果必须包含 article_url。
+- 必须获取真实 URL，不要编造 URL。
+- 如果发布成功页面没有直接显示 URL，必须调用工具 `get_published_article_url(title="{title}")` 回查作品列表。
+- 当前正文已由系统转换为富文本 HTML，但 HTML 内容由后端工具持有，prompt 中不再内嵌完整 HTML。
+- 找到搜狐号正文富文本编辑器并点击聚焦后，必须调用 `paste_rich_html_body` 工具。
+- 只有工具返回 ok=true 且 probe_found=true，才允许继续“下一步”、封面设置或发布。
+- 如果工具返回 ok=false，最多重新聚焦编辑器后再调用 1 次；仍失败则调用 done 返回 success=false，并把工具 reason 写入 failure_reason。
+- 禁止使用 editor.innerHTML、DOM 注入、insertHTML、直接替换节点、直接设置正文 DOM 等方式写入正文。
+- 正文探针：{body_probe}
+
+Agent 执行规则：
+- 同一个可恢复问题最多尝试 2 次；第 2 次仍失败时，停止并调用 done 返回失败 JSON。
+- 不要因为已经点击"发布"就直接认为成功。只有看到明确成功信号或拿到有效文章 URL，才返回 success=true。
+- done 返回必须是合法 JSON 字符串。
+
+执行步骤：
+1. 打开搜狐号后台：{self.home_url}
+2. 确认当前账号已登录；如果未登录，停止并返回失败。
+3. 读取当前账号显示名，记为 account_name。
+4. 进入文章发布入口。
+5. 填写标题：{title}
+6. 聚焦搜狐号正文编辑器，调用 `paste_rich_html_body`，确认返回 ok=true 且 probe_found=true。
+7. 如果页面需要点击"下一步"，点击进入发布设置页。
+8. {cover_instruction.strip()}
+{self._sohu_cover_rules(cover_instruction)}
+9. 完成分类等必填项。摘要可以从正文前 80 到 120 字生成。
+10. 点击"发布"。
+11. 发布后确认出现提交审核、审核中或发布成功信号。
+12. 获取文章预览链接或移动端文章链接；如果页面没有直接给 URL，调用工具 `get_published_article_url(title="{title}")` 回查同标题文章。
+13. 拿到 URL 后调用 done 返回 success=true；没有拿到 URL 时返回 success=false。
+"""
+
+    def _tool_plain_text_prompt(
+        self,
+        title: str,
+        body: str,
+        content: str,
+        body_probe: str,
+        cover_instruction: str,
+    ) -> str:
+        return f"""请在搜狐号后台发布一篇文章。
+关键规则：
+- 平台是搜狐号，不是今日头条。
+- 外部接口要求成功结果必须包含 article_url。
+- 必须获取真实 URL，不要编造 URL。
+- 如果发布成功页面没有直接显示 URL，必须调用工具 `get_published_article_url(title="{title}")` 回查作品列表。
+- 当前正文是普通文本，正文内容由后端工具持有，优先使用确定性的工具写入。
+- 找到搜狐号正文编辑器并点击聚焦后，必须调用 `paste_plain_text_body` 工具。
+- 只有工具返回 ok=true 且 probe_found=true，才允许继续“下一步”、封面设置或发布。
+- 如果工具返回 ok=false，最多重新聚焦编辑器后再调用 1 次；仍失败时再使用 input/type 方式写入正文。
+- 使用 input/type 回退后仍必须确认正文探针已出现。
+- 禁止使用 editor.innerHTML、DOM 注入、insertText、直接替换节点、直接设置正文 DOM 等方式写入正文。
+- 正文探针：{body_probe}
+
+Agent 执行规则：
+- 同一个可恢复问题最多尝试 2 次；第 2 次仍失败时，停止并调用 done 返回失败 JSON。
+- 不要因为已经点击"发布"就直接认为成功。只有看到明确成功信号或拿到有效文章 URL，才返回 success=true。
+- done 返回必须是合法 JSON 字符串。
+
+执行步骤：
+1. 打开搜狐号后台：{self.home_url}
+2. 确认当前账号已登录；如果未登录，停止并返回失败。
+3. 读取当前账号显示名，记为 account_name。
+4. 进入文章发布入口。
+5. 填写标题：{title}
+6. 聚焦搜狐号正文编辑器，调用 `paste_plain_text_body`，确认返回 ok=true 且 probe_found=true。
+7. 如果页面需要点击"下一步"，点击进入发布设置页。
+8. {cover_instruction.strip()}
+{self._sohu_cover_rules(cover_instruction)}
+9. 完成分类等必填项。摘要可以从正文前 80 到 120 字生成。
+10. 点击"发布"。
+11. 发布后确认出现提交审核、审核中或发布成功信号。
+12. 获取文章预览链接或移动端文章链接；如果页面没有直接给 URL，调用工具 `get_published_article_url(title="{title}")` 回查同标题文章。
+13. 拿到 URL 后调用 done 返回 success=true；没有拿到 URL 时返回 success=false。
+"""
 
     def _rich_html_ready_prompt(
         self,

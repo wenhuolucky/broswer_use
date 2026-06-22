@@ -28,10 +28,67 @@ class ToutiaoPlatform(PlatformConfig):
         rich_html: str = None,
     ) -> str:
         if is_markdown and rich_html:
-            return self._with_url_tool_rule(self._rich_html_ready_prompt(title, cover_instruction, rich_html), title)
+            return self._with_url_tool_rule(
+                self._tool_rich_html_prompt(title, content, cover_instruction, rich_html),
+                title,
+            )
         if is_markdown:
-            return self._with_url_tool_rule(self._markdown_prompt(title, content, cover_instruction), title)
-        return self._with_url_tool_rule(self._plain_text_prompt(title, content, cover_instruction), title)
+            return self._with_url_tool_rule(self._tool_plain_text_prompt(title, content, cover_instruction), title)
+        return self._with_url_tool_rule(self._tool_plain_text_prompt(title, content, cover_instruction), title)
+
+    def _tool_rich_html_prompt(self, title: str, content: str, cover_instruction: str, rich_html: str) -> str:
+        body_probe = self.body_probe(content)
+        return f"""你在头条号后台操作。请按顺序发布文章：
+
+{self._agent_recovery_rules()}
+
+正文写入规则：
+- 当前正文已由系统转换为富文本 HTML，但 HTML 内容由后端工具持有，prompt 中不再内嵌完整 HTML。
+- 找到头条号正文富文本编辑器并点击聚焦后，必须调用 `paste_rich_html_body` 工具。
+- 只有工具返回 ok=true 且 probe_found=true，才允许继续封面、预览或发布。
+- 如果工具返回 ok=false，最多重新聚焦编辑器后再调用 1 次；仍失败则调用 done 返回 success=false，并把工具 reason 写入 failure_reason。
+- 禁止使用 editor.innerHTML、DOM 注入、直接替换节点、直接设置正文 DOM 等方式伪造正文写入成功。
+- 正文探针/姝ｆ枃鎺㈤拡：{body_probe}
+
+执行步骤：
+1. 打开 {self.home_url}
+2. 确认已登录，并读取账号显示名记为 account_name。
+3. 打开发布页：{self.publish_url}
+4. 输入标题："{title}"
+5. 聚焦正文编辑器，调用 `paste_rich_html_body`，确认返回 ok=true 且 probe_found=true。
+6. {cover_instruction.strip()}
+7. 只有页面明确显示分类等字段必填时才补齐；没有明确必填提示时不要反复滚动寻找分类。
+8. 点击“预览并发布”，再点击“确认发布”。
+9. 点击“确认发布”后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done。
+"""
+
+    def _tool_plain_text_prompt(self, title: str, content: str, cover_instruction: str) -> str:
+        body_probe = self.body_probe(content)
+        return f"""你在头条号后台操作。请按顺序发布文章：
+
+{self._agent_recovery_rules()}
+
+正文写入规则：
+- 当前正文是普通文本，正文内容由后端工具持有，优先使用确定性的工具写入。
+- 找到头条号正文编辑器并点击聚焦后，必须调用 `paste_plain_text_body` 工具。
+- 只有工具返回 ok=true 且 probe_found=true，才允许继续封面、预览或发布。
+- 如果工具返回 ok=false，最多重新聚焦编辑器后再调用 1 次；仍失败时再使用 input/type 方式写入正文。
+- 使用 input/type 回退后仍必须确认正文探针已出现。
+- 禁止使用 editor.innerHTML、DOM 注入、直接替换节点、直接设置正文 DOM 等方式伪造正文写入成功。
+- 绂佹浣跨敤 editor.innerHTML；禁止 DOM 娉ㄥ叆。
+- 正文探针/姝ｆ枃鎺㈤拡：{body_probe}
+
+执行步骤：
+1. 打开 {self.home_url}
+2. 确认已登录，并读取账号显示名记为 account_name。
+3. 打开发布页：{self.publish_url}
+4. 输入标题："{title}"
+5. 聚焦正文编辑器，调用 `paste_plain_text_body`，确认返回 ok=true 且 probe_found=true。
+6. {cover_instruction.strip()}
+7. 只有页面明确显示分类等字段必填时才补齐；没有明确必填提示时不要反复滚动寻找分类。
+8. 点击“预览并发布”，再点击“确认发布”。
+9. 点击“确认发布”后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done。
+"""
 
     def _with_url_tool_rule(self, prompt: str, title: str) -> str:
         return prompt + f"""

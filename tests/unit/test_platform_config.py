@@ -77,13 +77,59 @@ class TestToutiaoPrompt:
             is_markdown=False,
         )
 
-        assert "navigator.clipboard.writeText" in prompt
-        assert 'send_keys("Control+v")' in prompt
+        assert "paste_plain_text_body" in prompt
+        assert "navigator.clipboard.writeText" not in prompt
+        assert 'send_keys("Control+v")' not in prompt
         assert "正文探针" in prompt
-        assert "粘贴失败" in prompt
+        assert "ok=false" in prompt
         assert "input/type" in prompt
         assert "禁止使用 editor.innerHTML" in prompt
         assert "DOM 注入" in prompt
+
+
+class TestToutiaoMarkdownPrompt:
+    def test_markdown_prompt_requires_rich_html_body_tool(self) -> None:
+        prompt = ToutiaoPlatform().get_agent_prompt(
+            title="markdown-title",
+            content="# Heading\n\nMarkdown body",
+            cover_instruction="cover not required",
+            body_image_instruction="",
+            is_markdown=True,
+            rich_html="<p><strong>Heading</strong></p><p>Markdown body</p>",
+        )
+
+        assert "paste_rich_html_body" in prompt
+        assert "ClipboardItem" not in prompt
+        assert "insertHTML" not in prompt
+
+
+class TestSohuPrompt:
+    def test_plain_text_prompt_requires_plain_body_tool(self) -> None:
+        prompt = SohuPlatform().get_agent_prompt(
+            title="plain-title",
+            content="plain body for probe",
+            cover_instruction="cover not required",
+            body_image_instruction="",
+            is_markdown=False,
+        )
+
+        assert "paste_plain_text_body" in prompt
+        assert "navigator.clipboard.writeText" not in prompt
+        assert "```javascript" not in prompt
+
+    def test_markdown_prompt_requires_rich_html_body_tool(self) -> None:
+        prompt = SohuPlatform().get_agent_prompt(
+            title="markdown-title",
+            content="# Heading\n\nMarkdown body",
+            cover_instruction="cover not required",
+            body_image_instruction="",
+            is_markdown=True,
+            rich_html="<p><strong>Heading</strong></p><p>Markdown body</p>",
+        )
+
+        assert "paste_rich_html_body" in prompt
+        assert "ClipboardItem" not in prompt
+        assert "```javascript" not in prompt
 
 
 class TestPlatformTitleMatching:

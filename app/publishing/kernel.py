@@ -13,6 +13,7 @@ import shutil
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
@@ -28,6 +29,16 @@ from app.publishing.agent_trace import AgentTraceState, llm_trace_line, log_step
 from app.core.request_logging import get_service_logger, setup_request_logger
 from app.remote.login import _find_free_port
 from app.utils.urls import normalize_toutiao_article_url
+
+
+@dataclass
+class PublishTaskBundle:
+    task: str
+    plain_text: str
+    rich_html: str
+    body_probe: str
+    is_markdown: bool
+    platform_name: str
 
 
 class LLMTokenTracker:
@@ -275,21 +286,26 @@ class PublishService:
                 await session.close()
                 logger.info("[Cleanup] BrowserSession 已关闭")
             if viewer_runner:
-                try:
-                    await viewer_runner.cleanup()
-                    logger.info("[Cleanup] Live viewer 已关闭")
-                except Exception:
-                    pass
+                await self._cleanup_awaitable_with_timeout(
+                    label="LiveViewer runner",
+                    awaitable_factory=viewer_runner.cleanup,
+                    timeout_seconds=3.0,
+                    logger=logger,
+                )
             if viewer_browser:
-                try:
-                    await viewer_browser.close()
-                except Exception:
-                    pass
+                await self._cleanup_awaitable_with_timeout(
+                    label="LiveViewer browser",
+                    awaitable_factory=viewer_browser.close,
+                    timeout_seconds=2.0,
+                    logger=logger,
+                )
             if viewer_playwright:
-                try:
-                    await viewer_playwright.stop()
-                except Exception:
-                    pass
+                await self._cleanup_awaitable_with_timeout(
+                    label="LiveViewer playwright",
+                    awaitable_factory=viewer_playwright.stop,
+                    timeout_seconds=2.0,
+                    logger=logger,
+                )
             if playwright:
                 await playwright.stop()
                 logger.info("[Cleanup] Playwright 已停止")
@@ -650,13 +666,14 @@ class PublishService:
 
         llm.ainvoke = tracked_ainvoke.__get__(llm, type(llm))
 
-        task = self._build_publish_task(
+        task_bundle = self._build_publish_task(
             title=title,
             content=content,
             cover_path=cover_path,
             logger=logger,
             cover_loop_exceeded=False,
         )
+        task = task_bundle.task
 
         available_files = [cover_path] if cover_path else None
 
@@ -667,7 +684,11 @@ class PublishService:
             vision_config["vision_detail_level"],
         )
 
-        controller = self._build_publish_tools(logger, original_title=title)
+        controller = self._build_publish_tools(
+            logger,
+            original_title=title,
+            body_payload=task_bundle,
+        )
         agent = Agent(
             task=task,
             llm=llm,
@@ -870,10 +891,88 @@ class PublishService:
         self._log_final_summary(publish_guard, result, logger, trace_summary=trace_summary)
         return result
 
-    def _build_publish_tools(self, logger, original_title: str = ""):
+    def _build_publish_tools(self, logger, original_title: str = "", body_payload: PublishTaskBundle | None = None):
         from browser_use import ActionResult, Controller
+        from app.publishing.tools import BodyWritePayload, BodyWriter
 
         controller = Controller()
+        writer = None
+        if body_payload:
+            writer = BodyWriter(
+                BodyWritePayload(
+                    plain_text=body_payload.plain_text,
+                    rich_html=body_payload.rich_html,
+                    body_probe=body_payload.body_probe,
+                    platform_name=body_payload.platform_name,
+                ),
+                logger=logger,
+            )
+
+        @controller.action(
+            "将本次文章正文以普通文本方式写入当前平台正文编辑器。无参数。"
+            "返回 ok=true 且 probe_found=true 后才允许继续封面、预览或发布。"
+        )
+        async def paste_plain_text_body(browser_session):
+            tool_start = time.perf_counter()
+            if writer is None:
+                result = {
+                    "ok": False,
+                    "mode": "plain_text",
+                    "method": "",
+                    "editor_text_length": 0,
+                    "probe_found": False,
+                    "reason": "body_payload_unavailable",
+                }
+            else:
+                result = await writer.paste_plain_text_body(browser_session)
+            if logger:
+                logger.info(
+                    "[AgentTool] name=paste_plain_text_body duration=%.2fs ok=%s "
+                    "method=%s probe_found=%s editor_len=%s reason=%r",
+                    time.perf_counter() - tool_start,
+                    result.get("ok"),
+                    result.get("method", ""),
+                    result.get("probe_found"),
+                    result.get("editor_text_length", 0),
+                    result.get("reason", ""),
+                )
+            return ActionResult(
+                extracted_content=json.dumps(result, ensure_ascii=False),
+                include_in_memory=True,
+            )
+
+        @controller.action(
+            "将系统已准备好的 Markdown 富文本 HTML 写入当前平台正文编辑器。无参数。"
+            "返回 ok=true 且 probe_found=true 后才允许继续封面、预览或发布。"
+        )
+        async def paste_rich_html_body(browser_session):
+            tool_start = time.perf_counter()
+            if writer is None:
+                result = {
+                    "ok": False,
+                    "mode": "rich_html",
+                    "method": "",
+                    "editor_text_length": 0,
+                    "probe_found": False,
+                    "reason": "body_payload_unavailable",
+                }
+            else:
+                result = await writer.paste_rich_html_body(browser_session)
+            if logger:
+                logger.info(
+                    "[AgentTool] name=paste_rich_html_body duration=%.2fs ok=%s "
+                    "method=%s probe_found=%s editor_len=%s reason=%r",
+                    time.perf_counter() - tool_start,
+                    result.get("ok"),
+                    result.get("method", ""),
+                    result.get("probe_found"),
+                    result.get("editor_text_length", 0),
+                    result.get("reason", ""),
+                )
+            return ActionResult(
+                extracted_content=json.dumps(result, ensure_ascii=False),
+                include_in_memory=True,
+            )
 
         @controller.action(
             "发布后调用此工具获取文章链接。输入本次发布标题 title。工具会打开作品管理页，最多查询 3 次同标题文章；"
@@ -908,6 +1007,43 @@ class PublishService:
             )
 
         return controller
+
+    @staticmethod
+    async def _cleanup_awaitable_with_timeout(
+        *,
+        label: str,
+        awaitable_factory,
+        timeout_seconds: float,
+        logger,
+    ) -> dict:
+        started = time.perf_counter()
+        if logger:
+            logger.info("[Cleanup] %s close_start timeout=%.1fs", label, timeout_seconds)
+        try:
+            await asyncio.wait_for(awaitable_factory(), timeout=timeout_seconds)
+            elapsed = time.perf_counter() - started
+            if logger:
+                logger.info("[Cleanup] %s closed duration=%.2fs", label, elapsed)
+            return {"label": label, "closed": True, "timed_out": False}
+        except asyncio.TimeoutError:
+            elapsed = time.perf_counter() - started
+            if logger:
+                logger.warning(
+                    "[Cleanup] %s close_timeout duration=%.2fs background_cleanup=true",
+                    label,
+                    elapsed,
+                )
+            return {"label": label, "closed": False, "timed_out": True}
+        except Exception as exc:
+            elapsed = time.perf_counter() - started
+            if logger:
+                logger.warning(
+                    "[Cleanup] %s close_failed duration=%.2fs error=%s",
+                    label,
+                    elapsed,
+                    exc,
+                )
+            return {"label": label, "closed": False, "timed_out": False}
 
     def _did_execute_confirm_publish(self, history_item) -> bool:
         for text in self._iter_history_result_texts(history_item):
@@ -981,6 +1117,8 @@ class PublishService:
                 "   - 不要主动去打开封面选择器或上传对话框。\n"
             )
 
+        plain_text = platform.strip_markdown(content) if is_markdown else content
+        body_probe = PlatformConfig.body_probe(content)
         task = platform.get_agent_prompt(
             title=title,
             content=content,
@@ -999,7 +1137,14 @@ class PublishService:
             else:
                 logger.info("本次没有内嵌 rich_html")
 
-        return task
+        return PublishTaskBundle(
+            task=task,
+            plain_text=plain_text,
+            rich_html=rich_html or "",
+            body_probe=body_probe,
+            is_markdown=is_markdown,
+            platform_name=getattr(platform, "name", ""),
+        )
 
     def _looks_like_cover_action(self, history_item) -> bool:
         cover_markers = (

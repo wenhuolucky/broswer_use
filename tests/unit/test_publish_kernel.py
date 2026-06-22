@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
 from app.publishing.kernel import PublishService
 
 
@@ -45,3 +49,33 @@ class TestPostConfirmLookupResult:
         assert result["article_url"] == ""
         assert result["failure_reason"] == "not_found_after_3_attempts"
         assert result["publish_signal"] == "post_confirm_lookup_miss"
+
+
+class TestCleanupWithTimeout:
+    @pytest.mark.asyncio
+    async def test_cleanup_awaitable_times_out_without_raising(self) -> None:
+        async def slow_cleanup():
+            await asyncio.sleep(0.2)
+
+        result = await PublishService._cleanup_awaitable_with_timeout(
+            label="runner",
+            awaitable_factory=slow_cleanup,
+            timeout_seconds=0.01,
+            logger=None,
+        )
+
+        assert result == {"label": "runner", "closed": False, "timed_out": True}
+
+    @pytest.mark.asyncio
+    async def test_cleanup_awaitable_reports_success(self) -> None:
+        async def fast_cleanup():
+            return None
+
+        result = await PublishService._cleanup_awaitable_with_timeout(
+            label="browser",
+            awaitable_factory=fast_cleanup,
+            timeout_seconds=0.5,
+            logger=None,
+        )
+
+        assert result == {"label": "browser", "closed": True, "timed_out": False}
