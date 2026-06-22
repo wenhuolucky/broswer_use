@@ -72,6 +72,16 @@ def build_sohu_cover_js() -> str:
       if (host && host.querySelector && host.querySelector('input[type="file"]')) return true;
       return false;
     };
+    const isCoverTriggerBlocked = (node) => {
+      if (!node) return true;
+      if (node.matches && node.matches('input[type="file"]')) return true;
+      const ownText = textOf(node);
+      const host = node.closest ? node.closest('button,a,label,div,span,li') : null;
+      const hostText = textOf(host);
+      if ((ownText + hostText).includes('本地上传')) return true;
+      if (host && host.querySelector && host.querySelector('input[type="file"]')) return true;
+      return false;
+    };
     const clickNode = async (node) => {
       node.scrollIntoView({ block: 'center', inline: 'center' });
       node.click();
@@ -81,6 +91,11 @@ def build_sohu_cover_js() -> str:
       const targets = Array.isArray(texts) ? texts : [texts];
       const nodes = allVisible(selector, root);
       return nodes.find((node) => targets.some((text) => hasText(node, text)) && !isDisabled(node) && !isUploadLike(node));
+    };
+    const findCoverTriggerByText = (texts, root = document, selector = 'button,a,span,div,li,p') => {
+      const targets = Array.isArray(texts) ? texts : [texts];
+      const nodes = allVisible(selector, root);
+      return nodes.find((node) => targets.some((text) => hasText(node, text)) && !isDisabled(node) && !isCoverTriggerBlocked(node));
     };
     const rootHasCoverTabs = (node) => {
       const text = textOf(node);
@@ -112,12 +127,18 @@ def build_sohu_cover_js() -> str:
     const openCoverDialog = async () => {
       let root = findDialogRoot();
       if (root) return root;
-      const direct = findByText(
-        ['设置封面', '选择封面', '添加封面', '封面图片'],
+      const candidateTexts = [];
+      const rememberCandidate = (node) => {
+        const value = textOf(node).replace(/\s+/g, ' ').slice(0, 40);
+        if (value && !candidateTexts.includes(value)) candidateTexts.push(value);
+      };
+      const direct = findCoverTriggerByText(
+        ['上传图片', '设置封面', '选择封面', '添加封面', '封面图片'],
         document,
         'button,a,span,div,p'
       );
       if (direct) {
+        rememberCandidate(direct);
         await clickNode(direct);
         await sleep(700);
         root = findDialogRoot();
@@ -129,7 +150,9 @@ def build_sohu_cover_js() -> str:
         const title = node.getAttribute('title') || '';
         const className = String(node.className || '');
         const marker = `${text} ${aria} ${title} ${className}`;
-        return marker.includes('封面') && !isUploadLike(node) && !isDisabled(node);
+        const looksLikeCoverTrigger = marker.includes('封面') || marker.includes('上传图片');
+        if (looksLikeCoverTrigger) rememberCandidate(node);
+        return looksLikeCoverTrigger && !isCoverTriggerBlocked(node) && !isDisabled(node);
       });
       for (const node of candidates.slice(0, 5)) {
         await clickNode(node);
@@ -137,7 +160,7 @@ def build_sohu_cover_js() -> str:
         root = findDialogRoot();
         if (root) return root;
       }
-      return null;
+      return { failed: true, candidate_texts: candidateTexts.slice(0, 8).join('|') };
     };
     const clickTab = async (root, label) => {
       const tab = findByText(label, root, 'button,a,span,div,li,p');
@@ -183,6 +206,7 @@ def build_sohu_cover_js() -> str:
     };
 
     let root = await openCoverDialog();
+    const openFailureDetail = root && root.failed ? root.candidate_texts : '';
     if (!root) {
       return {
         ok: false,
@@ -192,6 +216,17 @@ def build_sohu_cover_js() -> str:
         cover_applied: false,
         reason: 'cover_trigger_not_found',
         detail: 'cover dialog was not opened'
+      };
+    }
+    if (root.failed) {
+      return {
+        ok: false,
+        source: '',
+        selected: false,
+        confirmed: false,
+        cover_applied: false,
+        reason: 'cover_trigger_not_found',
+        detail: `cover dialog was not opened; candidate_texts=${openFailureDetail}`
       };
     }
 

@@ -145,6 +145,20 @@ class TestSohuPrompt:
         assert "不要手动点击正文图片、素材库、本地上传或确定按钮" in prompt
         assert "封面工具返回 ok=false 时最多重试 1 次" in prompt
 
+    def test_tool_prompt_requires_real_sohu_title_input_and_verification(self) -> None:
+        prompt = SohuPlatform().get_agent_prompt(
+            title="title-must-be-written",
+            content="plain body for probe",
+            cover_instruction="cover not required",
+            body_image_instruction="",
+            is_markdown=False,
+        )
+
+        assert "必须先真实点击搜狐号标题输入框" in prompt
+        assert "不要因为页面、草稿列表或历史内容中出现相似标题就跳过标题输入" in prompt
+        assert "读取标题输入框的实际值" in prompt
+        assert "搜狐号标题填写失败：实际标题与预期不符" in prompt
+
 
 class TestPlatformTitleMatching:
     def test_ignores_internal_whitespace_when_matching_toutiao_article_title(self) -> None:
