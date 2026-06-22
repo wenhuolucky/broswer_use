@@ -47,6 +47,7 @@ class ToutiaoPlatform(PlatformConfig):
 - 找到头条号正文富文本编辑器并点击聚焦后，必须调用 `paste_rich_html_body` 工具。
 - 只有工具返回 ok=true 且 probe_found=true，才允许继续封面、预览或发布。
 - 如果工具返回 ok=false，最多重新聚焦编辑器后再调用 1 次；仍失败则调用 done 返回 success=false，并把工具 reason 写入 failure_reason。
+- 禁止在正文工具失败后使用 input/type 自行输入正文，因为完整正文只在后端工具中持有。
 - 禁止使用 editor.innerHTML、DOM 注入、直接替换节点、直接设置正文 DOM 等方式伪造正文写入成功。
 - 正文探针/姝ｆ枃鎺㈤拡：{body_probe}
 
@@ -72,8 +73,8 @@ class ToutiaoPlatform(PlatformConfig):
 - 当前正文是普通文本，正文内容由后端工具持有，优先使用确定性的工具写入。
 - 找到头条号正文编辑器并点击聚焦后，必须调用 `paste_plain_text_body` 工具。
 - 只有工具返回 ok=true 且 probe_found=true，才允许继续封面、预览或发布。
-- 如果工具返回 ok=false，最多重新聚焦编辑器后再调用 1 次；仍失败时再使用 input/type 方式写入正文。
-- 使用 input/type 回退后仍必须确认正文探针已出现。
+- 如果工具返回 ok=false，最多重新聚焦编辑器后再调用 1 次；仍失败则调用 done 返回 success=false，并把工具 reason 写入 failure_reason。
+- 禁止在正文工具失败后使用 input/type 自行输入正文，因为完整正文只在后端工具中持有。
 - 禁止使用 editor.innerHTML、DOM 注入、直接替换节点、直接设置正文 DOM 等方式伪造正文写入成功。
 - 绂佹浣跨敤 editor.innerHTML；禁止 DOM 娉ㄥ叆。
 - 正文探针/姝ｆ枃鎺㈤拡：{body_probe}

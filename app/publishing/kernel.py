@@ -724,6 +724,7 @@ class PublishService:
 
         # 正文存在性探针：与平台 prompt 共用 PlatformConfig.body_probe，确保两边算出的字符串相同
         body_probe = PlatformConfig.body_probe(content)
+        expected_body_text_length = len("".join((task_bundle.plain_text or "").split()))
 
         async def on_step_end(agent_instance):
             try:
@@ -792,6 +793,42 @@ class PublishService:
                             f"editor_len={editor_len_after} probe_found={probe_found} "
                             f"editor_source={publish_guard['last_editor_source']}"
                         )
+
+                if action_summary and self._looks_like_publish_action(action_summary):
+                    completeness = self._body_completeness_from_state(
+                        page_state=page_state,
+                        expected_text_length=expected_body_text_length,
+                    )
+                    if not completeness["ok"]:
+                        failure_reason = (
+                            "正文写入不完整："
+                            f"expected={completeness['expected_text_length']} "
+                            f"actual={completeness['editor_text_length']} "
+                            f"probe_found={completeness['probe_found']} "
+                            f"source={completeness['editor_source']}"
+                        )
+                        publish_guard["failure_detected"] = {
+                            "failed": True,
+                            "signal": "body_incomplete_before_publish",
+                            "page_url": page_state.get("url", ""),
+                            "matched_text": failure_reason,
+                        }
+                        publish_guard["forced_result"] = {
+                            "success": False,
+                            "article_url": "",
+                            "account": "",
+                            "failure_reason": failure_reason,
+                            "publish_signal": "body_incomplete_before_publish",
+                        }
+                        logger.error("[PublishGuard] %s", failure_reason)
+                        self._log_final_summary(
+                            publish_guard,
+                            publish_guard["forced_result"],
+                            logger,
+                            trace_summary=trace_summary,
+                        )
+                        agent_instance.state.stopped = True
+                        return
 
                 # 跟踪步骤摘要（保留最近 10 步）
                 step_summary = {
@@ -1354,6 +1391,51 @@ class PublishService:
             "execcommand",  # 兜底：任何 execCommand 都算
         )
         return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _looks_like_publish_action(action_summary: str) -> bool:
+        text = str(action_summary or "")
+        if not PublishService._looks_like_click_result(text):
+            return False
+        markers = (
+            "预览并发布",
+            "确认发布",
+            "发布",
+            "publish",
+            "preview",
+            "纭鍙戝竷",
+        )
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _body_completeness_from_state(page_state: dict, expected_text_length: int) -> dict:
+        editor_len = int((page_state or {}).get("editor_text_length", 0) or 0)
+        expected_len = int(expected_text_length or 0)
+        editor_source = str((page_state or {}).get("editor_source", "") or "")
+        probe_found = bool((page_state or {}).get("probe_found", False))
+        if expected_len <= 0:
+            return {
+                "ok": True,
+                "reason": "",
+                "editor_text_length": editor_len,
+                "expected_text_length": expected_len,
+                "probe_found": probe_found,
+                "editor_source": editor_source,
+            }
+        min_len = int(expected_len * 0.85)
+        ok = (
+            editor_len >= min_len
+            and probe_found
+            and editor_source in {"contenteditable", "iframe-contenteditable", "textarea"}
+        )
+        return {
+            "ok": ok,
+            "reason": "" if ok else "body_incomplete",
+            "editor_text_length": editor_len,
+            "expected_text_length": expected_len,
+            "probe_found": probe_found,
+            "editor_source": editor_source,
+        }
 
     def _log_step_diagnostics(
         self,

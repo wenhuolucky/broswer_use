@@ -82,7 +82,7 @@ class TestToutiaoPrompt:
         assert 'send_keys("Control+v")' not in prompt
         assert "正文探针" in prompt
         assert "ok=false" in prompt
-        assert "input/type" in prompt
+        assert "工具返回 ok=false，最多重新聚焦编辑器后再调用 1 次；仍失败时再使用 input/type 方式写入正文" not in prompt
         assert "禁止使用 editor.innerHTML" in prompt
         assert "DOM 注入" in prompt
 
@@ -116,6 +116,7 @@ class TestSohuPrompt:
         assert "paste_plain_text_body" in prompt
         assert "navigator.clipboard.writeText" not in prompt
         assert "```javascript" not in prompt
+        assert "工具返回 ok=false，最多重新聚焦编辑器后再调用 1 次；仍失败时再使用 input/type 方式写入正文" not in prompt
 
     def test_markdown_prompt_requires_rich_html_body_tool(self) -> None:
         prompt = SohuPlatform().get_agent_prompt(

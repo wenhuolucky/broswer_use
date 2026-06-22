@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.publishing.tools.body_writer import (
+    BodyWritePayload,
+    BodyWriter,
     build_clipboard_html_js,
     build_clipboard_text_js,
     make_body_write_failure,
@@ -64,3 +68,84 @@ def test_body_write_failure_result_has_reason() -> None:
         "probe_found": False,
         "reason": "paste_probe_not_found",
     }
+
+
+@pytest.mark.asyncio
+async def test_body_writer_returns_invalid_focus_result_when_evaluate_returns_string() -> None:
+    class FakePage:
+        keyboard = None
+
+        async def evaluate(self, *_args):
+            return "not-a-dict"
+
+    class FakeSession:
+        async def get_current_page(self):
+            return FakePage()
+
+    writer = BodyWriter(
+        BodyWritePayload(
+            plain_text="完整正文内容" * 20,
+            rich_html="",
+            body_probe="完整正文内容",
+            platform_name="toutiao",
+        )
+    )
+
+    result = await writer.paste_plain_text_body(FakeSession())
+
+    assert result["ok"] is False
+    assert result["reason"] == "focus_result_invalid"
+    assert result["probe_found"] is False
+
+
+@pytest.mark.asyncio
+async def test_body_writer_rejects_probe_only_partial_body() -> None:
+    expected_text = "很多人一提到养生，就会想到复杂的食谱、昂贵的补品、严格的作息。" * 10
+    probe_only = "很多人一提到养生，就会想到复杂的食谱、昂贵的补品、严格的作息"
+
+    class FakeKeyboard:
+        async def press(self, _keys):
+            return None
+
+    class FakePage:
+        keyboard = FakeKeyboard()
+
+        def __init__(self):
+            self.calls = 0
+
+        async def evaluate(self, *_args):
+            self.calls += 1
+            if self.calls == 1:
+                return {"ok": True}
+            if self.calls == 2:
+                return {"ok": True, "method": "navigator.clipboard.writeText"}
+            return {
+                "editor_text_length": len(probe_only),
+                "expected_text_length": len(expected_text),
+                "length_ratio": len(probe_only) / len(expected_text),
+                "probe_found": True,
+                "probe_start_found": True,
+                "probe_middle_found": False,
+                "probe_end_found": False,
+                "preview": probe_only,
+            }
+
+    class FakeSession:
+        async def get_current_page(self):
+            return FakePage()
+
+    writer = BodyWriter(
+        BodyWritePayload(
+            plain_text=expected_text,
+            rich_html="",
+            body_probe=probe_only,
+            platform_name="toutiao",
+        )
+    )
+
+    result = await writer.paste_plain_text_body(FakeSession())
+
+    assert result["ok"] is False
+    assert result["reason"] == "body_incomplete"
+    assert result["editor_text_length"] == len(probe_only)
+    assert result["expected_text_length"] == len(expected_text)

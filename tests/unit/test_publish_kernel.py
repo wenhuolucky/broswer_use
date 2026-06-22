@@ -51,6 +51,33 @@ class TestPostConfirmLookupResult:
         assert result["publish_signal"] == "post_confirm_lookup_miss"
 
 
+class TestBodyCompletenessGuard:
+    def test_rejects_probe_only_body_before_publish(self) -> None:
+        result = PublishService._body_completeness_from_state(
+            page_state={
+                "editor_text_length": 30,
+                "probe_found": True,
+                "editor_source": "contenteditable",
+            },
+            expected_text_length=608,
+        )
+
+        assert result["ok"] is False
+        assert result["reason"] == "body_incomplete"
+
+    def test_accepts_body_near_expected_length(self) -> None:
+        result = PublishService._body_completeness_from_state(
+            page_state={
+                "editor_text_length": 590,
+                "probe_found": True,
+                "editor_source": "contenteditable",
+            },
+            expected_text_length=608,
+        )
+
+        assert result["ok"] is True
+
+
 class TestCleanupWithTimeout:
     @pytest.mark.asyncio
     async def test_cleanup_awaitable_times_out_without_raising(self) -> None:

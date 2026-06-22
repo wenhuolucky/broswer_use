@@ -17,6 +17,10 @@ class BodyWritePayload:
     body_probe: str
     platform_name: str = ""
 
+    @property
+    def expected_text_length(self) -> int:
+        return len(self.plain_text or "")
+
 
 def make_body_write_success(
     *,
@@ -24,8 +28,13 @@ def make_body_write_success(
     method: str,
     editor_text_length: int,
     probe_found: bool,
+    expected_text_length: int = 0,
+    length_ratio: float = 0.0,
+    probe_start_found: bool | None = None,
+    probe_middle_found: bool | None = None,
+    probe_end_found: bool | None = None,
 ) -> dict:
-    return {
+    result = {
         "ok": True,
         "mode": mode,
         "method": method,
@@ -33,6 +42,14 @@ def make_body_write_success(
         "probe_found": bool(probe_found),
         "reason": "",
     }
+    if expected_text_length:
+        result["expected_text_length"] = int(expected_text_length)
+        result["length_ratio"] = round(float(length_ratio or 0.0), 4)
+    if probe_start_found is not None:
+        result["probe_start_found"] = bool(probe_start_found)
+        result["probe_middle_found"] = bool(probe_middle_found)
+        result["probe_end_found"] = bool(probe_end_found)
+    return result
 
 
 def make_body_write_failure(
@@ -42,14 +59,68 @@ def make_body_write_failure(
     method: str = "",
     editor_text_length: int = 0,
     probe_found: bool = False,
+    expected_text_length: int = 0,
+    length_ratio: float = 0.0,
+    probe_start_found: bool | None = None,
+    probe_middle_found: bool | None = None,
+    probe_end_found: bool | None = None,
 ) -> dict:
-    return {
+    result = {
         "ok": False,
         "mode": mode,
         "method": method or "",
         "editor_text_length": int(editor_text_length or 0),
         "probe_found": bool(probe_found),
         "reason": reason or "unknown",
+    }
+    if expected_text_length:
+        result["expected_text_length"] = int(expected_text_length)
+        result["length_ratio"] = round(float(length_ratio or 0.0), 4)
+    if probe_start_found is not None:
+        result["probe_start_found"] = bool(probe_start_found)
+        result["probe_middle_found"] = bool(probe_middle_found)
+        result["probe_end_found"] = bool(probe_end_found)
+    return result
+
+
+def compact_text(text: str) -> str:
+    return "".join((text or "").split())
+
+
+def body_integrity_probes(text: str, probe_size: int = 30) -> dict:
+    compacted = compact_text(text)
+    if not compacted:
+        return {"start": "", "middle": "", "end": ""}
+    size = min(probe_size, len(compacted))
+    middle_start = max((len(compacted) - size) // 2, 0)
+    return {
+        "start": compacted[:size],
+        "middle": compacted[middle_start : middle_start + size],
+        "end": compacted[-size:],
+    }
+
+
+def evaluate_body_integrity(editor_text: str, expected_text: str) -> dict:
+    normalized_editor = compact_text(editor_text)
+    normalized_expected = compact_text(expected_text)
+    expected_len = len(normalized_expected)
+    actual_len = len(normalized_editor)
+    probes = body_integrity_probes(normalized_expected)
+    start_found = bool(probes["start"]) and probes["start"] in normalized_editor
+    middle_found = bool(probes["middle"]) and probes["middle"] in normalized_editor
+    end_found = bool(probes["end"]) and probes["end"] in normalized_editor
+    found_count = sum(1 for value in (start_found, middle_found, end_found) if value)
+    length_ratio = (actual_len / expected_len) if expected_len else 0.0
+    min_ratio = 0.9 if expected_len >= 80 else 0.8
+    return {
+        "ok": bool(expected_len) and actual_len >= int(expected_len * min_ratio) and found_count >= 2,
+        "editor_text_length": actual_len,
+        "expected_text_length": expected_len,
+        "length_ratio": length_ratio,
+        "probe_found": start_found,
+        "probe_start_found": start_found,
+        "probe_middle_found": middle_found,
+        "probe_end_found": end_found,
     }
 
 
@@ -162,7 +233,8 @@ READ_EDITOR_STATE_JS = r"""
     editor_text_length: best ? best.len : 0,
     editor_source: best ? best.source : 'none',
     probe_found: !!normalizedProbe && normalized.includes(normalizedProbe),
-    preview: best ? best.text.slice(0, 120) : ''
+    preview: best ? best.text.slice(0, 120) : '',
+    text: best ? best.text : ''
   };
 }
 """
@@ -223,7 +295,15 @@ class BodyWriter:
             if page is None:
                 return make_body_write_failure(mode=mode, reason="page_unavailable")
 
-            focus = await page.evaluate(FOCUS_EDITOR_JS)
+            focus = await page.evaluate(FOCUS_EDITOR_JS, None)
+            if not isinstance(focus, dict):
+                self._warning(
+                    "[BodyTool] failed mode=%s reason=focus_result_invalid raw_type=%s raw_preview=%r",
+                    mode,
+                    type(focus).__name__,
+                    str(focus)[:120],
+                )
+                return make_body_write_failure(mode=mode, reason="focus_result_invalid")
             if not focus or not focus.get("ok"):
                 reason = (focus or {}).get("reason") or "editor_not_found"
                 self._warning("[BodyTool] failed mode=%s reason=%s", mode, reason)
@@ -236,6 +316,14 @@ class BodyWriter:
                 )
             else:
                 clipboard = await page.evaluate(build_clipboard_text_js(), text or "")
+            if not isinstance(clipboard, dict):
+                self._warning(
+                    "[BodyTool] failed mode=%s reason=clipboard_result_invalid raw_type=%s raw_preview=%r",
+                    mode,
+                    type(clipboard).__name__,
+                    str(clipboard)[:120],
+                )
+                return make_body_write_failure(mode=mode, reason="clipboard_result_invalid")
             method = str((clipboard or {}).get("method") or "")
             if not clipboard or not clipboard.get("ok"):
                 self._warning(
@@ -256,39 +344,73 @@ class BodyWriter:
             await asyncio.sleep(1.0 if mode == "rich_html" else 0.5)
 
             state = await page.evaluate(READ_EDITOR_STATE_JS, self.payload.body_probe or "")
-            editor_len = int((state or {}).get("editor_text_length") or 0)
-            probe_found = bool((state or {}).get("probe_found"))
-            if editor_len > 0 and (probe_found or not self.payload.body_probe):
+            if not isinstance(state, dict):
+                self._warning(
+                    "[BodyTool] failed mode=%s reason=state_result_invalid raw_type=%s raw_preview=%r",
+                    mode,
+                    type(state).__name__,
+                    str(state)[:120],
+                )
+                return make_body_write_failure(mode=mode, reason="state_result_invalid", method=method)
+            integrity = evaluate_body_integrity(
+                str(state.get("text", "") or ""),
+                self.payload.plain_text or "",
+            )
+            editor_len = int(integrity.get("editor_text_length") or state.get("editor_text_length") or 0)
+            probe_found = bool(integrity.get("probe_found"))
+            if integrity["ok"]:
                 result = make_body_write_success(
                     mode=mode,
                     method=method,
                     editor_text_length=editor_len,
                     probe_found=probe_found,
+                    expected_text_length=integrity["expected_text_length"],
+                    length_ratio=integrity["length_ratio"],
+                    probe_start_found=integrity["probe_start_found"],
+                    probe_middle_found=integrity["probe_middle_found"],
+                    probe_end_found=integrity["probe_end_found"],
                 )
                 self._info(
-                    "[BodyTool] verify_result ok=true mode=%s method=%s probe_found=%s editor_len=%s duration=%.2fs",
+                    "[BodyTool] verify_result ok=true mode=%s method=%s probe_found=%s "
+                    "editor_len=%s expected_len=%s length_ratio=%.2f probes=%s/%s/%s duration=%.2fs",
                     mode,
                     method,
                     probe_found,
                     editor_len,
+                    integrity["expected_text_length"],
+                    integrity["length_ratio"],
+                    integrity["probe_start_found"],
+                    integrity["probe_middle_found"],
+                    integrity["probe_end_found"],
                     time.perf_counter() - started,
                 )
                 return result
 
             self._warning(
-                "[BodyTool] failed mode=%s reason=paste_probe_not_found method=%s probe_found=%s editor_len=%s preview=%r",
+                "[BodyTool] failed mode=%s reason=body_incomplete method=%s probe_found=%s "
+                "editor_len=%s expected_len=%s length_ratio=%.2f probes=%s/%s/%s preview=%r",
                 mode,
                 method,
                 probe_found,
                 editor_len,
+                integrity["expected_text_length"],
+                integrity["length_ratio"],
+                integrity["probe_start_found"],
+                integrity["probe_middle_found"],
+                integrity["probe_end_found"],
                 str((state or {}).get("preview", ""))[:120],
             )
             return make_body_write_failure(
                 mode=mode,
-                reason="paste_probe_not_found",
+                reason="body_incomplete",
                 method=method,
                 editor_text_length=editor_len,
                 probe_found=probe_found,
+                expected_text_length=integrity["expected_text_length"],
+                length_ratio=integrity["length_ratio"],
+                probe_start_found=integrity["probe_start_found"],
+                probe_middle_found=integrity["probe_middle_found"],
+                probe_end_found=integrity["probe_end_found"],
             )
         except Exception as exc:
             reason = f"exception:{str(exc)[:120]}"
