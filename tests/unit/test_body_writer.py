@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 
 import pytest
 
@@ -302,3 +304,57 @@ async def test_body_writer_retries_once_after_transient_evaluate_timeout() -> No
     assert result["ok"] is True
     assert result["method"] == "navigator.clipboard.writeText"
     assert result["editor_text_length"] == len(expected_text.replace(" ", ""))
+
+
+@pytest.mark.asyncio
+async def test_body_writer_evaluate_uses_short_timeout_before_retry() -> None:
+    expected_text = "complete body text " * 20
+
+    class FakePage:
+        def __init__(self):
+            self.calls = 0
+            self.pressed_keys = []
+
+        async def evaluate(self, *_args):
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(1)
+            if self.calls == 2:
+                return {"ok": True, "reason": ""}
+            if self.calls == 3:
+                return {"ok": True, "method": "navigator.clipboard.writeText"}
+            return {
+                "editor_text_length": len(expected_text),
+                "editor_source": "contenteditable",
+                "probe_found": True,
+                "preview": expected_text[:120],
+                "text": expected_text,
+            }
+
+        async def press(self, keys):
+            self.pressed_keys.append(keys)
+
+    class FakeSession:
+        def __init__(self):
+            self.page = FakePage()
+
+        async def get_current_page(self):
+            return self.page
+
+    writer = BodyWriter(
+        BodyWritePayload(
+            plain_text=expected_text,
+            rich_html="",
+            body_probe=expected_text[:30],
+            platform_name="sohu",
+        ),
+        evaluate_timeout_seconds=0.01,
+    )
+    session = FakeSession()
+
+    started = time.perf_counter()
+    result = await writer.paste_plain_text_body(session)
+
+    assert time.perf_counter() - started < 1.5
+    assert session.page.calls == 4
+    assert result["ok"] is True

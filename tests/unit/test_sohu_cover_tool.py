@@ -52,6 +52,8 @@ def test_sohu_cover_js_is_browser_use_compatible_and_avoids_file_upload() -> Non
     assert "本地上传" in script
     assert "上传图片" in script
     assert "isCoverTriggerBlocked" in script
+    assert "isCoverPanelTrigger" in script
+    assert "cover_upload_trigger" in script
     assert "candidate_texts" in script
     assert "material_fallback_without_body_tab" in script
     assert ".click()" in script

@@ -82,6 +82,23 @@ def build_sohu_cover_js() -> str:
       if (host && host.querySelector && host.querySelector('input[type="file"]')) return true;
       return false;
     };
+    const isCoverPanelTrigger = (node) => {
+      if (!node || isDisabled(node)) return false;
+      const text = textOf(node);
+      if (!text.includes('上传图片') && !text.includes('设置封面') && !text.includes('选择封面')) return false;
+      let cursor = node;
+      for (let depth = 0; cursor && depth < 5; depth += 1) {
+        const panelText = textOf(cursor);
+        if (panelText.includes('封面') && panelText.includes('上传图片')) {
+          if (panelText.includes('本地上传') || (cursor.querySelector && cursor.querySelector('input[type="file"]'))) {
+            return false;
+          }
+          return true;
+        }
+        cursor = cursor.parentElement;
+      }
+      return false;
+    };
     const clickNode = async (node) => {
       node.scrollIntoView({ block: 'center', inline: 'center' });
       node.click();
@@ -132,6 +149,16 @@ def build_sohu_cover_js() -> str:
         const value = textOf(node).replace(/\s+/g, ' ').slice(0, 40);
         if (value && !candidateTexts.includes(value)) candidateTexts.push(value);
       };
+      const coverUploadTrigger = allVisible('button,a,div,span,p')
+        .find((node) => isCoverPanelTrigger(node));
+      if (coverUploadTrigger) {
+        rememberCandidate(coverUploadTrigger);
+        await clickNode(coverUploadTrigger);
+        await sleep(700);
+        root = findDialogRoot();
+        if (root) return root;
+        candidateTexts.push('cover_upload_trigger_clicked_without_dialog');
+      }
       const direct = findCoverTriggerByText(
         ['上传图片', '设置封面', '选择封面', '添加封面', '封面图片'],
         document,

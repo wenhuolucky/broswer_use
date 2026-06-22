@@ -272,9 +272,10 @@ READ_EDITOR_STATE_JS = r"""
 
 
 class BodyWriter:
-    def __init__(self, payload: BodyWritePayload, logger=None):
+    def __init__(self, payload: BodyWritePayload, logger=None, evaluate_timeout_seconds: float = 10.0):
         self.payload = payload
         self.logger = logger
+        self.evaluate_timeout_seconds = float(evaluate_timeout_seconds or 10.0)
 
     async def paste_plain_text_body(self, browser_session) -> dict:
         return await self._paste_with_session(
@@ -371,7 +372,7 @@ class BodyWriter:
         started: float,
     ) -> dict:
         method = method_hint
-        raw_focus = await page.evaluate(FOCUS_EDITOR_JS, None)
+        raw_focus = await self._evaluate_with_timeout(page, FOCUS_EDITOR_JS, None, label="focus_editor")
         focus = normalize_evaluate_result(raw_focus)
         if focus is None:
             self._warning(
@@ -387,12 +388,19 @@ class BodyWriter:
             return make_body_write_failure(mode=mode, reason=reason)
 
         if mode == "rich_html" and html:
-            raw_clipboard = await page.evaluate(
+            raw_clipboard = await self._evaluate_with_timeout(
+                page,
                 build_clipboard_html_js(),
                 {"html": html, "text": text or ""},
+                label="clipboard_html",
             )
         else:
-            raw_clipboard = await page.evaluate(build_clipboard_text_js(), text or "")
+            raw_clipboard = await self._evaluate_with_timeout(
+                page,
+                build_clipboard_text_js(),
+                text or "",
+                label="clipboard_text",
+            )
         clipboard = normalize_evaluate_result(raw_clipboard)
         if clipboard is None:
             self._warning(
@@ -421,7 +429,12 @@ class BodyWriter:
         self._info("[BodyTool] paste_sent mode=%s keys=Control+V", mode)
         await asyncio.sleep(1.0 if mode == "rich_html" else 0.5)
 
-        raw_state = await page.evaluate(READ_EDITOR_STATE_JS, self.payload.body_probe or "")
+        raw_state = await self._evaluate_with_timeout(
+            page,
+            READ_EDITOR_STATE_JS,
+            self.payload.body_probe or "",
+            label="read_editor_state",
+        )
         state = normalize_evaluate_result(raw_state)
         if state is None:
             self._warning(
@@ -491,6 +504,17 @@ class BodyWriter:
             probe_middle_found=integrity["probe_middle_found"],
             probe_end_found=integrity["probe_end_found"],
         )
+
+    async def _evaluate_with_timeout(self, page, script: str, arg: Any, *, label: str) -> Any:
+        try:
+            return await asyncio.wait_for(
+                page.evaluate(script, arg),
+                timeout=self.evaluate_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"{label} evaluate timed out after {self.evaluate_timeout_seconds:.1f}s"
+            ) from exc
 
     def _info(self, message: str, *args: Any) -> None:
         if self.logger:
