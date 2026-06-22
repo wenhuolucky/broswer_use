@@ -83,8 +83,11 @@ async def test_body_writer_returns_invalid_focus_result_when_evaluate_returns_st
             return "not-a-dict"
 
     class FakeSession:
-        async def get_current_page(self):
-            return FakePage()
+        def __init__(self):
+            self.page = FakePage()
+
+        async def must_get_current_page(self):
+            return self.page
 
     writer = BodyWriter(
         BodyWritePayload(
@@ -106,15 +109,10 @@ async def test_body_writer_returns_invalid_focus_result_when_evaluate_returns_st
 async def test_body_writer_accepts_json_string_evaluate_results() -> None:
     expected_text = "complete body text " * 20
 
-    class FakeKeyboard:
-        async def press(self, _keys):
-            return None
-
     class FakePage:
-        keyboard = FakeKeyboard()
-
         def __init__(self):
             self.calls = 0
+            self.pressed_keys = []
 
         async def evaluate(self, *_args):
             self.calls += 1
@@ -132,9 +130,15 @@ async def test_body_writer_accepts_json_string_evaluate_results() -> None:
                 }
             )
 
+        async def press(self, keys):
+            self.pressed_keys.append(keys)
+
     class FakeSession:
-        async def get_current_page(self):
-            return FakePage()
+        def __init__(self):
+            self.page = FakePage()
+
+        async def must_get_current_page(self):
+            return self.page
 
     writer = BodyWriter(
         BodyWritePayload(
@@ -145,26 +149,23 @@ async def test_body_writer_accepts_json_string_evaluate_results() -> None:
         )
     )
 
-    result = await writer.paste_plain_text_body(FakeSession())
+    session = FakeSession()
+    result = await writer.paste_plain_text_body(session)
 
     assert result["ok"] is True
     assert result["method"] == "navigator.clipboard.writeText"
     assert result["editor_text_length"] == len(expected_text.replace(" ", ""))
+    assert session.page.pressed_keys == ["Control+V"]
 
 
 @pytest.mark.asyncio
 async def test_body_writer_uses_browser_use_compatible_parameterized_evaluate_scripts() -> None:
     expected_text = "complete body text " * 20
 
-    class FakeKeyboard:
-        async def press(self, _keys):
-            return None
-
     class FakePage:
-        keyboard = FakeKeyboard()
-
         def __init__(self):
             self.calls = 0
+            self.pressed_keys = []
 
         async def evaluate(self, script, arg=None):
             self.calls += 1
@@ -181,6 +182,9 @@ async def test_body_writer_uses_browser_use_compatible_parameterized_evaluate_sc
                 "preview": expected_text[:120],
                 "text": expected_text,
             }
+
+        async def press(self, keys):
+            self.pressed_keys.append(keys)
 
     class FakeSession:
         async def get_current_page(self):
@@ -206,15 +210,10 @@ async def test_body_writer_rejects_probe_only_partial_body() -> None:
     expected_text = "很多人一提到养生，就会想到复杂的食谱、昂贵的补品、严格的作息。" * 10
     probe_only = "很多人一提到养生，就会想到复杂的食谱、昂贵的补品、严格的作息"
 
-    class FakeKeyboard:
-        async def press(self, _keys):
-            return None
-
     class FakePage:
-        keyboard = FakeKeyboard()
-
         def __init__(self):
             self.calls = 0
+            self.pressed_keys = []
 
         async def evaluate(self, *_args):
             self.calls += 1
@@ -232,6 +231,9 @@ async def test_body_writer_rejects_probe_only_partial_body() -> None:
                 "probe_end_found": False,
                 "preview": probe_only,
             }
+
+        async def press(self, keys):
+            self.pressed_keys.append(keys)
 
     class FakeSession:
         async def get_current_page(self):

@@ -310,7 +310,10 @@ class BodyWriter:
             return make_body_write_failure(mode=mode, reason="page_unavailable")
 
         try:
-            page = await browser_session.get_current_page()
+            if hasattr(browser_session, "must_get_current_page"):
+                page = await browser_session.must_get_current_page()
+            else:
+                page = await browser_session.get_current_page()
             if page is None:
                 return make_body_write_failure(mode=mode, reason="page_unavailable")
 
@@ -360,7 +363,7 @@ class BodyWriter:
                 )
             self._info("[BodyTool] clipboard_written mode=%s method=%s", mode, method)
 
-            await page.keyboard.press("Control+V")
+            await page.press("Control+V")
             self._info("[BodyTool] paste_sent mode=%s keys=Control+V", mode)
             await asyncio.sleep(1.0 if mode == "rich_html" else 0.5)
 
