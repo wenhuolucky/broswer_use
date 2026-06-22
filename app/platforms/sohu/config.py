@@ -363,10 +363,11 @@ Agent 执行规则：
         """搜狐号封面指导：封面选择统一交给 set_sohu_cover 工具执行。"""
         return """
 
-搜狐号封面设置（覆盖上面 cover_instruction 全部内容，**搜狐号不区分有无 cover URL**）：
+搜狐号封面设置（覆盖上面 cover_instruction 全部内容）：
 - 正文写入工具返回 ok=true 且 probe_found=true，并进入封面设置区域后，必须调用 `set_sohu_cover` 工具。
 - 不要手动点击正文图片、素材库、本地上传或确定按钮；不要根据页面索引自行选择图片；不要触发 file input。
-- `set_sohu_cover` 会优先选择正文图片第一张；如果正文图片为空，会切换素材库并选择素材库第一张图片，然后点击确定。
+- 存在封面文件时，工具会优先走本地上传：切换“本地上传”，点击上传图片，上传系统已准备的封面文件，然后点击确定。
+- 没有封面文件时，工具会优先选择正文图片第一张；如果正文图片为空，会切换素材库并选择素材库第一张图片，然后点击确定。
 - 工具返回 ok=true、selected=true、confirmed=true、cover_applied=true 后，才允许继续分类、摘要或发布。
 - 封面工具返回 ok=false 时最多重试 1 次；第 2 次仍失败时，停止并调用 done 返回 success=false，把工具 reason 写入 failure_reason。
 - 任何情况下都保持单封面，不要选择三封面或五封面。

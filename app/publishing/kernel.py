@@ -703,6 +703,7 @@ class PublishService:
             logger,
             original_title=title,
             body_payload=task_bundle,
+            cover_path=cover_path,
         )
         agent = Agent(
             task=task,
@@ -943,7 +944,13 @@ class PublishService:
         self._log_final_summary(publish_guard, result, logger, trace_summary=trace_summary)
         return result
 
-    def _build_publish_tools(self, logger, original_title: str = "", body_payload: PublishTaskBundle | None = None):
+    def _build_publish_tools(
+        self,
+        logger,
+        original_title: str = "",
+        body_payload: PublishTaskBundle | None = None,
+        cover_path: str = "",
+    ):
         from browser_use import ActionResult, Controller
         from app.publishing.tools import BodyWritePayload, BodyWriter, SohuCoverSetter, SohuTitleSetter
 
@@ -951,7 +958,11 @@ class PublishService:
         writer = None
         platform_name = (getattr(body_payload, "platform_name", "") or "").lower() if body_payload else ""
         sohu_title_setter = SohuTitleSetter(original_title, logger=logger) if platform_name == "sohu" else None
-        sohu_cover_setter = SohuCoverSetter(logger=logger) if platform_name == "sohu" else None
+        sohu_cover_setter = (
+            SohuCoverSetter(cover_path=cover_path or "", logger=logger)
+            if platform_name == "sohu"
+            else None
+        )
         if body_payload:
             writer = BodyWriter(
                 BodyWritePayload(
@@ -1057,7 +1068,8 @@ class PublishService:
         if sohu_cover_setter is not None:
             @controller.action(
                 "设置搜狐号封面。无参数。正文写入成功并进入封面设置区域后调用。"
-                "工具会优先选择正文图片第一张；正文无图时选择素材库第一张；返回 ok=true 后才允许继续发布。"
+                "如果系统已准备封面文件，工具会优先本地上传；否则优先正文图片第一张，正文无图时选择素材库第一张；"
+                "返回 ok=true 后才允许继续发布。"
             )
             async def set_sohu_cover(browser_session):
                 tool_start = time.perf_counter()

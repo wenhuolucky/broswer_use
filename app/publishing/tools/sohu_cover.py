@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any
 
 from app.publishing.tools.body_writer import normalize_evaluate_result
@@ -44,6 +45,9 @@ def build_sohu_cover_js() -> str:
     return r"""
 (...args) => {
   return (async () => {
+    const options = (args && args[0]) || {};
+    const cover_path = String(options.cover_path || '').trim();
+    const phase = String(options.phase || '').trim();
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const visible = (node) => {
       if (!node) return false;
@@ -55,6 +59,7 @@ def build_sohu_cover_js() -> str:
         && rect.height > 0;
     };
     const textOf = (node) => ((node && (node.innerText || node.textContent || node.value)) || '').trim();
+    const classOf = (node) => String((node && node.className) || '');
     const allVisible = (selector, root = document) =>
       Array.from(root.querySelectorAll(selector)).filter(visible);
     const hasText = (node, text) => textOf(node).includes(text);
@@ -99,15 +104,29 @@ def build_sohu_cover_js() -> str:
       }
       return false;
     };
+    const nodeInfo = (node) => {
+      if (!node) return 'none';
+      const text = textOf(node).replace(/\s+/g, ' ').slice(0, 40);
+      return `clicked_trigger_tag=${node.tagName}; clicked_trigger_class=${classOf(node)}; clicked_trigger_text=${text}`;
+    };
     const clickNode = async (node) => {
       node.scrollIntoView({ block: 'center', inline: 'center' });
+      try { node.focus && node.focus(); } catch (_err) {}
+      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+        try {
+          node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+        } catch (_err) {}
+      }
       node.click();
       await sleep(350);
     };
-    const findByText = (texts, root = document, selector = 'button,a,span,div,li,p') => {
+    const findByText = (texts, root = document, selector = 'button,a,span,div,li,p', options = {}) => {
       const targets = Array.isArray(texts) ? texts : [texts];
       const nodes = allVisible(selector, root);
-      return nodes.find((node) => targets.some((text) => hasText(node, text)) && !isDisabled(node) && !isUploadLike(node));
+      return nodes.find((node) => {
+        if (!targets.some((text) => hasText(node, text)) || isDisabled(node)) return false;
+        return options.allowUploadLike || !isUploadLike(node);
+      });
     };
     const findCoverTriggerByText = (texts, root = document, selector = 'button,a,span,div,li,p') => {
       const targets = Array.isArray(texts) ? texts : [texts];
@@ -141,18 +160,40 @@ def build_sohu_cover_js() -> str:
       }
       return document.body && rootHasCoverTabs(document.body) ? document.body : null;
     };
+    const hasCoverPanelAncestor = (node) => {
+      let cursor = node;
+      for (let depth = 0; cursor && depth < 8; depth += 1) {
+        const panelText = textOf(cursor);
+        if (panelText.includes('封面') && panelText.includes('上传图片')) return true;
+        cursor = cursor.parentElement;
+      }
+      return false;
+    };
+    const findExactCoverUploadTrigger = () => {
+      const exact = allVisible('.upload-file.mp-upload, .upload-file, .mp-upload')
+        .find((node) => {
+          const marker = `${textOf(node)} ${classOf(node)}`;
+          return marker.includes('上传图片')
+            && hasCoverPanelAncestor(node)
+            && !isCoverTriggerBlocked(node)
+            && !isDisabled(node);
+        });
+      if (exact) return exact;
+      return allVisible('button,a,div,span,p').find((node) => isCoverPanelTrigger(node));
+    };
     const openCoverDialog = async () => {
       let root = findDialogRoot();
       if (root) return root;
       const candidateTexts = [];
+      let clickedInfo = '';
       const rememberCandidate = (node) => {
         const value = textOf(node).replace(/\s+/g, ' ').slice(0, 40);
         if (value && !candidateTexts.includes(value)) candidateTexts.push(value);
       };
-      const coverUploadTrigger = allVisible('button,a,div,span,p')
-        .find((node) => isCoverPanelTrigger(node));
+      const coverUploadTrigger = findExactCoverUploadTrigger();
       if (coverUploadTrigger) {
         rememberCandidate(coverUploadTrigger);
+        clickedInfo = nodeInfo(coverUploadTrigger);
         await clickNode(coverUploadTrigger);
         await sleep(700);
         root = findDialogRoot();
@@ -166,6 +207,7 @@ def build_sohu_cover_js() -> str:
       );
       if (direct) {
         rememberCandidate(direct);
+        clickedInfo = nodeInfo(direct);
         await clickNode(direct);
         await sleep(700);
         root = findDialogRoot();
@@ -182,15 +224,16 @@ def build_sohu_cover_js() -> str:
         return looksLikeCoverTrigger && !isCoverTriggerBlocked(node) && !isDisabled(node);
       });
       for (const node of candidates.slice(0, 5)) {
+        clickedInfo = nodeInfo(node);
         await clickNode(node);
         await sleep(700);
         root = findDialogRoot();
         if (root) return root;
       }
-      return { failed: true, candidate_texts: candidateTexts.slice(0, 8).join('|') };
+      return { failed: true, candidate_texts: `${clickedInfo}; ${candidateTexts.slice(0, 8).join('|')}` };
     };
     const clickTab = async (root, label) => {
-      const tab = findByText(label, root, 'button,a,span,div,li,p');
+      const tab = findByText(label, root, 'button,a,span,div,li,p', { allowUploadLike: true });
       if (!tab) return false;
       await clickNode(tab);
       return true;
@@ -224,12 +267,66 @@ def build_sohu_cover_js() -> str:
       await sleep(800);
       return true;
     };
+    const findLocalUploadInput = (root) => {
+      const roots = [root, document].filter(Boolean);
+      for (const scope of roots) {
+        const input = Array.from(scope.querySelectorAll('input[type="file"]'))
+          .find((node) => !isDisabled(node));
+        if (input) return input;
+      }
+      return null;
+    };
+    const clickLocalUploadEntry = async (root) => {
+      const uploadNode = allVisible('.upload-file.mp-upload, .upload-file, .mp-upload, button,a,div,span', root)
+        .find((node) => {
+          const marker = `${textOf(node)} ${classOf(node)}`;
+          return marker.includes('上传图片') && !isDisabled(node);
+        });
+      if (!uploadNode) return { ok: false, reason: 'local_upload_button_not_found' };
+      await clickNode(uploadNode);
+      return { ok: true, detail: nodeInfo(uploadNode) };
+    };
     const coverApplied = () => {
       const root = findDialogRoot();
       if (root && visible(root)) return false;
       const text = textOf(document.body);
       if (text.includes('正文图片') && text.includes('素材库') && text.includes('本地上传')) return false;
       return true;
+    };
+    const confirmSelectedCover = async (root, source, selectedCount = 1) => {
+      const confirmed = await clickConfirm(root);
+      if (!confirmed) {
+        return {
+          ok: false,
+          source,
+          selected: true,
+          confirmed: false,
+          cover_applied: false,
+          reason: 'confirm_button_not_found',
+          detail: `selected_count=${selectedCount || 0}`
+        };
+      }
+      const applied = coverApplied();
+      if (!applied) {
+        return {
+          ok: false,
+          source,
+          selected: true,
+          confirmed: true,
+          cover_applied: false,
+          reason: 'cover_apply_not_verified',
+          detail: `selected_count=${selectedCount || 0}`
+        };
+      }
+      return {
+        ok: true,
+        source,
+        selected: true,
+        confirmed: true,
+        cover_applied: true,
+        reason: '',
+        detail: `selected_count=${selectedCount || 0}`
+      };
     };
 
     let root = await openCoverDialog();
@@ -254,6 +351,49 @@ def build_sohu_cover_js() -> str:
         cover_applied: false,
         reason: 'cover_trigger_not_found',
         detail: `cover dialog was not opened; candidate_texts=${openFailureDetail}`
+      };
+    }
+
+    if (phase === 'confirm_local_upload') {
+      return await confirmSelectedCover(root, 'local_upload', 1);
+    }
+
+    if (cover_path) {
+      const localTabReady = await clickTab(root, '本地上传');
+      if (!localTabReady) {
+        return {
+          ok: false,
+          source: 'local_upload',
+          selected: false,
+          confirmed: false,
+          cover_applied: false,
+          reason: 'local_upload_tab_not_found',
+          detail: activePanelText(root).slice(0, 120)
+        };
+      }
+      root = findDialogRoot() || root;
+      const clickedUpload = await clickLocalUploadEntry(root);
+      await sleep(500);
+      const input = findLocalUploadInput(root);
+      if (!input) {
+        return {
+          ok: false,
+          source: 'local_upload',
+          selected: false,
+          confirmed: false,
+          cover_applied: false,
+          reason: 'local_upload_input_not_found',
+          detail: clickedUpload.detail || clickedUpload.reason || activePanelText(root).slice(0, 120)
+        };
+      }
+      return {
+        ok: false,
+        source: 'local_upload',
+        selected: false,
+        confirmed: false,
+        cover_applied: false,
+        reason: 'local_upload_ready',
+        detail: `cover_path=${cover_path}; ${clickedUpload.detail || ''}`
       };
     }
 
@@ -296,47 +436,15 @@ def build_sohu_cover_js() -> str:
       }
     }
 
-    const confirmed = await clickConfirm(root);
-    if (!confirmed) {
-      return {
-        ok: false,
-        source,
-        selected: true,
-        confirmed: false,
-        cover_applied: false,
-        reason: 'confirm_button_not_found',
-        detail: `selected_count=${selected.count || 0}`
-      };
-    }
-
-    const applied = coverApplied();
-    if (!applied) {
-      return {
-        ok: false,
-        source,
-        selected: true,
-        confirmed: true,
-        cover_applied: false,
-        reason: 'cover_apply_not_verified',
-        detail: `selected_count=${selected.count || 0}`
-      };
-    }
-    return {
-      ok: true,
-      source,
-      selected: true,
-      confirmed: true,
-      cover_applied: true,
-      reason: '',
-      detail: `selected_count=${selected.count || 0}`
-    };
+    return await confirmSelectedCover(root, source, selected.count || 0);
   })();
 }
 """
 
 
 class SohuCoverSetter:
-    def __init__(self, logger=None):
+    def __init__(self, cover_path: str = "", logger=None):
+        self.cover_path = cover_path or ""
         self.logger = logger
 
     async def set_cover(self, browser_session) -> dict:
@@ -353,7 +461,10 @@ class SohuCoverSetter:
             if page is None:
                 return make_sohu_cover_failure("page_unavailable")
 
-            raw_result = await page.evaluate(build_sohu_cover_js(), {})
+            raw_result = await page.evaluate(
+                build_sohu_cover_js(),
+                {"cover_path": self.cover_path},
+            )
             result = normalize_evaluate_result(raw_result)
             if result is None:
                 self._warning(
@@ -362,6 +473,31 @@ class SohuCoverSetter:
                     str(raw_result)[:160],
                 )
                 return make_sohu_cover_failure("cover_result_invalid")
+
+            if result.get("reason") == "local_upload_ready":
+                upload_result = await self._upload_local_cover(page)
+                if not upload_result.get("ok"):
+                    return make_sohu_cover_failure(
+                        str(upload_result.get("reason") or "local_upload_failed"),
+                        source="local_upload",
+                        detail=str(upload_result.get("detail") or ""),
+                    )
+                raw_result = await page.evaluate(
+                    build_sohu_cover_js(),
+                    {"cover_path": self.cover_path, "phase": "confirm_local_upload"},
+                )
+                result = normalize_evaluate_result(raw_result)
+                if result is None:
+                    self._warning(
+                        "[SohuCoverTool] failed reason=cover_result_invalid_after_upload "
+                        "raw_type=%s raw_preview=%r",
+                        type(raw_result).__name__,
+                        str(raw_result)[:160],
+                    )
+                    return make_sohu_cover_failure(
+                        "cover_result_invalid_after_upload",
+                        source="local_upload",
+                    )
 
             stable = self._stable_result(result)
             level = self._info if stable.get("ok") else self._warning
@@ -382,6 +518,29 @@ class SohuCoverSetter:
             reason = f"exception:{str(exc)[:120]}"
             self._warning("[SohuCoverTool] failed reason=%s", reason)
             return make_sohu_cover_failure(reason)
+
+    async def _upload_local_cover(self, page) -> dict:
+        if not self.cover_path:
+            return {"ok": False, "reason": "local_cover_path_empty", "detail": ""}
+        cover_file = Path(self.cover_path)
+        if not cover_file.exists():
+            return {
+                "ok": False,
+                "reason": "local_cover_file_not_found",
+                "detail": self.cover_path,
+            }
+
+        self._info("[SohuCoverTool] local_upload_ready path=%s", self.cover_path)
+        try:
+            file_input = page.locator('input[type="file"]').last
+            await file_input.set_input_files(str(cover_file))
+            self._info("[SohuCoverTool] local_upload_file_set path=%s", self.cover_path)
+            await page.wait_for_timeout(1800)
+            return {"ok": True, "reason": "", "detail": str(cover_file)}
+        except Exception as exc:
+            reason = f"local_upload_set_input_failed:{str(exc)[:120]}"
+            self._warning("[SohuCoverTool] failed reason=%s", reason)
+            return {"ok": False, "reason": reason, "detail": self.cover_path}
 
     @staticmethod
     def _stable_result(result: dict) -> dict:

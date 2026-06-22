@@ -46,6 +46,11 @@ def test_sohu_cover_js_is_browser_use_compatible_and_avoids_file_upload() -> Non
     script = build_sohu_cover_js()
 
     assert script.strip().startswith("(...args) =>")
+    assert "cover_path" in script
+    assert ".upload-file.mp-upload" in script
+    assert "findExactCoverUploadTrigger" in script
+    assert "clicked_trigger_tag" in script
+    assert "local_upload" in script
     assert "body_image" in script
     assert "material_library" in script
     assert "input[type=\"file\"]" in script
@@ -57,6 +62,12 @@ def test_sohu_cover_js_is_browser_use_compatible_and_avoids_file_upload() -> Non
     assert "candidate_texts" in script
     assert "material_fallback_without_body_tab" in script
     assert ".click()" in script
+
+
+def test_sohu_cover_setter_keeps_cover_path_for_local_upload() -> None:
+    setter = SohuCoverSetter(cover_path="C:/tmp/cover.jpg")
+
+    assert setter.cover_path == "C:/tmp/cover.jpg"
 
 
 @pytest.mark.asyncio
@@ -96,7 +107,41 @@ async def test_sohu_cover_setter_accepts_json_string_evaluate_result() -> None:
     assert result["ok"] is True
     assert result["source"] == "body_image"
     assert result["cover_applied"] is True
-    assert session.page.calls[0][1] == {}
+    assert session.page.calls[0][1] == {"cover_path": ""}
+
+
+@pytest.mark.asyncio
+async def test_sohu_cover_setter_passes_cover_path_to_browser_script() -> None:
+    class FakePage:
+        def __init__(self):
+            self.calls = []
+
+        async def evaluate(self, script, arg=None):
+            self.calls.append((script, arg))
+            return {
+                "ok": True,
+                "source": "local_upload",
+                "selected": True,
+                "confirmed": True,
+                "cover_applied": True,
+                "reason": "",
+                "detail": "uploaded local cover",
+            }
+
+    class FakeSession:
+        def __init__(self):
+            self.page = FakePage()
+
+        async def must_get_current_page(self):
+            return self.page
+
+    session = FakeSession()
+
+    result = await SohuCoverSetter(cover_path="C:/tmp/cover.jpg").set_cover(session)
+
+    assert result["ok"] is True
+    assert result["source"] == "local_upload"
+    assert session.page.calls[0][1] == {"cover_path": "C:/tmp/cover.jpg"}
 
 
 @pytest.mark.asyncio
