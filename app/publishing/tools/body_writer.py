@@ -137,6 +137,18 @@ def normalize_evaluate_result(value: Any) -> dict | None:
     return None
 
 
+def is_transient_evaluate_exception(exc: Exception) -> bool:
+    message = str(exc)
+    transient_markers = (
+        "Runtime.evaluate",
+        "CDP method",
+        "TimeoutError",
+        "timed out",
+        "timeout",
+    )
+    return isinstance(exc, TimeoutError) or any(marker in message for marker in transient_markers)
+
+
 def build_clipboard_text_js() -> str:
     return r"""
 (...args) => {
@@ -317,117 +329,117 @@ class BodyWriter:
             if page is None:
                 return make_body_write_failure(mode=mode, reason="page_unavailable")
 
-            raw_focus = await page.evaluate(FOCUS_EDITOR_JS, None)
-            focus = normalize_evaluate_result(raw_focus)
-            if focus is None:
-                self._warning(
-                    "[BodyTool] failed mode=%s reason=focus_result_invalid raw_type=%s raw_preview=%r",
-                    mode,
-                    type(raw_focus).__name__,
-                    str(raw_focus)[:120],
-                )
-                return make_body_write_failure(mode=mode, reason="focus_result_invalid")
-            if not focus or not focus.get("ok"):
-                reason = (focus or {}).get("reason") or "editor_not_found"
-                self._warning("[BodyTool] failed mode=%s reason=%s", mode, reason)
-                return make_body_write_failure(mode=mode, reason=reason)
+            last_exception: Exception | None = None
+            for attempt in range(1, 3):
+                try:
+                    return await self._paste_once(
+                        mode=mode,
+                        page=page,
+                        text=text,
+                        html=html,
+                        method_hint=method,
+                        started=started,
+                    )
+                except Exception as exc:
+                    last_exception = exc
+                    if attempt >= 2 or not is_transient_evaluate_exception(exc):
+                        break
+                    self._warning(
+                        "[BodyTool] retry_after_exception mode=%s attempt=%s reason=%s",
+                        mode,
+                        attempt,
+                        str(exc)[:120],
+                    )
+                    await asyncio.sleep(0.5)
 
-            if mode == "rich_html" and html:
-                raw_clipboard = await page.evaluate(
-                    build_clipboard_html_js(),
-                    {"html": html, "text": text or ""},
-                )
-            else:
-                raw_clipboard = await page.evaluate(build_clipboard_text_js(), text or "")
-            clipboard = normalize_evaluate_result(raw_clipboard)
-            if clipboard is None:
-                self._warning(
-                    "[BodyTool] failed mode=%s reason=clipboard_result_invalid raw_type=%s raw_preview=%r",
-                    mode,
-                    type(raw_clipboard).__name__,
-                    str(raw_clipboard)[:120],
-                )
-                return make_body_write_failure(mode=mode, reason="clipboard_result_invalid")
-            method = str((clipboard or {}).get("method") or "")
-            if not clipboard or not clipboard.get("ok"):
-                self._warning(
-                    "[BodyTool] failed mode=%s reason=clipboard_write_failed method=%s error=%s",
-                    mode,
-                    method,
-                    (clipboard or {}).get("error", ""),
-                )
-                return make_body_write_failure(
-                    mode=mode,
-                    reason="clipboard_write_failed",
-                    method=method,
-                )
-            self._info("[BodyTool] clipboard_written mode=%s method=%s", mode, method)
+            reason = f"exception:{str(last_exception)[:120]}"
+            self._warning("[BodyTool] failed mode=%s reason=%s", mode, reason)
+            return make_body_write_failure(mode=mode, reason=reason, method=method)
+        except Exception as exc:
+            reason = f"exception:{str(exc)[:120]}"
+            self._warning("[BodyTool] failed mode=%s reason=%s", mode, reason)
+            return make_body_write_failure(mode=mode, reason=reason, method=method)
 
-            await page.press("Control+V")
-            self._info("[BodyTool] paste_sent mode=%s keys=Control+V", mode)
-            await asyncio.sleep(1.0 if mode == "rich_html" else 0.5)
-
-            raw_state = await page.evaluate(READ_EDITOR_STATE_JS, self.payload.body_probe or "")
-            state = normalize_evaluate_result(raw_state)
-            if state is None:
-                self._warning(
-                    "[BodyTool] failed mode=%s reason=state_result_invalid raw_type=%s raw_preview=%r",
-                    mode,
-                    type(raw_state).__name__,
-                    str(raw_state)[:120],
-                )
-                return make_body_write_failure(mode=mode, reason="state_result_invalid", method=method)
-            integrity = evaluate_body_integrity(
-                str(state.get("text", "") or ""),
-                self.payload.plain_text or "",
-            )
-            editor_len = int(integrity.get("editor_text_length") or state.get("editor_text_length") or 0)
-            probe_found = bool(integrity.get("probe_found"))
-            if integrity["ok"]:
-                result = make_body_write_success(
-                    mode=mode,
-                    method=method,
-                    editor_text_length=editor_len,
-                    probe_found=probe_found,
-                    expected_text_length=integrity["expected_text_length"],
-                    length_ratio=integrity["length_ratio"],
-                    probe_start_found=integrity["probe_start_found"],
-                    probe_middle_found=integrity["probe_middle_found"],
-                    probe_end_found=integrity["probe_end_found"],
-                )
-                self._info(
-                    "[BodyTool] verify_result ok=true mode=%s method=%s probe_found=%s "
-                    "editor_len=%s expected_len=%s length_ratio=%.2f probes=%s/%s/%s duration=%.2fs",
-                    mode,
-                    method,
-                    probe_found,
-                    editor_len,
-                    integrity["expected_text_length"],
-                    integrity["length_ratio"],
-                    integrity["probe_start_found"],
-                    integrity["probe_middle_found"],
-                    integrity["probe_end_found"],
-                    time.perf_counter() - started,
-                )
-                return result
-
+    async def _paste_once(
+        self,
+        *,
+        mode: str,
+        page,
+        text: str,
+        html: str,
+        method_hint: str,
+        started: float,
+    ) -> dict:
+        method = method_hint
+        raw_focus = await page.evaluate(FOCUS_EDITOR_JS, None)
+        focus = normalize_evaluate_result(raw_focus)
+        if focus is None:
             self._warning(
-                "[BodyTool] failed mode=%s reason=body_incomplete method=%s probe_found=%s "
-                "editor_len=%s expected_len=%s length_ratio=%.2f probes=%s/%s/%s preview=%r",
+                "[BodyTool] failed mode=%s reason=focus_result_invalid raw_type=%s raw_preview=%r",
+                mode,
+                type(raw_focus).__name__,
+                str(raw_focus)[:120],
+            )
+            return make_body_write_failure(mode=mode, reason="focus_result_invalid")
+        if not focus or not focus.get("ok"):
+            reason = (focus or {}).get("reason") or "editor_not_found"
+            self._warning("[BodyTool] failed mode=%s reason=%s", mode, reason)
+            return make_body_write_failure(mode=mode, reason=reason)
+
+        if mode == "rich_html" and html:
+            raw_clipboard = await page.evaluate(
+                build_clipboard_html_js(),
+                {"html": html, "text": text or ""},
+            )
+        else:
+            raw_clipboard = await page.evaluate(build_clipboard_text_js(), text or "")
+        clipboard = normalize_evaluate_result(raw_clipboard)
+        if clipboard is None:
+            self._warning(
+                "[BodyTool] failed mode=%s reason=clipboard_result_invalid raw_type=%s raw_preview=%r",
+                mode,
+                type(raw_clipboard).__name__,
+                str(raw_clipboard)[:120],
+            )
+            return make_body_write_failure(mode=mode, reason="clipboard_result_invalid")
+        method = str((clipboard or {}).get("method") or "")
+        if not clipboard or not clipboard.get("ok"):
+            self._warning(
+                "[BodyTool] failed mode=%s reason=clipboard_write_failed method=%s error=%s",
                 mode,
                 method,
-                probe_found,
-                editor_len,
-                integrity["expected_text_length"],
-                integrity["length_ratio"],
-                integrity["probe_start_found"],
-                integrity["probe_middle_found"],
-                integrity["probe_end_found"],
-                str((state or {}).get("preview", ""))[:120],
+                (clipboard or {}).get("error", ""),
             )
             return make_body_write_failure(
                 mode=mode,
-                reason="body_incomplete",
+                reason="clipboard_write_failed",
+                method=method,
+            )
+        self._info("[BodyTool] clipboard_written mode=%s method=%s", mode, method)
+
+        await page.press("Control+V")
+        self._info("[BodyTool] paste_sent mode=%s keys=Control+V", mode)
+        await asyncio.sleep(1.0 if mode == "rich_html" else 0.5)
+
+        raw_state = await page.evaluate(READ_EDITOR_STATE_JS, self.payload.body_probe or "")
+        state = normalize_evaluate_result(raw_state)
+        if state is None:
+            self._warning(
+                "[BodyTool] failed mode=%s reason=state_result_invalid raw_type=%s raw_preview=%r",
+                mode,
+                type(raw_state).__name__,
+                str(raw_state)[:120],
+            )
+            return make_body_write_failure(mode=mode, reason="state_result_invalid", method=method)
+        integrity = evaluate_body_integrity(
+            str(state.get("text", "") or ""),
+            self.payload.plain_text or "",
+        )
+        editor_len = int(integrity.get("editor_text_length") or state.get("editor_text_length") or 0)
+        probe_found = bool(integrity.get("probe_found"))
+        if integrity["ok"]:
+            result = make_body_write_success(
+                mode=mode,
                 method=method,
                 editor_text_length=editor_len,
                 probe_found=probe_found,
@@ -437,10 +449,48 @@ class BodyWriter:
                 probe_middle_found=integrity["probe_middle_found"],
                 probe_end_found=integrity["probe_end_found"],
             )
-        except Exception as exc:
-            reason = f"exception:{str(exc)[:120]}"
-            self._warning("[BodyTool] failed mode=%s reason=%s", mode, reason)
-            return make_body_write_failure(mode=mode, reason=reason, method=method)
+            self._info(
+                "[BodyTool] verify_result ok=true mode=%s method=%s probe_found=%s "
+                "editor_len=%s expected_len=%s length_ratio=%.2f probes=%s/%s/%s duration=%.2fs",
+                mode,
+                method,
+                probe_found,
+                editor_len,
+                integrity["expected_text_length"],
+                integrity["length_ratio"],
+                integrity["probe_start_found"],
+                integrity["probe_middle_found"],
+                integrity["probe_end_found"],
+                time.perf_counter() - started,
+            )
+            return result
+
+        self._warning(
+            "[BodyTool] failed mode=%s reason=body_incomplete method=%s probe_found=%s "
+            "editor_len=%s expected_len=%s length_ratio=%.2f probes=%s/%s/%s preview=%r",
+            mode,
+            method,
+            probe_found,
+            editor_len,
+            integrity["expected_text_length"],
+            integrity["length_ratio"],
+            integrity["probe_start_found"],
+            integrity["probe_middle_found"],
+            integrity["probe_end_found"],
+            str((state or {}).get("preview", ""))[:120],
+        )
+        return make_body_write_failure(
+            mode=mode,
+            reason="body_incomplete",
+            method=method,
+            editor_text_length=editor_len,
+            probe_found=probe_found,
+            expected_text_length=integrity["expected_text_length"],
+            length_ratio=integrity["length_ratio"],
+            probe_start_found=integrity["probe_start_found"],
+            probe_middle_found=integrity["probe_middle_found"],
+            probe_end_found=integrity["probe_end_found"],
+        )
 
     def _info(self, message: str, *args: Any) -> None:
         if self.logger:

@@ -145,6 +145,7 @@ class TestPublishTools:
                 platform_name="sohu",
             ),
         )
+        assert "set_sohu_title" in registered_actions
         assert "set_sohu_cover" in registered_actions
 
         registered_actions.clear()
@@ -159,4 +160,5 @@ class TestPublishTools:
                 platform_name="toutiao",
             ),
         )
+        assert "set_sohu_title" not in registered_actions
         assert "set_sohu_cover" not in registered_actions

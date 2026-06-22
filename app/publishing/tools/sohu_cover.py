@@ -231,23 +231,16 @@ def build_sohu_cover_js() -> str:
     }
 
     const bodyTabReady = await clickTab(root, '正文图片');
-    if (!bodyTabReady) {
-      return {
-        ok: false,
-        source: '',
-        selected: false,
-        confirmed: false,
-        cover_applied: false,
-        reason: 'body_image_check_failed',
-        detail: 'body image tab not found'
-      };
-    }
-    root = findDialogRoot() || root;
     let source = 'body_image';
-    let selected = await selectFirstImage(root);
+    let selected = { ok: false, reason: 'body_image_tab_not_found', count: 0 };
+    let bodyDetail = 'material_fallback_without_body_tab: body image tab not found';
+    if (bodyTabReady) {
+      root = findDialogRoot() || root;
+      selected = await selectFirstImage(root);
+      bodyDetail = `${selected.reason}; ${activePanelText(root).slice(0, 120)}`;
+    }
 
     if (!selected.ok) {
-      const bodyDetail = `${selected.reason}; ${activePanelText(root).slice(0, 120)}`;
       const materialTabReady = await clickTab(root, '素材库');
       if (!materialTabReady) {
         return {

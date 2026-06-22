@@ -154,10 +154,11 @@ class TestSohuPrompt:
             is_markdown=False,
         )
 
-        assert "必须先真实点击搜狐号标题输入框" in prompt
-        assert "不要因为页面、草稿列表或历史内容中出现相似标题就跳过标题输入" in prompt
-        assert "读取标题输入框的实际值" in prompt
+        assert "set_sohu_title" in prompt
         assert "搜狐号标题填写失败：实际标题与预期不符" in prompt
+        assert "必须调用 `set_sohu_title` 工具" in prompt
+        assert "不要手动输入标题或根据标题计数自行重输" in prompt
+        assert "标题工具返回 ok=true 且 verified=true" in prompt
 
 
 class TestPlatformTitleMatching:

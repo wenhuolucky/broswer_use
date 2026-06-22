@@ -91,14 +91,12 @@ Agent 执行规则：
 2. 确认当前账号已登录；如果未登录，停止并返回失败。
 3. 读取当前账号显示名，记为 account_name。
 4. 进入文章发布入口。
-5. 填写标题：{title}
-   - 必须先真实点击搜狐号标题输入框，再使用 input/type/paste/send_keys 输入标题。
-   - 不要因为页面、草稿列表或历史内容中出现相似标题就跳过标题输入。
-   - 不要用 evaluate 或直接设置 input/textarea.value 作为标题输入成功依据。
-   - 输入后必须读取标题输入框的实际值：input 读 value，textarea 读 value/textContent，contenteditable 读 innerText。
-   - 实际值与字符串 "{title}" 去掉首尾空白后必须完全匹配，才允许继续正文工具。
-   - 如果不匹配，重新清空标题输入框，再点击并重新输入，最多重试 2 次。
-   - 2 次后仍不匹配，立即调用 done 返回 success=false，failure_reason="搜狐号标题填写失败：实际标题与预期不符"。
+5. 调用 `set_sohu_title` 工具设置标题：{title}
+   - 必须调用 `set_sohu_title` 工具，不要手动输入标题或根据标题计数自行重输。
+   - 标题工具会自行定位输入框、清空旧值、写入标题并读取实际值校验。
+   - 标题工具返回 ok=true 且 verified=true 后，才允许继续正文工具。
+   - 如果工具返回 ok=false，最多重新进入/聚焦发文页后再调用 1 次。
+   - 第 2 次仍失败时，立即调用 done 返回 success=false，failure_reason="搜狐号标题填写失败：实际标题与预期不符"。
 6. 聚焦搜狐号正文编辑器，调用 `paste_rich_html_body`，确认返回 ok=true 且 probe_found=true。
 7. 如果页面需要点击"下一步"，点击进入发布设置页。
 8. {cover_instruction.strip()}
@@ -142,14 +140,12 @@ Agent 执行规则：
 2. 确认当前账号已登录；如果未登录，停止并返回失败。
 3. 读取当前账号显示名，记为 account_name。
 4. 进入文章发布入口。
-5. 填写标题：{title}
-   - 必须先真实点击搜狐号标题输入框，再使用 input/type/paste/send_keys 输入标题。
-   - 不要因为页面、草稿列表或历史内容中出现相似标题就跳过标题输入。
-   - 不要用 evaluate 或直接设置 input/textarea.value 作为标题输入成功依据。
-   - 输入后必须读取标题输入框的实际值：input 读 value，textarea 读 value/textContent，contenteditable 读 innerText。
-   - 实际值与字符串 "{title}" 去掉首尾空白后必须完全匹配，才允许继续正文工具。
-   - 如果不匹配，重新清空标题输入框，再点击并重新输入，最多重试 2 次。
-   - 2 次后仍不匹配，立即调用 done 返回 success=false，failure_reason="搜狐号标题填写失败：实际标题与预期不符"。
+5. 调用 `set_sohu_title` 工具设置标题：{title}
+   - 必须调用 `set_sohu_title` 工具，不要手动输入标题或根据标题计数自行重输。
+   - 标题工具会自行定位输入框、清空旧值、写入标题并读取实际值校验。
+   - 标题工具返回 ok=true 且 verified=true 后，才允许继续正文工具。
+   - 如果工具返回 ok=false，最多重新进入/聚焦发文页后再调用 1 次。
+   - 第 2 次仍失败时，立即调用 done 返回 success=false，failure_reason="搜狐号标题填写失败：实际标题与预期不符"。
 6. 聚焦搜狐号正文编辑器，调用 `paste_plain_text_body`，确认返回 ok=true 且 probe_found=true。
 7. 如果页面需要点击"下一步"，点击进入发布设置页。
 8. {cover_instruction.strip()}
