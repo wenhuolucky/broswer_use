@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -122,6 +123,18 @@ def evaluate_body_integrity(editor_text: str, expected_text: str) -> dict:
         "probe_middle_found": middle_found,
         "probe_end_found": end_found,
     }
+
+
+def normalize_evaluate_result(value: Any) -> dict | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
 
 
 def build_clipboard_text_js() -> str:
@@ -295,13 +308,14 @@ class BodyWriter:
             if page is None:
                 return make_body_write_failure(mode=mode, reason="page_unavailable")
 
-            focus = await page.evaluate(FOCUS_EDITOR_JS, None)
-            if not isinstance(focus, dict):
+            raw_focus = await page.evaluate(FOCUS_EDITOR_JS, None)
+            focus = normalize_evaluate_result(raw_focus)
+            if focus is None:
                 self._warning(
                     "[BodyTool] failed mode=%s reason=focus_result_invalid raw_type=%s raw_preview=%r",
                     mode,
-                    type(focus).__name__,
-                    str(focus)[:120],
+                    type(raw_focus).__name__,
+                    str(raw_focus)[:120],
                 )
                 return make_body_write_failure(mode=mode, reason="focus_result_invalid")
             if not focus or not focus.get("ok"):
@@ -310,18 +324,19 @@ class BodyWriter:
                 return make_body_write_failure(mode=mode, reason=reason)
 
             if mode == "rich_html" and html:
-                clipboard = await page.evaluate(
+                raw_clipboard = await page.evaluate(
                     build_clipboard_html_js(),
                     {"html": html, "text": text or ""},
                 )
             else:
-                clipboard = await page.evaluate(build_clipboard_text_js(), text or "")
-            if not isinstance(clipboard, dict):
+                raw_clipboard = await page.evaluate(build_clipboard_text_js(), text or "")
+            clipboard = normalize_evaluate_result(raw_clipboard)
+            if clipboard is None:
                 self._warning(
                     "[BodyTool] failed mode=%s reason=clipboard_result_invalid raw_type=%s raw_preview=%r",
                     mode,
-                    type(clipboard).__name__,
-                    str(clipboard)[:120],
+                    type(raw_clipboard).__name__,
+                    str(raw_clipboard)[:120],
                 )
                 return make_body_write_failure(mode=mode, reason="clipboard_result_invalid")
             method = str((clipboard or {}).get("method") or "")
@@ -343,13 +358,14 @@ class BodyWriter:
             self._info("[BodyTool] paste_sent mode=%s keys=Control+V", mode)
             await asyncio.sleep(1.0 if mode == "rich_html" else 0.5)
 
-            state = await page.evaluate(READ_EDITOR_STATE_JS, self.payload.body_probe or "")
-            if not isinstance(state, dict):
+            raw_state = await page.evaluate(READ_EDITOR_STATE_JS, self.payload.body_probe or "")
+            state = normalize_evaluate_result(raw_state)
+            if state is None:
                 self._warning(
                     "[BodyTool] failed mode=%s reason=state_result_invalid raw_type=%s raw_preview=%r",
                     mode,
-                    type(state).__name__,
-                    str(state)[:120],
+                    type(raw_state).__name__,
+                    str(raw_state)[:120],
                 )
                 return make_body_write_failure(mode=mode, reason="state_result_invalid", method=method)
             integrity = evaluate_body_integrity(

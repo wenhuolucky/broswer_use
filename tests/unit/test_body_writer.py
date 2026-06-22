@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.publishing.tools.body_writer import (
@@ -96,6 +98,56 @@ async def test_body_writer_returns_invalid_focus_result_when_evaluate_returns_st
     assert result["ok"] is False
     assert result["reason"] == "focus_result_invalid"
     assert result["probe_found"] is False
+
+
+@pytest.mark.asyncio
+async def test_body_writer_accepts_json_string_evaluate_results() -> None:
+    expected_text = "complete body text " * 20
+
+    class FakeKeyboard:
+        async def press(self, _keys):
+            return None
+
+    class FakePage:
+        keyboard = FakeKeyboard()
+
+        def __init__(self):
+            self.calls = 0
+
+        async def evaluate(self, *_args):
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps({"ok": True, "reason": ""})
+            if self.calls == 2:
+                return json.dumps({"ok": True, "method": "navigator.clipboard.writeText"})
+            return json.dumps(
+                {
+                    "editor_text_length": len(expected_text),
+                    "editor_source": "contenteditable",
+                    "probe_found": True,
+                    "preview": expected_text[:120],
+                    "text": expected_text,
+                }
+            )
+
+    class FakeSession:
+        async def get_current_page(self):
+            return FakePage()
+
+    writer = BodyWriter(
+        BodyWritePayload(
+            plain_text=expected_text,
+            rich_html="",
+            body_probe=expected_text[:30],
+            platform_name="toutiao",
+        )
+    )
+
+    result = await writer.paste_plain_text_body(FakeSession())
+
+    assert result["ok"] is True
+    assert result["method"] == "navigator.clipboard.writeText"
+    assert result["editor_text_length"] == len(expected_text.replace(" ", ""))
 
 
 @pytest.mark.asyncio
