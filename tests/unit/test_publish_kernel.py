@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
 
 import pytest
 
+from app.publishing.kernel import PublishTaskBundle
 from app.publishing.kernel import PublishService
 
 
@@ -106,3 +109,54 @@ class TestCleanupWithTimeout:
         )
 
         assert result == {"label": "browser", "closed": True, "timed_out": False}
+
+
+class TestPublishTools:
+    def test_registers_sohu_cover_tool_only_for_sohu_platform(self, monkeypatch) -> None:
+        registered_actions: list[str] = []
+
+        class FakeActionResult:
+            def __init__(self, extracted_content: str, include_in_memory: bool):
+                self.extracted_content = extracted_content
+                self.include_in_memory = include_in_memory
+
+        class FakeController:
+            def action(self, description: str):
+                def decorator(func):
+                    registered_actions.append(func.__name__)
+                    return func
+
+                return decorator
+
+        fake_browser_use = types.SimpleNamespace(
+            ActionResult=FakeActionResult,
+            Controller=FakeController,
+        )
+        monkeypatch.setitem(sys.modules, "browser_use", fake_browser_use)
+
+        PublishService()._build_publish_tools(
+            logger=None,
+            body_payload=PublishTaskBundle(
+                task="",
+                plain_text="body",
+                rich_html="",
+                body_probe="body",
+                is_markdown=False,
+                platform_name="sohu",
+            ),
+        )
+        assert "set_sohu_cover" in registered_actions
+
+        registered_actions.clear()
+        PublishService()._build_publish_tools(
+            logger=None,
+            body_payload=PublishTaskBundle(
+                task="",
+                plain_text="body",
+                rich_html="",
+                body_probe="body",
+                is_markdown=False,
+                platform_name="toutiao",
+            ),
+        )
+        assert "set_sohu_cover" not in registered_actions

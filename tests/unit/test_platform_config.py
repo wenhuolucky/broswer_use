@@ -132,6 +132,19 @@ class TestSohuPrompt:
         assert "ClipboardItem" not in prompt
         assert "```javascript" not in prompt
 
+    def test_prompt_requires_sohu_cover_tool_and_forbids_manual_cover_clicks(self) -> None:
+        prompt = SohuPlatform().get_agent_prompt(
+            title="cover-title",
+            content="plain body for probe",
+            cover_instruction="cover not required",
+            body_image_instruction="",
+            is_markdown=False,
+        )
+
+        assert "set_sohu_cover" in prompt
+        assert "不要手动点击正文图片、素材库、本地上传或确定按钮" in prompt
+        assert "封面工具返回 ok=false 时最多重试 1 次" in prompt
+
 
 class TestPlatformTitleMatching:
     def test_ignores_internal_whitespace_when_matching_toutiao_article_title(self) -> None:

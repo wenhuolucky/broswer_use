@@ -930,10 +930,12 @@ class PublishService:
 
     def _build_publish_tools(self, logger, original_title: str = "", body_payload: PublishTaskBundle | None = None):
         from browser_use import ActionResult, Controller
-        from app.publishing.tools import BodyWritePayload, BodyWriter
+        from app.publishing.tools import BodyWritePayload, BodyWriter, SohuCoverSetter
 
         controller = Controller()
         writer = None
+        platform_name = (getattr(body_payload, "platform_name", "") or "").lower() if body_payload else ""
+        sohu_cover_setter = SohuCoverSetter(logger=logger) if platform_name == "sohu" else None
         if body_payload:
             writer = BodyWriter(
                 BodyWritePayload(
@@ -1010,6 +1012,32 @@ class PublishService:
                 extracted_content=json.dumps(result, ensure_ascii=False),
                 include_in_memory=True,
             )
+
+        if sohu_cover_setter is not None:
+            @controller.action(
+                "设置搜狐号封面。无参数。正文写入成功并进入封面设置区域后调用。"
+                "工具会优先选择正文图片第一张；正文无图时选择素材库第一张；返回 ok=true 后才允许继续发布。"
+            )
+            async def set_sohu_cover(browser_session):
+                tool_start = time.perf_counter()
+                result = await sohu_cover_setter.set_cover(browser_session)
+                if logger:
+                    logger.info(
+                        "[AgentTool] name=set_sohu_cover duration=%.2fs ok=%s "
+                        "source=%s selected=%s confirmed=%s cover_applied=%s reason=%r detail=%r",
+                        time.perf_counter() - tool_start,
+                        result.get("ok"),
+                        result.get("source", ""),
+                        result.get("selected"),
+                        result.get("confirmed"),
+                        result.get("cover_applied"),
+                        result.get("reason", ""),
+                        result.get("detail", ""),
+                    )
+                return ActionResult(
+                    extracted_content=json.dumps(result, ensure_ascii=False),
+                    include_in_memory=True,
+                )
 
         @controller.action(
             "发布后调用此工具获取文章链接。输入本次发布标题 title。工具会打开作品管理页，最多查询 3 次同标题文章；"
