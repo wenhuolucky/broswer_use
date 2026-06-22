@@ -23,6 +23,8 @@ def test_plain_text_clipboard_js_uses_clipboard_without_dom_body_injection() -> 
 
     assert script.strip().startswith("(...args) =>")
     assert "navigator.clipboard.writeText" in script
+    assert "clipboardWriteTimeoutMs" in script
+    assert "Promise.race" in script
     assert "document.execCommand('copy')" in script
     assert ".innerHTML" not in script
     assert "insertHTML" not in script

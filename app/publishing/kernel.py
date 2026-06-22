@@ -232,6 +232,7 @@ class PublishService:
             browser_start = asyncio.get_event_loop().time()
             playwright, _, temp_profile, publish_cdp_port = await self._launch_isolated_publish_browser(
                 auth_file=auth_file,
+                platform_name=platform.name,
                 logger=logger,
             )
             from browser_use import BrowserSession
@@ -457,7 +458,7 @@ class PublishService:
             "vision_detail_level": raw_detail,
         }
 
-    async def _launch_isolated_publish_browser(self, auth_file, logger):
+    async def _launch_isolated_publish_browser(self, auth_file, logger, platform_name: str = ""):
         last_exc = None
         for attempt in range(1, self._browser_launch_attempts + 1):
             publish_cdp_port = _find_free_port()
@@ -472,6 +473,7 @@ class PublishService:
                     user_data_dir=USER_DATA_DIR,
                     cdp_port=publish_cdp_port,
                     auth_file=auth_file,
+                    platform_name=platform_name,
                     logger=logger,
                 )
                 return playwright, context, temp_profile, publish_cdp_port
@@ -501,7 +503,15 @@ class PublishService:
         )
         return any(marker in text for marker in markers)
 
-    async def _launch_browser(self, user_data_dir, cdp_port, auth_file, logger):
+    @staticmethod
+    def _clipboard_permission_origins(platform_name: str) -> list[str]:
+        origins = {
+            "sohu": ["https://mp.sohu.com"],
+            "toutiao": ["https://mp.toutiao.com"],
+        }
+        return origins.get((platform_name or "").strip().lower(), ["https://mp.toutiao.com"])
+
+    async def _launch_browser(self, user_data_dir, cdp_port, auth_file, logger, platform_name: str = ""):
         from app.utils.browser import get_browser_path
         from playwright.async_api import async_playwright
 
@@ -537,14 +547,19 @@ class PublishService:
         # 控制）。调试期失败仅 warning 不阻断，避免误杀；严格化可改为抛出。
         if proxy_info is not None:
             await self._verify_exit_ip(context, proxy_info, logger)
-        try:
-            await context.grant_permissions(
-                ["clipboard-read", "clipboard-write"],
-                origin="https://mp.toutiao.com",
-            )
-            logger.info("[Browser] 已授予头条域名的剪贴板权限")
-        except Exception as exc:
-            logger.warning(f"[Browser] 授予剪贴板权限失败（可忽略）: {exc}")
+        for origin in self._clipboard_permission_origins(platform_name):
+            try:
+                await context.grant_permissions(
+                    ["clipboard-read", "clipboard-write"],
+                    origin=origin,
+                )
+                logger.info(
+                    "[Browser] 已授予 %s 剪贴板权限 origin=%s",
+                    platform_name or "default",
+                    origin,
+                )
+            except Exception as exc:
+                logger.warning("[Browser] 授予剪贴板权限失败 origin=%s error=%s", origin, exc)
 
         if auth_file and Path(auth_file).exists():
             with open(auth_file, "r", encoding="utf-8") as file_obj:

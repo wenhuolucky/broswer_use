@@ -153,15 +153,8 @@ def build_clipboard_text_js() -> str:
     return r"""
 (...args) => {
   const bodyText = args[0] || '';
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      return navigator.clipboard.writeText(bodyText).then(
-        () => ({ ok: true, method: 'navigator.clipboard.writeText' }),
-        () => ({ ok: false, method: 'navigator.clipboard.writeText' })
-      );
-    }
-  } catch (error) {}
-  try {
+  const clipboardWriteTimeoutMs = 1800;
+  const copyWithExecCommand = () => {
     const textarea = document.createElement('textarea');
     textarea.value = bodyText;
     textarea.setAttribute('readonly', '');
@@ -172,6 +165,29 @@ def build_clipboard_text_js() -> str:
     const ok = document.execCommand('copy');
     document.body.removeChild(textarea);
     return { ok: !!ok, method: 'execCommand' };
+  };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      const timeout = new Promise((resolve) => setTimeout(
+        () => resolve({ ok: false, method: 'navigator.clipboard.writeText', error: 'clipboard_write_timeout' }),
+        clipboardWriteTimeoutMs
+      ));
+      const write = navigator.clipboard.writeText(bodyText).then(
+        () => ({ ok: true, method: 'navigator.clipboard.writeText' }),
+        (error) => ({ ok: false, method: 'navigator.clipboard.writeText', error: String(error) })
+      );
+      return Promise.race([write, timeout]).then((result) => {
+        if (result && result.ok) return result;
+        const fallback = copyWithExecCommand();
+        if (fallback.ok) {
+          return { ok: true, method: 'execCommand', fallback_from: result.method, fallback_reason: result.error || '' };
+        }
+        return { ok: false, method: result.method || '', error: result.error || 'clipboard_write_failed' };
+      });
+    }
+  } catch (error) {}
+  try {
+    return copyWithExecCommand();
   } catch (error) {
     return { ok: false, method: '', error: String(error) };
   }

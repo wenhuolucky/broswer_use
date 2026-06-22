@@ -112,6 +112,11 @@ class TestCleanupWithTimeout:
 
 
 class TestPublishTools:
+    def test_clipboard_permission_origins_follow_platform(self) -> None:
+        assert PublishService._clipboard_permission_origins("sohu") == ["https://mp.sohu.com"]
+        assert PublishService._clipboard_permission_origins("toutiao") == ["https://mp.toutiao.com"]
+        assert PublishService._clipboard_permission_origins("unknown") == ["https://mp.toutiao.com"]
+
     def test_registers_sohu_cover_tool_only_for_sohu_platform(self, monkeypatch) -> None:
         registered_actions: list[str] = []
 
