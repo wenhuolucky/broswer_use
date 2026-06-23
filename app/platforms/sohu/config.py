@@ -43,6 +43,18 @@ class SohuPlatform(PlatformConfig):
     ) -> str:
         body = self.strip_markdown(content)
         body_probe = self.body_probe(content)
+        # 搜狐号只有单封面：用搜狐号专属指令替换 kernel 的通用指令（去掉三封面/五封面等头条概念）
+        if cover_instruction and "使用 file input 上传下面这个本地文件" in cover_instruction:
+            cover_instruction = (
+                '\n7. 设置封面图片，严格按顺序执行：\n'
+                '   - 在封面设置区域找到并点击封面区域。\n'
+                '   - 在弹出的对话框中选择本地上传。\n'
+                '   - 使用 file input 上传下面这个本地文件：\n'
+                f'     {self._extract_cover_path(cover_instruction)}\n'
+                '   - 上传后先确认图片缩略图已出现或"确定"按钮已可点击。\n'
+                '   - 如果按钮暂不可点，等待 2 秒后重新检查；最多检查 3 次，不要无限等待。\n'
+                '   - 确认页面上显示封面预览后，再点击"确定"。\n'
+            )
         if is_markdown and rich_html:
             return self._tool_rich_html_prompt(
                 title=title,
@@ -58,6 +70,15 @@ class SohuPlatform(PlatformConfig):
             body_probe=body_probe,
             cover_instruction=cover_instruction,
         )
+
+    @staticmethod
+    def _extract_cover_path(cover_instruction: str) -> str:
+        """从通用 cover_instruction 中提取封面文件路径。"""
+        for line in cover_instruction.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("/", "C:/", "D:/", "E:/", "/tmp/", "/root/")):
+                return stripped
+        return ""
 
     def _tool_rich_html_prompt(
         self,
@@ -365,6 +386,5 @@ Agent 执行规则：
 搜狐号封面设置补充说明：
 - 上面 cover_instruction 的封面步骤必须严格按顺序执行，不要跳步。
 - 正文写入工具返回 ok=true 且 probe_found=true 后，先在编辑页找到封面设置区域并点击。
-- 保持单封面，不要选择三封面或五封面。
 - 封面设置失败时最多重试 1 次，仍失败则跳过封面，继续分类、摘要和发布。
 """

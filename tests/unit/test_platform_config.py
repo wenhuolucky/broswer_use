@@ -145,9 +145,36 @@ class TestSohuPrompt:
         assert "set_sohu_cover" not in prompt
         assert "不要手动点击正文图片、素材库、本地上传或确定按钮" not in prompt
         assert "封面设置补充说明" in prompt
-        assert "保持单封面" in prompt
         assert "封面设置失败时最多重试 1 次" in prompt
         assert "跳过封面" in prompt
+        # 搜狐号只有单封面，不应包含三封面/五封面等头条概念
+        assert "三封面" not in prompt
+        assert "五封面" not in prompt
+
+    def test_sohu_cover_prompt_overrides_generic_with_sohu_specific(self) -> None:
+        """有封面文件时，搜狐号用专属指令替换 kernel 通用指令（去掉三封面/五封面）。"""
+        generic_instruction = (
+            "\n7. 设置封面图片，严格按顺序执行：\n"
+            "   - 先明确切换或选择为单封面模式。\n"
+            "   - 如果当前是三封面、五封面或其它多封面模式，必须切回单封面。\n"
+            "   - 使用 file input 上传下面这个本地文件：\n"
+            "     /tmp/cover_xxx/cover.png\n"
+        )
+        prompt = SohuPlatform().get_agent_prompt(
+            title="cover-title",
+            content="plain body for probe",
+            cover_instruction=generic_instruction,
+            body_image_instruction="",
+            is_markdown=False,
+        )
+
+        # 搜狐号专属指令被使用
+        assert "在封面设置区域找到并点击封面区域" in prompt
+        assert "/tmp/cover_xxx/cover.png" in prompt
+        # 通用指令中的头条概念被去掉
+        assert "三封面" not in prompt
+        assert "五封面" not in prompt
+        assert "加号图标" not in prompt
 
     def test_tool_prompt_requires_real_sohu_title_input_and_verification(self) -> None:
         prompt = SohuPlatform().get_agent_prompt(
