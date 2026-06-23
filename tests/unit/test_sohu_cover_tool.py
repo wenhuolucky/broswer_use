@@ -166,3 +166,133 @@ async def test_sohu_cover_setter_reports_page_unavailable() -> None:
 
     assert result["ok"] is False
     assert result["reason"] == "page_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_upload_local_cover_uses_cdp_set_file_input(tmp_path) -> None:
+    """验证 _upload_local_cover 通过 CDP DOM.setFileInputFiles 设置文件，
+    不依赖 Playwright locator API。"""
+    import asyncio
+    import json
+    from pathlib import Path
+
+    cover_file = tmp_path / "cover.png"
+    cover_file.write_bytes(b"fake-png-data")
+
+    cdp_calls = []
+
+    class FakeDOM:
+        async def setFileInputFiles(self, params, session_id=None):
+            cdp_calls.append(("setFileInputFiles", params, session_id))
+            return {}
+
+    class FakeCDPSend:
+        DOM = FakeDOM()
+
+    class FakeCDPClient:
+        send = FakeCDPSend()
+
+    class FakePage:
+        def __init__(self):
+            self._browser_session = type("S", (), {"cdp_client": FakeCDPClient()})()
+            self.evaluate_calls = []
+
+        async def evaluate(self, script, *args):
+            self.evaluate_calls.append(script)
+            # browser-use Page.evaluate 总是返回 str（JSON 序列化的结果）
+            return json.dumps({"backend_node_id": 42})
+
+        @property
+        async def session_id(self):
+            return "test-session-id"
+
+    setter = SohuCoverSetter(cover_path=str(cover_file))
+    page = FakePage()
+
+    result = await setter._upload_local_cover(page)
+
+    assert result["ok"] is True
+    assert result["reason"] == ""
+    assert len(cdp_calls) == 1
+    method, params, sid = cdp_calls[0]
+    assert method == "setFileInputFiles"
+    assert params["files"] == [str(cover_file)]
+    assert params["backendNodeId"] == 42
+    assert sid == "test-session-id"
+
+
+@pytest.mark.asyncio
+async def test_upload_local_cover_falls_back_to_cdp_query_selector(tmp_path) -> None:
+    """当 evaluate 返回 backendNodeId=0 时，降级通过 CDP DOM.querySelector 查找。"""
+    import json
+    cover_file = tmp_path / "cover.png"
+    cover_file.write_bytes(b"fake-png-data")
+
+    cdp_calls = []
+
+    class FakeDOM:
+        async def setFileInputFiles(self, params, session_id=None):
+            cdp_calls.append(("setFileInputFiles", params, session_id))
+            return {}
+
+        async def getDocument(self, session_id=None):
+            cdp_calls.append(("getDocument", None, session_id))
+            return {"root": {"nodeId": 1}}
+
+        async def querySelector(self, params, session_id=None):
+            cdp_calls.append(("querySelector", params, session_id))
+            return {"nodeId": 99}
+
+    class FakeCDPSend:
+        DOM = FakeDOM()
+
+    class FakeCDPClient:
+        send = FakeCDPSend()
+
+    class FakePage:
+        def __init__(self):
+            self._browser_session = type("S", (), {"cdp_client": FakeCDPClient()})()
+
+        async def evaluate(self, script, *args):
+            # 返回 backendNodeId=0 触发降级路径（str 形式，符合 browser-use 行为）
+            return json.dumps({"backend_node_id": 0})
+
+        @property
+        async def session_id(self):
+            return "fallback-session"
+
+    setter = SohuCoverSetter(cover_path=str(cover_file))
+    page = FakePage()
+
+    result = await setter._upload_local_cover(page)
+
+    assert result["ok"] is True
+    method_names = [c[0] for c in cdp_calls]
+    assert "getDocument" in method_names
+    assert "querySelector" in method_names
+    assert "setFileInputFiles" in method_names
+    set_call = next(c for c in cdp_calls if c[0] == "setFileInputFiles")
+    assert set_call[1]["backendNodeId"] == 99
+
+
+@pytest.mark.asyncio
+async def test_upload_local_cover_missing_file_returns_failure() -> None:
+    setter = SohuCoverSetter(cover_path="/nonexistent/path/cover.png")
+
+    class FakePage:
+        pass
+
+    result = await setter._upload_local_cover(FakePage())
+
+    assert result["ok"] is False
+    assert result["reason"] == "local_cover_file_not_found"
+
+
+@pytest.mark.asyncio
+async def test_upload_local_cover_empty_path_returns_failure() -> None:
+    setter = SohuCoverSetter(cover_path="")
+
+    result = await setter._upload_local_cover(None)
+
+    assert result["ok"] is False
+    assert result["reason"] == "local_cover_path_empty"

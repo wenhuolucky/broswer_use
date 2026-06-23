@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any
@@ -520,6 +521,12 @@ class SohuCoverSetter:
             return make_sohu_cover_failure(reason)
 
     async def _upload_local_cover(self, page) -> dict:
+        """通过 CDP DOM.setFileInputFiles 上传本地封面。
+
+        由于 browser-use 的 Page 是 CDP 封装对象，不支持 Playwright 的 locator API，
+        这里改为先用 JS evaluate 找到 file input 的 backendNodeId，
+        再通过 CDP 直接调用 DOM.setFileInputFiles 完成文件设置。
+        """
         if not self.cover_path:
             return {"ok": False, "reason": "local_cover_path_empty", "detail": ""}
         cover_file = Path(self.cover_path)
@@ -532,15 +539,63 @@ class SohuCoverSetter:
 
         self._info("[SohuCoverTool] local_upload_ready path=%s", self.cover_path)
         try:
-            file_input = page.locator('input[type="file"]').last
-            await file_input.set_input_files(str(cover_file))
+            # 通过 JS evaluate 查找最后一个可见的 input[type=file] 并获取其 backendNodeId
+            find_input_js = """
+(...args) => {
+  const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+  const enabled = inputs.filter(n => !n.disabled);
+  const target = enabled.length ? enabled[enabled.length - 1] : (inputs.length ? inputs[inputs.length - 1] : null);
+  if (!target) return { backend_node_id: 0 };
+  return { backend_node_id: target.backendNodeId || 0 };
+}
+"""
+            raw_result = await page.evaluate(find_input_js)
+            input_info = normalize_evaluate_result(raw_result) if isinstance(raw_result, str) else (raw_result or {})
+            backend_node_id = int((input_info or {}).get("backend_node_id") or 0)
+
+            if not backend_node_id:
+                # evaluate 可能无法直接拿到 backendNodeId，降级使用 CDP DOM API 查找
+                backend_node_id = await self._find_file_input_via_cdp(page)
+
+            if not backend_node_id:
+                return {
+                    "ok": False,
+                    "reason": "local_upload_input_not_found",
+                    "detail": self.cover_path,
+                }
+
+            # 通过 CDP DOM.setFileInputFiles 设置文件
+            session_id = await page.session_id
+            cdp_client = page._browser_session.cdp_client
+            await cdp_client.send.DOM.setFileInputFiles(
+                {"files": [str(cover_file)], "backendNodeId": backend_node_id},
+                session_id=session_id,
+            )
             self._info("[SohuCoverTool] local_upload_file_set path=%s", self.cover_path)
-            await page.wait_for_timeout(1800)
+            await asyncio.sleep(1.8)
             return {"ok": True, "reason": "", "detail": str(cover_file)}
         except Exception as exc:
             reason = f"local_upload_set_input_failed:{str(exc)[:120]}"
             self._warning("[SohuCoverTool] failed reason=%s", reason)
             return {"ok": False, "reason": reason, "detail": self.cover_path}
+
+    async def _find_file_input_via_cdp(self, page) -> int:
+        """降级路径：通过 CDP DOM.getDocument + querySelector 查找 file input 的 backendNodeId。"""
+        try:
+            session_id = await page.session_id
+            cdp_client = page._browser_session.cdp_client
+            doc = await cdp_client.send.DOM.getDocument(session_id=session_id)
+            root_node_id = int(doc.get("root", {}).get("nodeId") or 0)
+            if not root_node_id:
+                return 0
+            result = await cdp_client.send.DOM.querySelector(
+                {"nodeId": root_node_id, "selector": 'input[type="file"]'},
+                session_id=session_id,
+            )
+            node_id = int(result.get("nodeId") or 0)
+            return node_id
+        except Exception:
+            return 0
 
     @staticmethod
     def _stable_result(result: dict) -> dict:
