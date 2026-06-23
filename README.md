@@ -8,11 +8,12 @@
 browser-use/
 ├─ app/                    # 业务代码
 │  ├─ server.py            # FastAPI 应用入口
-│  ├─ api/                 # HTTP 路由
+│  ├─ api/                 # HTTP 路由（含 VNC/发布实时查看的反向代理）
 │  ├─ core/                # 配置、运行参数与日志
 │  ├─ cookies/             # Cookie 保存和规范化
 │  ├─ jobs/                # 任务模型和状态存储
-│  ├─ platforms/           # 平台配置
+│  ├─ platforms/           # 平台配置（sohu/toutiao）
+│  ├─ proxy/               # 多 IP 代理模块（渠道→IP 永久绑定）
 │  ├─ publishing/          # 发文编排与各平台发文内核
 │  ├─ remote/              # 远程登录与浏览器画面服务
 │  └─ utils/               # 浏览器、URL 等工具
@@ -20,9 +21,11 @@ browser-use/
 ├─ logs/                   # 运行期日志，git 忽略
 ├─ Dockerfile
 ├─ docker-compose.yml
+├─ entrypoint.sh
 ├─ pyproject.toml          # 依赖声明（uv）
 ├─ uv.lock                 # 锁定版本
-└─ .env.example
+├─ .env.example
+└─ proxies.yaml.example     # 多 IP 代理配置模板
 ```
 
 ## 配置
@@ -89,7 +92,76 @@ uv run uvicorn app.server:app --host 127.0.0.1 --port 8833
 
 依赖在 `pyproject.toml` 中声明，`uv.lock` 锁定精确版本。新增依赖用 `uv add <包名>`，开发依赖用 `uv add --dev <包名>`。
 
+## 多 IP 代理（可选）
+
+### 背景
+
+大厂平台（今日头条、搜狐号等）会检测同一 IP 下有多账号发文，触发验证码或封号。本服务支持为每个渠道（channel）绑定一个独立的静态代理 IP，使登录和发文流量始终走同一个代理出口 IP，避免风控。
+
+### 启用代理
+
+```bash
+# 1. 复制代理配置模板并填入真实代理信息
+cp proxies.yaml.example proxies.yaml
+
+# 2. 在 .env 中开启代理
+# PROXY_ENABLED=true
+# 默认配置路径即 proxies.yaml，无需修改 PROXY_CONFIG_PATH
+```
+
+### 代理池配置
+
+`proxies.yaml` 结构（完整写法见 `proxies.yaml.example`）：
+
+```yaml
+defaults:
+  protocol: http          # Chromium 支持 HTTP 代理的账密认证（推荐）
+  verify_exit_ip: true    # 浏览器启动后校验实际出口 IP
+  exit_ip_check_url: "https://api.ip.sb/ip"
+
+ip_pool:
+  - provider: fixed_auth   # 固定代理服务器
+    ip: "1.2.3.4"
+    port: 2018
+    username: "your_user"
+    password: "your_pass"
+    protocol: http
+    label: "静态代理-1"
+
+  - provider: juliangip    # 巨量 IP 独享代理（按需启用）
+    trade_no: "YOUR_TRADE_NO"
+    api_key: "YOUR_API_KEY"
+    label: "独享IP-1"
+```
+
+两种 provider：
+- **`fixed_auth`**：固定代理服务器 + 用户名密码认证，一般有多个固定 IP 加多条
+- **`juliangip`**：通过巨量 IP API 动态获取，订单期内 IP 固定
+
+### 绑定机制
+
+- **最少绑定优先（least-bind-first）**：新渠道创建时自动分配到当前绑定数最少的 IP
+- **永久绑定**：一旦绑定关系写入 `data/proxy_assignments.json`，不会自动变更
+- **发布/登录均走同一代理**：通过 Playwright `launch_persistent_context(proxy=...)` 注入
+
+### 出口 IP 校验
+
+`verify_exit_ip: true` 时，浏览器启动后会访问 `exit_ip_check_url` 获取实际出口 IP，与代理 IP 进行比对：
+- 校验失败：写 ⚠️ 警告日志，**不阻断流程**（防止 IP 检测服务抖动导致全量发布失败）
+- 校验通过：写 ✅ 成功日志，发布正常进行
+
+### 注意事项
+
+1. **Docker 部署需挂载 `proxies.yaml`**：`docker-compose.yml` 已包含 `./proxies.yaml:/app/proxies.yaml:ro` 只读挂载
+2. **严格启动**：`PROXY_ENABLED=true` 时，`proxies.yaml` 缺失或无效会阻塞服务启动
+3. **代理失败即失败**：获取代理失败时发布任务直接失败，不会 fallback 直连
+4. **预热池自动关闭**：启用代理后远程登录的 warm pool 自动置零（因为预热时不知道要给哪个 channel 分配代理）
+5. **SOCKS5 不支持账密**：Chromium 限制，SOCKS5 代理无法传用户名密码，推荐用 HTTP
+6. **IP 池变更**：新增 IP 只需在 `ip_pool` 追加条目，新渠道自动流向它；已绑定的渠道不受影响
+
 ## 接口说明
+
+### 信任模型（重要）
 
 完整的请求/响应结构以服务自带的交互式文档为准（基于 OpenAPI 自动生成，无需手工维护）：
 
@@ -147,9 +219,10 @@ curl -X POST http://127.0.0.1:8833/api/v1/jobs \
 
 ## 运行期目录
 
-- 渠道（cookie + 账号元数据）存在 PostgreSQL 的 `channels` 表，不再落盘
+- 渠道（cookie + 账号元数据）和任务状态存在 SQLite 的 `data/app.db` 中，无需额外数据库服务
+- `data/proxy_assignments.json`：渠道→代理 IP 绑定关系持久化（启用代理时自动生成）
 - `data/profiles/{session_id}/`：远程登录临时浏览器 profile
-- `data/chrome_profile/`：发文内核浏览器 profile
+- `data/chrome_profile/`：发文内核浏览器 profile，容器化部署时通过 `docker-compose.yml` 的 `shm_size` 挂载足够 `/dev/shm`
 - `logs/jobs/{YYYY-MM-DD}/{job_id}.log`：每个任务一个日志文件（编排 + 发文内核日志合一），
   仅供运维在服务器侧排查（不对外提供 HTTP 接口）；按日期分目录，超过 14 天的日期目录自动清理
 - `logs/service.log`：统一主日志（每行带 job_id，按天轮转、保留 14 天、zip 压缩）

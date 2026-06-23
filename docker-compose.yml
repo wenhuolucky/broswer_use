@@ -6,7 +6,7 @@ services:
         APT_MIRROR: ${APT_MIRROR:-}
         PIP_MIRROR: ${PIP_MIRROR:-https://pypi.org/simple}
     image: browser-publish-service:latest
-    container_name: browser-publish-service
+    container_name: browser-publish-service-dev
     # init 进程负责回收 Chrome / Xvfb 等子进程产生的僵尸进程
     init: true
     env_file:
@@ -30,6 +30,7 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./app:/app/app
+      - ./proxies.yaml:/app/proxies.yaml:ro
     # Chrome 需要较大的 /dev/shm，否则标签页易崩。按并发登录会话数量调整：
     # 经验值约每会话 ~256MB，留足余量；如并发很高（如 40+）可上调到 16g。
     shm_size: "8gb"
