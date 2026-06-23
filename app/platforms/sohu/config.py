@@ -11,7 +11,7 @@ from app.platforms.base import PlatformConfig
 class SohuPlatform(PlatformConfig):
     name: str = "sohu"
     home_url: str = "https://mp.sohu.com"
-    publish_url: str = "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle"
+    publish_url: str = "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle?contentStatus=1"
     auth_domains: list = field(default_factory=lambda: [".sohu.com", "mp.sohu.com", "www.sohu.com"])
     account_cookies: list = field(default_factory=lambda: ["SUV", "ppinf", "ppmdig"])
     # 搜狐登录态的标志性 cookie：passport 登录成功后才下发 ppinf/ppmdig。
