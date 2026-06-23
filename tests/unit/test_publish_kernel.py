@@ -118,7 +118,7 @@ class TestPublishTools:
         assert PublishService._clipboard_permission_origins("unknown") == ["https://mp.toutiao.com"]
 
     def test_sohu_platform_no_longer_registers_cover_tool(self, monkeypatch) -> None:
-        """搜狐号封面上传已改为 prompt 指令驱动，不再注册 set_sohu_cover 工具。"""
+        """搜狐号封面/标题上传已改为 prompt 指令驱动，不再注册 set_sohu_cover / set_sohu_title 工具。"""
         registered_actions: list[str] = []
 
         class FakeActionResult:
@@ -151,7 +151,7 @@ class TestPublishTools:
                 platform_name="sohu",
             ),
         )
-        assert "set_sohu_title" in registered_actions
+        assert "set_sohu_title" not in registered_actions
         assert "set_sohu_cover" not in registered_actions
         assert "paste_plain_text_body" in registered_actions
         assert "paste_rich_html_body" in registered_actions

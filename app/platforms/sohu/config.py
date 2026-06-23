@@ -11,7 +11,7 @@ from app.platforms.base import PlatformConfig
 class SohuPlatform(PlatformConfig):
     name: str = "sohu"
     home_url: str = "https://mp.sohu.com"
-    publish_url: str = "https://mp.sohu.com"
+    publish_url: str = "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle"
     auth_domains: list = field(default_factory=lambda: [".sohu.com", "mp.sohu.com", "www.sohu.com"])
     account_cookies: list = field(default_factory=lambda: ["SUV", "ppinf", "ppmdig"])
     # 搜狐登录态的标志性 cookie：passport 登录成功后才下发 ppinf/ppmdig。
@@ -48,7 +48,7 @@ class SohuPlatform(PlatformConfig):
             cover_instruction = (
                 '\n7. 设置封面图片，严格按顺序执行：\n'
                 '   - 在封面设置区域找到并点击封面区域。\n'
-                '   - 在弹出的对话框中选择本地上传。\n'
+                '   - 弹出的对话框默认是正文图片，点击对话框上边切换为本地上传。\n'
                 '   - 使用 file input 上传下面这个本地文件：\n'
                 f'     {self._extract_cover_path(cover_instruction)}\n'
                 '   - 上传后先确认图片缩略图已出现或"确定"按钮已可点击。\n'
@@ -108,21 +108,15 @@ Agent 执行规则：
 - done 返回必须是合法 JSON 字符串。
 
 执行步骤：
-1. 打开搜狐号后台：{self.home_url}
-2. 确认当前账号已登录；如果未登录，停止并返回失败。
+1. 打开搜狐号发布页：{self.publish_url}
+2. 确认当前账号已登录（页面显示账号名或编辑区可用）；如果未登录或页面重定向到登录页，停止并返回失败。
 3. 读取当前账号显示名，记为 account_name。
-4. 进入文章发布入口。
-5. 调用 `set_sohu_title` 工具设置标题：{title}
-   - 必须调用 `set_sohu_title` 工具，不要手动输入标题或根据标题计数自行重输。
-   - 标题工具会自行定位输入框、清空旧值、写入标题并读取实际值校验。
-   - 标题工具返回 ok=true 且 verified=true 后，才允许继续正文工具。
-   - 如果工具返回 ok=false，最多重新进入/聚焦发文页后再调用 1 次。
-   - 第 2 次仍失败时，立即调用 done 返回 success=false，failure_reason="搜狐号标题填写失败：实际标题与预期不符"。
-6. 聚焦搜狐号正文编辑器，调用 `paste_rich_html_body`，确认返回 ok=true 且 probe_found=true。
-7. {cover_instruction.strip()}
+4. 在标题输入框输入标题："{title}"。使用 input/type 操作，不要调用工具，不要 evaluate 直接设置 value。
+5. 聚焦搜狐号正文编辑器，调用 `paste_rich_html_body`，确认返回 ok=true 且 probe_found=true。
+6. {cover_instruction.strip()}
 {self._sohu_cover_rules(cover_instruction)}
-8. 下滑到页面底部，点击"发布"按钮完成发布。
-9. 点击"发布"后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 `get_published_article_url(title="{title}")` 工具，并用工具返回的 article_url 调用 done。
+7. 下滑到页面底部，点击"发布"按钮完成发布。
+8. 点击"发布"后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 `get_published_article_url(title="{title}")` 工具，并用工具返回的 article_url 调用 done。
 """
 
     def _tool_plain_text_prompt(
@@ -153,21 +147,15 @@ Agent 执行规则：
 - done 返回必须是合法 JSON 字符串。
 
 执行步骤：
-1. 打开搜狐号后台：{self.home_url}
-2. 确认当前账号已登录；如果未登录，停止并返回失败。
+1. 打开搜狐号发布页：{self.publish_url}
+2. 确认当前账号已登录（页面显示账号名或编辑区可用）；如果未登录或页面重定向到登录页，停止并返回失败。
 3. 读取当前账号显示名，记为 account_name。
-4. 进入文章发布入口。
-5. 调用 `set_sohu_title` 工具设置标题：{title}
-   - 必须调用 `set_sohu_title` 工具，不要手动输入标题或根据标题计数自行重输。
-   - 标题工具会自行定位输入框、清空旧值、写入标题并读取实际值校验。
-   - 标题工具返回 ok=true 且 verified=true 后，才允许继续正文工具。
-   - 如果工具返回 ok=false，最多重新进入/聚焦发文页后再调用 1 次。
-   - 第 2 次仍失败时，立即调用 done 返回 success=false，failure_reason="搜狐号标题填写失败：实际标题与预期不符"。
-6. 聚焦搜狐号正文编辑器，调用 `paste_plain_text_body`，确认返回 ok=true 且 probe_found=true。
-7. {cover_instruction.strip()}
+4. 在标题输入框输入标题："{title}"。使用 input/type 操作，不要调用工具，不要 evaluate 直接设置 value。
+5. 聚焦搜狐号正文编辑器，调用 `paste_plain_text_body`，确认返回 ok=true 且 probe_found=true。
+6. {cover_instruction.strip()}
 {self._sohu_cover_rules(cover_instruction)}
-8. 下滑到页面底部，点击"发布"按钮完成发布。
-9. 点击"发布"后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 `get_published_article_url(title="{title}")` 工具，并用工具返回的 article_url 调用 done。
+7. 下滑到页面底部，点击"发布"按钮完成发布。
+8. 点击"发布"后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 `get_published_article_url(title="{title}")` 工具，并用工具返回的 article_url 调用 done。
 """
 
     def _rich_html_ready_prompt(
@@ -211,22 +199,12 @@ Agent 执行规则：
   {{"success": false, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": "失败原因", "publish_signal": ""}}
 
 执行步骤：
-1. 打开搜狐号后台：{self.home_url}
-2. 确认当前账号已登录；如果未登录，停止并返回失败。
+1. 打开搜狐号发布页：{self.publish_url}
+2. 确认当前账号已登录（页面显示账号名或编辑区可用）；如果未登录或页面重定向到登录页，停止并返回失败。
 3. 读取当前账号显示名，记为 account_name。
-4. 进入文章发布入口。
-5. 填写标题：{title}
-   - 找到标题输入框（input 或 textarea，可能 placeholder 含"请输入标题"、"文章标题"等）。
-   - 点击标题输入框使其获得焦点；如果输入框有残留内容，先 select_all + delete 清空。
-   - 输入标题文本。
-   - **强制标题校验（防止标题实际未填但 Agent 误判为已填）**：
-     - 读取标题输入框的实际值：input 元素读 value，textarea 元素读 textContent / value，contenteditable 元素读 innerText。
-     - 与字符串 "{title}" 完全匹配（去掉首尾空白后比较）。
-     - 如果不匹配，重新清空 + 重新点击 + 重新输入，最多重试 2 次。
-     - 2 次后仍不匹配，立即调用 done 返回 success=false，failure_reason="搜狐号标题填写失败：实际标题与预期不符"。
-   - 通过校验后才能继续执行步骤 6。
-6. 找到搜狐号正文富文本编辑器，点击使其获得焦点。
-7. 使用 evaluate 执行下面的 JavaScript，把完整 HTML 写入浏览器剪贴板：
+4. 在标题输入框输入标题："{title}"。使用 input/type 操作，输入后读取实际值校验与预期一致；不一致最多重试 2 次，仍失败则 done 返回 success=false。
+5. 找到搜狐号正文富文本编辑器，点击使其获得焦点。
+6. 使用 evaluate 执行下面的 JavaScript，把完整 HTML 写入浏览器剪贴板：
 ```javascript
 async (htmlContent) => {{
   const stripTags = (s) => s.replace(/<[^>]+>/g, "");
@@ -251,23 +229,23 @@ async (htmlContent) => {{
   return {{ ok: !!ok, method: "execCommand" }};
 }}
 ```
-8. 保持编辑器焦点，使用 `send_keys("Control+v")` 进行粘贴，也就是执行 Ctrl+V。
-9. 等待 1-2 秒让富文本渲染完成。
-10. 发布前正文校验（强制）：
+6. 保持编辑器焦点，使用 `send_keys("Control+v")` 进行粘贴，也就是执行 Ctrl+V。
+7. 等待 1-2 秒让富文本渲染完成。
+8. 发布前正文校验（强制）：
     - 必须读取**正文编辑器自身的**可见文本（找 `[contenteditable="true"]` 元素，挑可见文本最长的那个，不要读 document.body）。
     - 正文编辑器文本必须非空，并且包含这个正文关键片段："{body_probe}"。
     - 如果未检测到正文，**先按以下顺序重试 3 次**，再考虑返回失败：
-      - 重试 A：重新点击编辑器 + 重新执行步骤 7、8（剪贴板 + Ctrl+V）。
+      - 重试 A：重新点击编辑器 + 重新执行步骤 6、7（JS 剪贴板 + Ctrl+V）。
       - 重试 B：在编辑器仍 focus 状态下，使用 evaluate 执行 `document.execCommand('insertHTML', false, htmlContent)`，其中 `htmlContent` 是下面 `========== HTML BEGIN ==========` 和 `========== HTML END ==========` 之间的完整 HTML 字符串。**这是绕过系统剪贴板的 DOM 注入方式，不依赖 Ctrl+V 事件能否被编辑器接收**。
-      - 重试 C：如果步骤 B 的 evaluate 也没有让编辑器内容出现，再清空 + 重新执行步骤 7、8。
+      - 重试 C：如果步骤 B 的 evaluate 也没有让编辑器内容出现，再清空 + 重新执行步骤 6、7。
     - 3 次重试后仍未检测到正文，立即调用 done 返回 success=false，failure_reason="搜狐号正文写入失败，发布前未检测到正文内容"。
-    - 未通过正文校验时，禁止继续点击"下一步"、封面设置或发布。
-11. {cover_instruction.strip()}
-12. {self._sohu_cover_rules(cover_instruction)}
-13. 下滑到页面底部，点击"发布"按钮完成发布。
-14. 点击"发布"后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 `get_published_article_url(title="{title}")` 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
+    - 未通过正文校验时，禁止继续封面设置或发布。
+9. {cover_instruction.strip()}
+10. {self._sohu_cover_rules(cover_instruction)}
+11. 下滑到页面底部，点击"发布"按钮完成发布。
+12. 点击"发布"后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 `get_published_article_url(title="{title}")` 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
     {{"success": true, "account_name": "步骤3读到的账号名", "article_url": "拿到的搜狐文章URL", "failure_reason": "", "publish_signal": "submitted_for_review"}}
-15. 如果工具返回 found=false，调用 done 返回：
+13. 如果工具返回 found=false，调用 done 返回：
     {{"success": false, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": "搜狐号发布成功，但未获取到文章 URL", "publish_signal": ""}}
 
 完整 HTML 长度：{html_length} 字符
@@ -316,39 +294,29 @@ Agent 执行规则：
   {{"success": false, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": "失败原因", "publish_signal": ""}}
 
 执行步骤：
-1. 打开搜狐号后台：{self.home_url}
-2. 确认当前账号已登录；如果未登录，停止并返回失败。
+1. 打开搜狐号发布页：{self.publish_url}
+2. 确认当前账号已登录（页面显示账号名或编辑区可用）；如果未登录或页面重定向到登录页，停止并返回失败。
 3. 读取当前账号显示名，记为 account_name。
-4. 进入文章发布入口。
-5. 填写标题：{title}
-   - 找到标题输入框（input 或 textarea，可能 placeholder 含"请输入标题"、"文章标题"等）。
-   - 点击标题输入框使其获得焦点；如果输入框有残留内容，先 select_all + delete 清空。
-   - 输入标题文本。
-   - **强制标题校验（防止标题实际未填但 Agent 误判为已填）**：
-     - 读取标题输入框的实际值：input 元素读 value，textarea 元素读 textContent / value，contenteditable 元素读 innerText。
-     - 与字符串 "{title}" 完全匹配（去掉首尾空白后比较）。
-     - 如果不匹配，重新清空 + 重新点击 + 重新输入，最多重试 2 次。
-     - 2 次后仍不匹配，立即调用 done 返回 success=false，failure_reason="搜狐号标题填写失败：实际标题与预期不符"。
-   - 通过校验后才能继续执行步骤 6。
-6. 搜狐号正文写入策略（纯文本路径）：
+4. 在标题输入框输入标题："{title}"。使用 input/type 操作，输入后读取实际值校验与预期一致；不一致最多重试 2 次，仍失败则 done 返回 success=false。
+5. 搜狐号正文写入策略（纯文本路径）：
    - 先点击搜狐号正文编辑器，让编辑器获得焦点。
    - 将下面 `<content>` 中的纯文本写入剪贴板（navigator.clipboard.writeText 或 execCommand），再使用 Ctrl+V 粘贴。
    - 如果剪贴板不可用，可以使用键盘输入或页面支持的普通文本粘贴方式。
-7. 发布前正文校验（强制）：
+6. 发布前正文校验（强制）：
    - 必须读取**正文编辑器自身的**可见文本（找 `[contenteditable="true"]` 元素，挑可见文本最长的那个，不要读 document.body）。
    - 正文编辑器文本必须非空，并且包含这个正文关键片段："{body_probe}"。
    - 如果未检测到正文，**先按以下顺序重试 3 次**，再考虑返回失败：
-     - 重试 A：重新点击编辑器 + 重新执行步骤 6（剪贴板 + Ctrl+V）。
+     - 重试 A：重新点击编辑器 + 重新执行步骤 5（剪贴板 + Ctrl+V）。
      - 重试 B：在编辑器仍 focus 状态下，使用 evaluate 执行 `document.execCommand('insertText', false, bodyText)`，其中 `bodyText` 是下面 `<content>` 标签内的纯文本字符串。**这是绕过系统剪贴板的 DOM 注入方式**。
-     - 重试 C：清空 + 重新执行步骤 6。
+     - 重试 C：清空 + 重新执行步骤 5。
    - 3 次重试后仍未检测到正文，立即调用 done 返回 success=false，failure_reason="搜狐号正文写入失败，发布前未检测到正文内容"。
-   - 未通过正文校验时，禁止继续点击"下一步"、封面设置或发布。
-8. {cover_instruction.strip()}
-9. {self._sohu_cover_rules(cover_instruction)}
-10. 下滑到页面底部，点击"发布"按钮完成发布。
-11. 点击"发布"后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 `get_published_article_url(title="{title}")` 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
+   - 未通过正文校验时，禁止继续封面设置或发布。
+7. {cover_instruction.strip()}
+8. {self._sohu_cover_rules(cover_instruction)}
+9. 下滑到页面底部，点击"发布"按钮完成发布。
+10. 点击"发布"后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 `get_published_article_url(title="{title}")` 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
     {{"success": true, "account_name": "步骤3读到的账号名", "article_url": "拿到的搜狐文章URL", "failure_reason": "", "publish_signal": "submitted_for_review"}}
-12. 如果工具返回 found=false，调用 done 返回：
+11. 如果工具返回 found=false，调用 done 返回：
     {{"success": false, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": "搜狐号发布成功，但未获取到文章 URL", "publish_signal": ""}}
 
 正文内容：

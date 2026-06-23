@@ -176,7 +176,8 @@ class TestSohuPrompt:
         assert "五封面" not in prompt
         assert "加号图标" not in prompt
 
-    def test_tool_prompt_requires_real_sohu_title_input_and_verification(self) -> None:
+    def test_tool_prompt_uses_direct_title_input_not_tool(self) -> None:
+        """搜狐号标题已改为 Agent 直接操作 input，不再依赖 set_sohu_title 工具。"""
         prompt = SohuPlatform().get_agent_prompt(
             title="title-must-be-written",
             content="plain body for probe",
@@ -185,11 +186,12 @@ class TestSohuPrompt:
             is_markdown=False,
         )
 
-        assert "set_sohu_title" in prompt
-        assert "搜狐号标题填写失败：实际标题与预期不符" in prompt
-        assert "必须调用 `set_sohu_title` 工具" in prompt
-        assert "不要手动输入标题或根据标题计数自行重输" in prompt
-        assert "标题工具返回 ok=true 且 verified=true" in prompt
+        # 工具调用方式已被移除
+        assert "set_sohu_title" not in prompt
+        assert "必须调用 `set_sohu_title` 工具" not in prompt
+        # Agent 直接输入标题的指令存在
+        assert "在标题输入框输入标题" in prompt
+        assert "title-must-be-written" in prompt
 
 
 class TestPlatformTitleMatching:

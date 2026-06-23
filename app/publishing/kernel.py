@@ -950,12 +950,11 @@ class PublishService:
         body_payload: PublishTaskBundle | None = None,
     ):
         from browser_use import ActionResult, Controller
-        from app.publishing.tools import BodyWritePayload, BodyWriter, SohuTitleSetter
+        from app.publishing.tools import BodyWritePayload, BodyWriter
 
         controller = Controller()
         writer = None
         platform_name = (getattr(body_payload, "platform_name", "") or "").lower() if body_payload else ""
-        sohu_title_setter = SohuTitleSetter(original_title, logger=logger) if platform_name == "sohu" else None
         if body_payload:
             writer = BodyWriter(
                 BodyWritePayload(
@@ -1032,31 +1031,6 @@ class PublishService:
                 extracted_content=json.dumps(result, ensure_ascii=False),
                 include_in_memory=True,
             )
-
-        if sohu_title_setter is not None:
-            @controller.action(
-                "设置搜狐号文章标题。无参数。进入搜狐号发文页后先调用；"
-                "返回 ok=true 且 verified=true 后才允许继续正文、封面或发布。"
-            )
-            async def set_sohu_title(browser_session):
-                tool_start = time.perf_counter()
-                result = await sohu_title_setter.set_title(browser_session)
-                if logger:
-                    logger.info(
-                        "[AgentTool] name=set_sohu_title duration=%.2fs ok=%s "
-                        "verified=%s method=%s actual_len=%s reason=%r detail=%r",
-                        time.perf_counter() - tool_start,
-                        result.get("ok"),
-                        result.get("verified"),
-                        result.get("method", ""),
-                        len(result.get("actual_title", "")),
-                        result.get("reason", ""),
-                        result.get("detail", ""),
-                    )
-                return ActionResult(
-                    extracted_content=json.dumps(result, ensure_ascii=False),
-                    include_in_memory=True,
-                )
 
         @controller.action(
             "发布后调用此工具获取文章链接。输入本次发布标题 title。工具会打开作品管理页，最多查询 3 次同标题文章；"
