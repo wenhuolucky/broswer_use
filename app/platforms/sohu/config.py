@@ -119,14 +119,10 @@ Agent 执行规则：
    - 如果工具返回 ok=false，最多重新进入/聚焦发文页后再调用 1 次。
    - 第 2 次仍失败时，立即调用 done 返回 success=false，failure_reason="搜狐号标题填写失败：实际标题与预期不符"。
 6. 聚焦搜狐号正文编辑器，调用 `paste_rich_html_body`，确认返回 ok=true 且 probe_found=true。
-7. 如果页面需要点击"下一步"，点击进入发布设置页。
-8. {cover_instruction.strip()}
+7. {cover_instruction.strip()}
 {self._sohu_cover_rules(cover_instruction)}
-9. 完成分类等必填项。摘要可以从正文前 80 到 120 字生成。
-10. 点击"发布"。
-11. 发布后确认出现提交审核、审核中或发布成功信号。
-12. 获取文章预览链接或移动端文章链接；如果页面没有直接给 URL，调用工具 `get_published_article_url(title="{title}")` 回查同标题文章。
-13. 拿到 URL 后调用 done 返回 success=true；没有拿到 URL 时返回 success=false。
+8. 下滑到页面底部，点击"发布"按钮完成发布。
+9. 点击"发布"后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 `get_published_article_url(title="{title}")` 工具，并用工具返回的 article_url 调用 done。
 """
 
     def _tool_plain_text_prompt(
@@ -168,14 +164,10 @@ Agent 执行规则：
    - 如果工具返回 ok=false，最多重新进入/聚焦发文页后再调用 1 次。
    - 第 2 次仍失败时，立即调用 done 返回 success=false，failure_reason="搜狐号标题填写失败：实际标题与预期不符"。
 6. 聚焦搜狐号正文编辑器，调用 `paste_plain_text_body`，确认返回 ok=true 且 probe_found=true。
-7. 如果页面需要点击"下一步"，点击进入发布设置页。
-8. {cover_instruction.strip()}
+7. {cover_instruction.strip()}
 {self._sohu_cover_rules(cover_instruction)}
-9. 完成分类等必填项。摘要可以从正文前 80 到 120 字生成。
-10. 点击"发布"。
-11. 发布后确认出现提交审核、审核中或发布成功信号。
-12. 获取文章预览链接或移动端文章链接；如果页面没有直接给 URL，调用工具 `get_published_article_url(title="{title}")` 回查同标题文章。
-13. 拿到 URL 后调用 done 返回 success=true；没有拿到 URL 时返回 success=false。
+8. 下滑到页面底部，点击"发布"按钮完成发布。
+9. 点击"发布"后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 `get_published_article_url(title="{title}")` 工具，并用工具返回的 article_url 调用 done。
 """
 
     def _rich_html_ready_prompt(
@@ -270,20 +262,13 @@ async (htmlContent) => {{
       - 重试 C：如果步骤 B 的 evaluate 也没有让编辑器内容出现，再清空 + 重新执行步骤 7、8。
     - 3 次重试后仍未检测到正文，立即调用 done 返回 success=false，failure_reason="搜狐号正文写入失败，发布前未检测到正文内容"。
     - 未通过正文校验时，禁止继续点击"下一步"、封面设置或发布。
-11. 如果页面需要点击"下一步"，点击进入发布设置页。
-12. {cover_instruction.strip()}
-13. 完成分类等必填项。摘要可以从正文前 80 到 120 字生成。
-14. 点击"发布"。
-15. 发布后确认出现提交审核、审核中或发布成功信号。
-16. 获取文章预览链接或移动端文章链接；如果页面没有直接给 URL，调用工具 `get_published_article_url(title="{title}")` 回查同标题文章。
-17. 拿到 URL（包括工具返回的 article_url）后，调用 done 返回合法 JSON 字符串：
+11. {cover_instruction.strip()}
+12. {self._sohu_cover_rules(cover_instruction)}
+13. 下滑到页面底部，点击"发布"按钮完成发布。
+14. 点击"发布"后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 `get_published_article_url(title="{title}")` 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
     {{"success": true, "account_name": "步骤3读到的账号名", "article_url": "拿到的搜狐文章URL", "failure_reason": "", "publish_signal": "submitted_for_review"}}
-18. 如果没有拿到 URL，调用 done 返回：
-    {{"success": false, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": "搜狐号提交审核成功，但未获取到文章 URL", "publish_signal": ""}}
-
-封面要求：
-{cover_instruction.strip()}
-{self._sohu_cover_rules(cover_instruction)}
+15. 如果工具返回 found=false，调用 done 返回：
+    {{"success": false, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": "搜狐号发布成功，但未获取到文章 URL", "publish_signal": ""}}
 
 完整 HTML 长度：{html_length} 字符
 
@@ -358,20 +343,13 @@ Agent 执行规则：
      - 重试 C：清空 + 重新执行步骤 6。
    - 3 次重试后仍未检测到正文，立即调用 done 返回 success=false，failure_reason="搜狐号正文写入失败，发布前未检测到正文内容"。
    - 未通过正文校验时，禁止继续点击"下一步"、封面设置或发布。
-8. 如果页面需要点击"下一步"，点击进入发布设置页。
-9. {cover_instruction.strip()}
-10. 完成分类等必填项。摘要可以从正文前 80 到 120 字生成。
-11. 点击"发布"。
-12. 发布后确认出现提交审核、审核中或发布成功信号。
-13. 获取文章预览链接或移动端文章链接；如果页面没有直接给 URL，调用工具 `get_published_article_url(title="{title}")` 回查同标题文章。
-14. 拿到 URL（包括工具返回的 article_url）后，调用 done 返回合法 JSON 字符串：
+8. {cover_instruction.strip()}
+9. {self._sohu_cover_rules(cover_instruction)}
+10. 下滑到页面底部，点击"发布"按钮完成发布。
+11. 点击"发布"后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 `get_published_article_url(title="{title}")` 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
     {{"success": true, "account_name": "步骤3读到的账号名", "article_url": "拿到的搜狐文章URL", "failure_reason": "", "publish_signal": "submitted_for_review"}}
-15. 如果没有拿到 URL，调用 done 返回：
-    {{"success": false, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": "搜狐号提交审核成功，但未获取到文章 URL", "publish_signal": ""}}
-
-封面要求：
-{cover_instruction.strip()}
-{self._sohu_cover_rules(cover_instruction)}
+12. 如果工具返回 found=false，调用 done 返回：
+    {{"success": false, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": "搜狐号发布成功，但未获取到文章 URL", "publish_signal": ""}}
 
 正文内容：
 <content>
