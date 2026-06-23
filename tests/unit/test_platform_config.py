@@ -132,7 +132,7 @@ class TestSohuPrompt:
         assert "ClipboardItem" not in prompt
         assert "```javascript" not in prompt
 
-    def test_prompt_requires_sohu_cover_tool_and_forbids_manual_cover_clicks(self) -> None:
+    def test_prompt_includes_sohu_cover_rules_for_agent_driven_upload(self) -> None:
         prompt = SohuPlatform().get_agent_prompt(
             title="cover-title",
             content="plain body for probe",
@@ -141,11 +141,13 @@ class TestSohuPrompt:
             is_markdown=False,
         )
 
-        assert "set_sohu_cover" in prompt
-        assert "存在封面文件时，工具会优先走本地上传" in prompt
-        assert "没有封面文件时，工具会优先选择正文图片第一张" in prompt
-        assert "不要手动点击正文图片、素材库、本地上传或确定按钮" in prompt
-        assert "封面工具返回 ok=false 时最多重试 1 次" in prompt
+        # 新方式：Agent 自主操作 file input，不依赖 set_sohu_cover 工具
+        assert "set_sohu_cover" not in prompt
+        assert "不要手动点击正文图片、素材库、本地上传或确定按钮" not in prompt
+        assert "封面设置补充说明" in prompt
+        assert "保持单封面" in prompt
+        assert "封面设置失败时最多重试 1 次" in prompt
+        assert "跳过封面" in prompt
 
     def test_tool_prompt_requires_real_sohu_title_input_and_verification(self) -> None:
         prompt = SohuPlatform().get_agent_prompt(

@@ -117,7 +117,8 @@ class TestPublishTools:
         assert PublishService._clipboard_permission_origins("toutiao") == ["https://mp.toutiao.com"]
         assert PublishService._clipboard_permission_origins("unknown") == ["https://mp.toutiao.com"]
 
-    def test_registers_sohu_cover_tool_only_for_sohu_platform(self, monkeypatch) -> None:
+    def test_sohu_platform_no_longer_registers_cover_tool(self, monkeypatch) -> None:
+        """搜狐号封面上传已改为 prompt 指令驱动，不再注册 set_sohu_cover 工具。"""
         registered_actions: list[str] = []
 
         class FakeActionResult:
@@ -151,7 +152,9 @@ class TestPublishTools:
             ),
         )
         assert "set_sohu_title" in registered_actions
-        assert "set_sohu_cover" in registered_actions
+        assert "set_sohu_cover" not in registered_actions
+        assert "paste_plain_text_body" in registered_actions
+        assert "paste_rich_html_body" in registered_actions
 
         registered_actions.clear()
         PublishService()._build_publish_tools(
@@ -167,59 +170,3 @@ class TestPublishTools:
         )
         assert "set_sohu_title" not in registered_actions
         assert "set_sohu_cover" not in registered_actions
-
-    def test_build_publish_tools_passes_cover_path_to_sohu_cover_setter(self, monkeypatch) -> None:
-        captured_cover_paths: list[str] = []
-
-        class FakeActionResult:
-            def __init__(self, extracted_content: str, include_in_memory: bool):
-                self.extracted_content = extracted_content
-                self.include_in_memory = include_in_memory
-
-        class FakeController:
-            def action(self, description: str):
-                def decorator(func):
-                    return func
-
-                return decorator
-
-        fake_browser_use = types.SimpleNamespace(
-            ActionResult=FakeActionResult,
-            Controller=FakeController,
-        )
-
-        class FakeBodyWriter:
-            def __init__(self, *_args, **_kwargs):
-                pass
-
-        class FakeSohuTitleSetter:
-            def __init__(self, *_args, **_kwargs):
-                pass
-
-        class FakeSohuCoverSetter:
-            def __init__(self, cover_path: str = "", logger=None):
-                captured_cover_paths.append(cover_path)
-
-        fake_tools = types.SimpleNamespace(
-            BodyWritePayload=lambda **kwargs: kwargs,
-            BodyWriter=FakeBodyWriter,
-            SohuCoverSetter=FakeSohuCoverSetter,
-            SohuTitleSetter=FakeSohuTitleSetter,
-        )
-        monkeypatch.setitem(sys.modules, "browser_use", fake_browser_use)
-        monkeypatch.setitem(sys.modules, "app.publishing.tools", fake_tools)
-
-        PublishService()._build_publish_tools(
-            logger=None,
-            body_payload=PublishTaskBundle(
-                task="",
-                plain_text="body",
-                rich_html="",
-                body_probe="body",
-                is_markdown=False,
-                platform_name="sohu",
-            ),
-            cover_path="C:/tmp/cover.jpg",
-        )
-
-        assert captured_cover_paths == ["C:/tmp/cover.jpg"]
