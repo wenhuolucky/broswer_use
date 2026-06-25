@@ -201,6 +201,54 @@ def build_clipboard_html_js() -> str:
   const payload = args[0] || {};
   const htmlContent = payload.html || '';
   const plainText = payload.text || '';
+
+  // 首选：浏览器内渲染后复制。
+  // 在 hidden contenteditable div 里写入 HTML，让浏览器把 DOM 序列化为目标应用能识别的"安全 HTML"。
+  // 这一步解决头条编辑器对 <blockquote>/<hr> 不识别的问题：ClipboardItem 直接写入 HTML 字节流时，
+  // 头条会把这些标签还原成 markdown 字符（> / ---）；而走浏览器序列化路径，浏览器会把它们
+  // 转成头条能识别的格式（如 blockquote 元素 + 样式、hr 元素 + 边框）。
+  if (htmlContent) {
+    let renderDiv = null;
+    try {
+      renderDiv = document.createElement('div');
+      renderDiv.contentEditable = 'true';
+      renderDiv.tabIndex = -1;
+      renderDiv.innerHTML = htmlContent;
+      renderDiv.style.position = 'fixed';
+      renderDiv.style.left = '-9999px';
+      renderDiv.style.top = '0';
+      renderDiv.style.opacity = '0';
+      renderDiv.style.pointerEvents = 'none';
+      renderDiv.style.whiteSpace = 'pre-wrap';
+      renderDiv.style.wordBreak = 'break-word';
+      renderDiv.style.width = '600px';
+      document.body.appendChild(renderDiv);
+
+      // 必须先聚焦，否则 execCommand('copy') 会因无活动元素而失败。
+      renderDiv.focus();
+      const renderRange = document.createRange();
+      renderRange.selectNodeContents(renderDiv);
+      const renderSelection = window.getSelection();
+      renderSelection.removeAllRanges();
+      renderSelection.addRange(renderRange);
+
+      const renderOk = document.execCommand('copy');
+      renderSelection.removeAllRanges();
+      if (renderOk) {
+        document.body.removeChild(renderDiv);
+        return Promise.resolve({ ok: true, method: 'rendered_div_execCommand' });
+      }
+    } catch (error) {
+      // 渲染后复制失败，继续尝试后续路径。
+    } finally {
+      if (renderDiv && renderDiv.parentNode) {
+        renderDiv.parentNode.removeChild(renderDiv);
+      }
+    }
+  }
+
+  // 次选：ClipboardItem 直接写入 HTML 字节流。
+  // 头条会把 <blockquote>/<hr> 还原成 > / ---，但其它标签仍能正常渲染。
   try {
     if (navigator.clipboard && window.ClipboardItem) {
       const item = new ClipboardItem({
@@ -213,38 +261,21 @@ def build_clipboard_html_js() -> str:
       );
     }
   } catch (error) {}
-  // Fallback: 使用临时 div 写入 HTML，保留格式
+
+  // 兜底：textarea 纯文本复制，丢失所有格式。
   try {
-    const div = document.createElement('div');
-    div.contentEditable = 'true';
-    div.innerHTML = htmlContent || plainText;
-    div.style.position = 'fixed';
-    div.style.left = '-9999px';
-    document.body.appendChild(div);
-    const range = document.createRange();
-    range.selectNodeContents(div);
-    const selection = window.getSelection();
-    selection.removeAllRanges();
-    selection.addRange(range);
+    const textarea = document.createElement('textarea');
+    textarea.value = plainText || htmlContent;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
     const ok = document.execCommand('copy');
-    document.body.removeChild(div);
-    return { ok: !!ok, method: 'execCommand_div' };
+    document.body.removeChild(textarea);
+    return { ok: !!ok, method: 'execCommand_textarea' };
   } catch (error) {
-    // 最后降级：纯文本
-    try {
-      const textarea = document.createElement('textarea');
-      textarea.value = plainText;
-      textarea.setAttribute('readonly', '');
-      textarea.style.position = 'fixed';
-      textarea.style.left = '-9999px';
-      document.body.appendChild(textarea);
-      textarea.select();
-      const ok = document.execCommand('copy');
-      document.body.removeChild(textarea);
-      return { ok: !!ok, method: 'execCommand_textarea' };
-    } catch (error) {
-      return { ok: false, method: '', error: String(error) };
-    }
+    return { ok: false, method: '', error: String(error) };
   }
 }
 """
