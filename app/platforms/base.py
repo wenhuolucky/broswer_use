@@ -112,8 +112,31 @@ class PlatformConfig:
         numeric suffix, while the requested title has no such spaces. Removing
         all whitespace keeps matching stable across Toutiao, Sohu, and shared
         article-list fallback logic.
+
+        Additional normalization:
+        - HTML entity decoding (&amp; -> &, &quot; -> ")
+        - Common full-width to half-width punctuation normalization
+        - Trailing punctuation tolerance
         """
-        return "".join(str(text or "").split())
+        import html as html_module
+
+        if not text:
+            return ""
+
+        # 1. HTML 实体解码（处理 &amp;、&quot; 等）
+        text = html_module.unescape(str(text))
+
+        # 2. 常见全角标点转半角（减少平台差异）
+        text = text.replace("？", "?").replace("！", "!").replace("，", ",")
+        text = text.replace("（", "(").replace("）", ")").replace("：", ":")
+
+        # 3. 移除空白字符（原有逻辑）
+        text = "".join(text.split())
+
+        # 4. 移除尾部可能的多余标点（平台可能添加）
+        text = text.rstrip(".,;:!?")
+
+        return text
 
     @staticmethod
     def title_matches(expected: str, actual: str) -> bool:
