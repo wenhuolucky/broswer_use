@@ -76,21 +76,18 @@ def markdown_to_html(markdown_text: str) -> str:
         html_content, flags=re.DOTALL
     )
 
-    # <blockquote> → <p> + 左边框样式模拟。
-    # 头条编辑器支持 <blockquote> 标签，但 code 路径通过 hidden div + execCommand('copy')
-    # 产生的剪贴板 HTML 结构异于手动复制，头条 paste handler 可能拒绝 <blockquote>。
-    # 用 <p> + border-left 模拟，视觉一致且 100% 被头条接受。
+    # <blockquote> 添加内联样式。头条已验证支持 <blockquote> 标签，
+    # 之前不生效是因为 <html><head> 包装在 div.innerHTML 中产生异常 DOM。
     html_content = re.sub(
-        r'<blockquote>\s*<p>(.*?)</p>\s*</blockquote>',
-        r'<p style="margin: 1em 0; padding-left: 1em; border-left: 4px solid #ccc; color: #666;">\1</p>',
-        html_content, flags=re.DOTALL
+        r"<blockquote>",
+        r'<blockquote style="margin: 1em 0; padding-left: 1em; border-left: 4px solid #ccc; color: #666;">',
+        html_content
     )
     # <strong> 添加 font-weight: bold 确保加粗生效
     html_content = html_content.replace("<strong>", '<strong style="font-weight: bold;">')
-    # <hr> → <p> + 上边框模拟分隔线。
-    # 与 blockquote 同理，code 路径下 <hr> 可能被头条丢弃。
-    html_content = html_content.replace("<hr />", '<p style="border: none; border-top: 1px solid #ccc; margin: 2em 0;"></p>')
-    html_content = html_content.replace("<hr>", '<p style="border: none; border-top: 1px solid #ccc; margin: 2em 0;"></p>')
+    # <hr> 保留原生标签，添加内联样式确保渲染一致。
+    html_content = html_content.replace("<hr />", '<hr style="border: none; border-top: 1px solid #ccc; margin: 2em 0;">')
+    html_content = html_content.replace("<hr>", '<hr style="border: none; border-top: 1px solid #ccc; margin: 2em 0;">')
     # <ul> 添加内联样式
     html_content = html_content.replace("<ul>", '<ul style="margin: 1em 0; padding-left: 2em;">')
     # <li> 添加内联样式，并去掉内部的 <p> 标签（浏览器复制后会去掉 li 内的 p）
