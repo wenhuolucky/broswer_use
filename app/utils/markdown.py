@@ -66,11 +66,22 @@ def markdown_to_html(markdown_text: str) -> str:
 
     # Toutiao's editor tends to preserve <i> more reliably than <em>, and
     # simple heading downgrades avoid editors that do not accept h1/h2 tags.
+    # 但头条实际支持 h2/blockquote/hr，只需添加内联样式确保渲染一致。
     html_content = html_content.replace("<em>", "<i>").replace("</em>", "</i>")
-    html_content = re.sub(r"<h1>(.*?)</h1>", r"<p><strong>\1</strong></p>", html_content, flags=re.DOTALL)
-    html_content = re.sub(r"<h2>(.*?)</h2>", r"<p><strong>\1</strong></p>", html_content, flags=re.DOTALL)
 
-    # 平台编辑器需要 <blockquote> 带内联样式才能正确渲染
+    # 标题添加内联样式
+    html_content = re.sub(
+        r"<h1>(.*?)</h1>",
+        r'<h1 style="font-size: 1.5em; font-weight: bold; margin: 0.83em 0;">\1</h1>',
+        html_content, flags=re.DOTALL
+    )
+    html_content = re.sub(
+        r"<h2>(.*?)</h2>",
+        r'<h2 style="font-size: 1.5em; font-weight: bold; margin: 0.83em 0;">\1</h2>',
+        html_content, flags=re.DOTALL
+    )
+
+    # <blockquote> 添加内联样式（保留标签）
     html_content = re.sub(
         r"<blockquote>",
         r'<blockquote style="margin: 1em 0; padding-left: 1em; border-left: 4px solid #ccc; color: #666;">',
@@ -78,9 +89,17 @@ def markdown_to_html(markdown_text: str) -> str:
     )
     # <strong> 添加 font-weight: bold 确保加粗生效
     html_content = html_content.replace("<strong>", '<strong style="font-weight: bold;">')
-    # <hr> 添加样式确保横线显示
-    html_content = html_content.replace("<hr />", '<hr style="border: none; border-top: 1px solid #ccc; margin: 2em 0;" />')
-    html_content = html_content.replace("<hr>", '<hr style="border: none; border-top: 1px solid #ccc; margin: 2em 0;" />')
+    # <hr> 保留标签，添加样式
+    html_content = html_content.replace("<hr />", '<hr style="border: none; border-top: 1px solid #eee; margin: 2em 0;">')
+    html_content = html_content.replace("<hr>", '<hr style="border: none; border-top: 1px solid #eee; margin: 2em 0;">')
+    # <ul> 添加内联样式
+    html_content = html_content.replace("<ul>", '<ul style="margin: 1em 0; padding-left: 2em;">')
+    # <li> 添加内联样式
+    html_content = html_content.replace("<li>", '<li style="margin: 0.5em 0;">')
+    # <ol> 添加内联样式
+    html_content = html_content.replace("<ol>", '<ol style="margin: 1em 0; padding-left: 2em;">')
+    # <em> 添加字体样式（用于斜体）
+    html_content = html_content.replace("<i>", '<em style="font-style: italic;">')
 
     return html_content
 
