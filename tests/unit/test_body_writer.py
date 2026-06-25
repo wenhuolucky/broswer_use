@@ -30,24 +30,30 @@ def test_plain_text_clipboard_js_uses_clipboard_without_dom_body_injection() -> 
     assert "insertHTML" not in script
 
 
-def test_rich_html_clipboard_js_uses_rendered_div_as_primary_path() -> None:
+def test_clipboard_html_js_uses_clipboard_item_as_primary_path() -> None:
     script = build_clipboard_html_js()
 
     assert script.strip().startswith("(...args) =>")
-    # 首选路径：在 hidden contenteditable div 中渲染 HTML，execCommand('copy')
-    # 让浏览器把 DOM 序列化为目标应用能识别的"安全 HTML"，
-    # 解决头条对 <blockquote>/<hr> 不识别的问题。
-    assert "rendered_div_execCommand" in script
-    # 渲染后复制必须聚焦 + selectNodeContents，否则 execCommand('copy') 会失败。
-    assert ".focus()" in script
-    assert "selectNodeContents" in script
-    # ClipboardItem 作为次选保留（兼容某些平台不需要浏览器序列化的场景）。
-    assert "ClipboardItem" in script
+    # 首选路径：ClipboardItem 写入精确的 text/html + text/plain 字节流，
+    # 不依赖 execCommand('copy')（在 page.evaluate 中无用户手势，可能只写 text/plain）。
     assert "'text/html'" in script
     assert "'text/plain'" in script
-    # 真正的硬约束：禁止把 HTML 注入头条编辑器的 DOM（这是之前 .innerHTML 断言的本意）。
+    assert "ClipboardItem" in script
+    # 次选路径：hidden div 渲染后 execCommand('copy')，
+    # 作为 ClipboardItem 不可用时的 fallback。
+    assert "rendered_div_execCommand" in script
+    assert "selectNodeContents" in script
+    # 真正的硬约束：禁止把 HTML 注入头条编辑器的 DOM。
     assert "editor.innerHTML" not in script
     assert ".insertHTML" not in script
+
+    # 验证路径顺序：ClipboardItem 方法字符串在 rendered_div 之前出现
+    clip_pos = script.index("method: 'ClipboardItem'")
+    render_pos = script.index("method: 'rendered_div_execCommand'")
+    textarea_pos = script.index("method: 'execCommand_textarea'")
+    assert clip_pos < render_pos < textarea_pos, (
+        f"路径顺序错误: ClipboardItem={clip_pos}, rendered_div={render_pos}, textarea={textarea_pos}"
+    )
 
 
 def test_body_write_success_result_has_stable_shape() -> None:

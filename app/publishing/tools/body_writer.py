@@ -202,15 +202,28 @@ def build_clipboard_html_js() -> str:
   const htmlContent = payload.html || '';
   const plainText = payload.text || '';
 
-  // 首选：浏览器内渲染后复制。
-  // 在 hidden contenteditable div 里写入 HTML，让浏览器把 DOM 序列化为目标应用能识别的"安全 HTML"。
-  // 这一步解决头条编辑器对 <blockquote>/<hr> 不识别的问题：ClipboardItem 直接写入 HTML 字节流时，
-  // 头条会把这些标签还原成 markdown 字符（> / ---）；而走浏览器序列化路径，浏览器会把它们
-  // 转成头条能识别的格式（如 blockquote 元素 + 样式、hr 元素 + 边框）。
+  // 首选：ClipboardItem 直接写入 HTML 字节流。
+  // 精确控制剪贴板中的 text/html 和 text/plain，不依赖浏览器 DOM 序列化。
+  // execCommand('copy') 在 page.evaluate() 中没有用户手势，Chromium 可能
+  // 返回 true 但只写入 text/plain，导致 <blockquote>/<hr> 丢失。
+  try {
+    if (navigator.clipboard && window.ClipboardItem) {
+      const item = new ClipboardItem({
+        'text/html': new Blob([htmlContent], { type: 'text/html' }),
+        'text/plain': new Blob([plainText], { type: 'text/plain' })
+      });
+      return navigator.clipboard.write([item]).then(
+        () => ({ ok: true, method: 'ClipboardItem' }),
+        () => ({ ok: false, method: 'ClipboardItem' })
+      );
+    }
+  } catch (error) {}
+
+  // 次选：浏览器内渲染后复制。
+  // ClipboardItem 不可用时，在 hidden contenteditable div 里渲染 HTML，
+  // 让浏览器把 DOM 序列化后写入剪贴板。
   if (htmlContent) {
     let renderDiv = null;
-    // 保存当前焦点元素（头条正文编辑器），避免 renderDiv.focus() 偷走焦点后
-    // Ctrl+V 无处粘贴。
     const prevActive = document.activeElement;
     try {
       renderDiv = document.createElement('div');
@@ -227,7 +240,6 @@ def build_clipboard_html_js() -> str:
       renderDiv.style.width = '600px';
       document.body.appendChild(renderDiv);
 
-      // 必须先聚焦，否则 execCommand('copy') 会因无活动元素而失败。
       renderDiv.focus();
       const renderRange = document.createRange();
       renderRange.selectNodeContents(renderDiv);
@@ -246,7 +258,6 @@ def build_clipboard_html_js() -> str:
       if (renderDiv && renderDiv.parentNode) {
         renderDiv.parentNode.removeChild(renderDiv);
       }
-      // 回切焦点到头条编辑器，确保后续 Ctrl+V 粘贴到正确位置。
       try {
         if (prevActive && typeof prevActive.focus === "function") {
           prevActive.focus();
@@ -254,21 +265,6 @@ def build_clipboard_html_js() -> str:
       } catch (_) {}
     }
   }
-
-  // 次选：ClipboardItem 直接写入 HTML 字节流。
-  // 头条会把 <blockquote>/<hr> 还原成 > / ---，但其它标签仍能正常渲染。
-  try {
-    if (navigator.clipboard && window.ClipboardItem) {
-      const item = new ClipboardItem({
-        'text/html': new Blob([htmlContent], { type: 'text/html' }),
-        'text/plain': new Blob([plainText], { type: 'text/plain' })
-      });
-      return navigator.clipboard.write([item]).then(
-        () => ({ ok: true, method: 'ClipboardItem' }),
-        () => ({ ok: false, method: 'ClipboardItem' })
-      );
-    }
-  } catch (error) {}
 
   // 兜底：textarea 纯文本复制，丢失所有格式。
   try {
