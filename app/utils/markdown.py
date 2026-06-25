@@ -64,11 +64,6 @@ def markdown_to_html(markdown_text: str) -> str:
     except ImportError:
         html_content = _simple_markdown_convert(normalized_markdown)
 
-    # Toutiao's editor tends to preserve <i> more reliably than <em>, and
-    # simple heading downgrades avoid editors that do not accept h1/h2 tags.
-    # 但头条实际支持 h2/blockquote/hr，只需添加内联样式确保渲染一致。
-    html_content = html_content.replace("<em>", "<i>").replace("</em>", "</i>")
-
     # 标题添加内联样式
     html_content = re.sub(
         r"<h1>(.*?)</h1>",
@@ -99,8 +94,11 @@ def markdown_to_html(markdown_text: str) -> str:
     html_content = html_content.replace("<li>", '<li style="margin: 0.5em 0;">')
     # <ol> 添加内联样式
     html_content = html_content.replace("<ol>", '<ol style="margin: 1em 0; padding-left: 2em;">')
-    # <em> 添加字体样式（用于斜体）
-    html_content = html_content.replace("<i>", '<em style="font-style: italic;">')
+    # 斜体（<em> / <i>）添加内联样式，开闭标签都处理，统一以 <em> 输出
+    html_content = (html_content
+        .replace("<em>", '<em style="font-style: italic;">')
+        .replace("<i>", '<em style="font-style: italic;">')
+        .replace("</i>", "</em>"))
     # <hr> 确保是原生标签（不是 <hr />）
     html_content = html_content.replace("<hr />", "<hr>")
 
