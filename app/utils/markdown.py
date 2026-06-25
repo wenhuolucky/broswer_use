@@ -78,6 +78,9 @@ def markdown_to_html(markdown_text: str) -> str:
     )
     # <strong> 添加 font-weight: bold 确保加粗生效
     html_content = html_content.replace("<strong>", '<strong style="font-weight: bold;">')
+    # <hr> 添加样式确保横线显示
+    html_content = html_content.replace("<hr />", '<hr style="border: none; border-top: 1px solid #ccc; margin: 2em 0;" />')
+    html_content = html_content.replace("<hr>", '<hr style="border: none; border-top: 1px solid #ccc; margin: 2em 0;" />')
 
     return html_content
 
