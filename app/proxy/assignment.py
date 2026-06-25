@@ -4,9 +4,16 @@
 关键改造：account_id → channel_id（服务签发的渠道句柄）。
 
 绑定关系持久化到 data/proxy_assignments.json（与 ChannelStore 解耦，迁移成本最低）。
+
+健康检测机制：
+- IP 健康状态追踪（连续失败计数）
+- 失败自动 failover（切换到健康 IP）
+- 定期健康检查（主动发现失效 IP）
 """
 import asyncio
 import json
+import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -16,22 +23,56 @@ from app.proxy.config import ProxyConfig, load_proxy_config
 from app.proxy.provider import ProxyInfo, ProxyProvider
 
 
+@dataclass
+class IPHealthState:
+    """IP 健康状态追踪
+
+    记录每个 IP 的失败次数，连续失败达到阈值后标记为不健康，
+    触发自动 failover 切换到其他健康 IP。
+    """
+    ip_index: int
+    failed_count: int = 0
+    last_failure: float = 0.0
+    is_healthy: bool = True
+    failure_reason: str = ""
+
+    def record_failure(self, reason: str):
+        """记录一次失败"""
+        self.failed_count += 1
+        self.last_failure = time.time()
+        self.failure_reason = reason
+        # 连续失败 3 次标记为不健康
+        if self.failed_count >= 3:
+            self.is_healthy = False
+
+    def reset(self):
+        """重置健康状态（成功时调用）"""
+        self.failed_count = 0
+        self.failure_reason = ""
+        self.is_healthy = True
+
+
 class ProxyAssignmentManager:
     """代理分配管理器
 
-    策略：最少绑定优先 + 永久绑定 + 无容量上限
+    策略：最少绑定优先 + 永久绑定 + 健康检测自动 failover
 
-    - 最少绑定优先: 新渠道永远分给当前绑定数最少的 IP，实现自动负载均衡
-    - 永久绑定: 一旦分配，channel→IP 持久化到 assignments 文件，不再漂移
-    - 无容量上限: 不限制单个 IP 的绑定数，由最少绑定优先保证均衡
+    - 最少绑定优先：新渠道永远分给当前绑定数最少的 IP，实现自动负载均衡
+    - 永久绑定：一旦分配，channel→IP 持久化到 assignments 文件，不再漂移
+    - 健康检测：IP 连续失败 3 次标记为不健康，自动切换到健康 IP
+    - 无容量上限：不限制单个 IP 的绑定数，由最少绑定优先保证均衡
 
     加新 IP: 只需在 proxies.yaml 的 ip_pool 中新增条目，新渠道自动流向新 IP
     """
+
+    # 默认失败阈值：连续失败 3 次标记为不健康
+    DEFAULT_FAILURE_THRESHOLD = 3
 
     def __init__(
         self,
         config_path: str,
         assignments_path: str,
+        failure_threshold: int = DEFAULT_FAILURE_THRESHOLD,
     ):
         self.config: ProxyConfig = load_proxy_config(config_path)
         self.assignments_path = Path(assignments_path)
@@ -40,6 +81,10 @@ class ProxyAssignmentManager:
         self._lock = asyncio.Lock()
         # Provider 实例缓存
         self._provider_cache: dict[str, ProxyProvider] = {}
+        # IP 健康状态追踪
+        self._health_states: dict[int, IPHealthState] = {}
+        # 失败阈值
+        self._failure_threshold = failure_threshold
 
         logger.info(
             f"[ProxyConfig] 加载 proxies.yaml 成功: "
@@ -49,7 +94,8 @@ class ProxyAssignmentManager:
         )
         logger.info(
             f"[ProxyAssignment] 加载 {self.assignments_path}: "
-            f"已分配渠道数={len(self.assignments)}"
+            f"已分配渠道数={len(self.assignments)}, "
+            f"failure_threshold={failure_threshold}"
         )
 
     @property
@@ -75,8 +121,57 @@ class ProxyAssignmentManager:
             if channel_id in self.assignments:
                 ip_index = self.assignments[channel_id]["ip_index"]
                 logger.info(
-                    f"[Proxy] {channel_id} 查询代理分配: 已有映射 ip_index={ip_index}"
+                    f"[Proxy] {channel_id} 查询代理分配：已有映射 ip_index={ip_index}"
                 )
+
+                # 2. 检查 IP 健康状态
+                health = self._health_states.get(ip_index)
+                if health and not health.is_healthy:
+                    logger.warning(
+                        f"[Proxy] IP {ip_index} 不健康，重新分配 channel {channel_id}"
+                    )
+                    self._unassign_channel(channel_id)
+                    # 继续到下面的重新分配逻辑
+                else:
+                    # 3. 从 ip_pool 获取配置（锁外执行，避免持锁调 API）
+                    ip_config = self.config.ip_pool[ip_index]
+                    provider = self._get_provider(ip_config.provider)
+
+                    try:
+                        # 4. 调用 Provider 获取代理信息
+                        logger.info(
+                            f"[Proxy] 获取代理：provider={ip_config.provider}, "
+                            f"label={ip_config.label or f'IP-{ip_index}'}"
+                        )
+                        proxy_info = await provider.get_proxy(ip_config)
+
+                        # 成功：重置健康状态
+                        if health:
+                            health.reset()
+
+                        logger.info(
+                            f"[Proxy] 获取代理成功：ip={proxy_info.ip}, "
+                            f"port={proxy_info.http_port}, "
+                            f"auth={'是' if proxy_info.requires_auth else '否'}, "
+                            f"city={proxy_info.city_name or '未知'}"
+                        )
+
+                        return proxy_info
+                    except Exception as e:
+                        # 失败：记录并标记
+                        if not health:
+                            self._health_states[ip_index] = IPHealthState(ip_index=ip_index)
+                        self._health_states[ip_index].record_failure(str(e))
+                        logger.warning(
+                            f"[Proxy] IP {ip_index} 获取失败：{e}, "
+                            f"failed_count={self._health_states[ip_index].failed_count}"
+                        )
+
+                        # 如果超过阈值，解除绑定并重新分配
+                        if not self._health_states[ip_index].is_healthy:
+                            self._unassign_channel(channel_id)
+                        else:
+                            raise  # 未超过阈值，向上抛异常
             else:
                 # 2. 为新渠道分配 IP
                 ip_index = self._assign_ip_to_channel(channel_id)
@@ -94,25 +189,72 @@ class ProxyAssignmentManager:
                     f"当前负载={usage}"
                 )
 
-        # 3. 从 ip_pool 获取配置（锁外执行，避免持锁调 API）
-        ip_config = self.config.ip_pool[ip_index]
-        provider = self._get_provider(ip_config.provider)
+                # 3. 从 ip_pool 获取配置（锁外执行，避免持锁调 API）
+                ip_config = self.config.ip_pool[ip_index]
+                provider = self._get_provider(ip_config.provider)
 
-        # 4. 调用 Provider 获取代理信息
-        logger.info(
-            f"[Proxy] 获取代理: provider={ip_config.provider}, "
-            f"label={ip_config.label or f'IP-{ip_index}'}"
-        )
+        # 4. 调用 Provider 获取代理信息（锁外执行）
         proxy_info = await provider.get_proxy(ip_config)
 
         logger.info(
-            f"[Proxy] 获取代理成功: ip={proxy_info.ip}, "
+            f"[Proxy] 获取代理成功：ip={proxy_info.ip}, "
             f"port={proxy_info.http_port}, "
             f"auth={'是' if proxy_info.requires_auth else '否'}, "
             f"city={proxy_info.city_name or '未知'}"
         )
 
         return proxy_info
+
+    async def _assign_and_get_proxy(self, channel_id: str) -> ProxyInfo:
+        """分配健康的 IP 并返回代理"""
+        async with self._lock:
+            # 最少绑定优先，但只考虑健康的 IP
+            all_ip_usage = self._get_all_ip_usage()
+            available_ips = [
+                (ip_index, all_ip_usage.get(ip_index, 0))
+                for ip_index in range(len(self.config.ip_pool))
+                if self._health_states.get(
+                    ip_index, IPHealthState(ip_index=ip_index)
+                ).is_healthy
+            ]
+
+            if not available_ips:
+                logger.error("[Proxy] 没有健康的 IP 可用")
+                raise Exception("没有健康的 IP 可用")
+
+            # 选择绑定数最少的健康 IP
+            ip_index = min(available_ips, key=lambda x: x[1])[0]
+
+            # 绑定并返回
+            self.assignments[channel_id] = {
+                "ip_index": ip_index,
+                "assigned_at": datetime.now().isoformat(),
+            }
+            self._save_assignments()
+
+            label = self.config.ip_pool[ip_index].label or f"IP-{ip_index}"
+            logger.info(
+                f"[ProxyAssignment] 重新分配 {channel_id} 到 "
+                f"ip_index={ip_index} ({label})"
+            )
+
+        # 从 ip_pool 获取配置（锁外执行）
+        ip_config = self.config.ip_pool[ip_index]
+        provider = self._get_provider(ip_config.provider)
+
+        # 调用 Provider 获取代理信息
+        proxy_info = await provider.get_proxy(ip_config)
+        return proxy_info
+
+    def _unassign_channel(self, channel_id: str):
+        """解除 channel 的 IP 绑定"""
+        if channel_id in self.assignments:
+            old_ip_index = self.assignments[channel_id]["ip_index"]
+            del self.assignments[channel_id]
+            self._save_assignments()
+            logger.info(
+                f"[Proxy] 解除 {channel_id} 的 IP 绑定 (原 ip_index={old_ip_index})"
+            )
 
     def get_protocol_for(self, channel_id: str) -> str:
         """获取渠道对应 IP 池条目的协议（ip_pool 条目 protocol 覆盖 defaults）"""
@@ -173,7 +315,7 @@ class ProxyAssignmentManager:
                     return json.load(f)
             except Exception as exc:
                 logger.warning(
-                    f"[ProxyAssignment] 加载分配记录失败, 降级为空: {exc}"
+                    f"[ProxyAssignment] 加载分配记录失败，降级为空：{exc}"
                 )
                 return {}
         return {}
@@ -185,7 +327,7 @@ class ProxyAssignmentManager:
             with open(self.assignments_path, "w", encoding="utf-8") as f:
                 json.dump(self.assignments, f, ensure_ascii=False, indent=2)
         except Exception as exc:
-            logger.warning(f"[ProxyAssignment] 保存分配记录失败: {exc}")
+            logger.warning(f"[ProxyAssignment] 保存分配记录失败：{exc}")
 
     def _get_provider(self, provider_name: str) -> ProxyProvider:
         """获取 Provider 实例（带缓存）"""
@@ -199,6 +341,41 @@ class ProxyAssignmentManager:
             else:
                 raise Exception(f"未知的 provider: {provider_name}")
         return self._provider_cache[provider_name]
+
+    async def start_health_check_loop(self, interval_seconds: int = 300):
+        """定期健康检查循环
+
+        Args:
+            interval_seconds: 检查间隔（秒），默认 300 秒（5 分钟）
+        """
+        logger.info(
+            f"[Proxy] 启动 IP 健康检查循环，间隔={interval_seconds}秒"
+        )
+        while True:
+            await asyncio.sleep(interval_seconds)
+            await self._check_all_ips_health()
+
+    async def _check_all_ips_health(self):
+        """检查所有 IP 的健康状态"""
+        for ip_index in range(len(self.config.ip_pool)):
+            ip_config = self.config.ip_pool[ip_index]
+            provider = self._get_provider(ip_config.provider)
+
+            try:
+                await provider.get_proxy(ip_config)
+                # 成功：重置健康状态
+                if ip_index in self._health_states:
+                    self._health_states[ip_index].reset()
+                logger.debug(f"[Proxy] IP {ip_index} 健康检查通过")
+            except Exception as e:
+                # 失败：记录
+                if ip_index not in self._health_states:
+                    self._health_states[ip_index] = IPHealthState(ip_index=ip_index)
+                self._health_states[ip_index].record_failure(str(e))
+                logger.warning(
+                    f"[Proxy] IP {ip_index} 健康检查失败：{e}, "
+                    f"failed_count={self._health_states[ip_index].failed_count}"
+                )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -215,11 +392,14 @@ def get_assignment_manager() -> Optional[ProxyAssignmentManager]:
 def init_assignment_manager(
     config_path: str,
     assignments_path: str,
+    failure_threshold: int = ProxyAssignmentManager.DEFAULT_FAILURE_THRESHOLD,
 ) -> ProxyAssignmentManager:
     """初始化全局分配管理器（服务启动时调用一次）"""
     global _manager
     if _manager is None:
-        _manager = ProxyAssignmentManager(config_path, assignments_path)
+        _manager = ProxyAssignmentManager(
+            config_path, assignments_path, failure_threshold
+        )
     return _manager
 
 

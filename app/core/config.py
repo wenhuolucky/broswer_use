@@ -51,3 +51,9 @@ PROXY_CONFIG_PATH = str(_project_path(os.getenv("PROXY_CONFIG_PATH"), PROJECT_RO
 PROXY_ASSIGNMENTS_PATH = str(
     _project_path(os.getenv("PROXY_ASSIGNMENTS_PATH"), DATA_DIR / "proxy_assignments.json")
 )
+# IP 健康检查：连续失败阈值（默认 3 次）
+PROXY_FAILURE_THRESHOLD = int(os.getenv("PROXY_FAILURE_THRESHOLD", "3"))
+# IP 健康检查循环：是否启用定期巡检（默认 false）
+PROXY_HEALTH_CHECK_ENABLED = os.getenv("PROXY_HEALTH_CHECK_ENABLED", "false").lower() in ("true", "1", "yes")
+# IP 健康检查循环间隔（秒，默认 300 秒 = 5 分钟）
+PROXY_HEALTH_CHECK_INTERVAL = int(os.getenv("PROXY_HEALTH_CHECK_INTERVAL", "300"))

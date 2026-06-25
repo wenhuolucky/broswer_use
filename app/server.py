@@ -16,6 +16,9 @@ from app.core.config import (
     PROXY_ASSIGNMENTS_PATH,
     PROXY_CONFIG_PATH,
     PROXY_ENABLED,
+    PROXY_FAILURE_THRESHOLD,
+    PROXY_HEALTH_CHECK_ENABLED,
+    PROXY_HEALTH_CHECK_INTERVAL,
 )
 from app.schemas.common import HealthResponse
 from app.core.auth import require_api_token
@@ -87,17 +90,32 @@ async def lifespan(app: FastAPI):
         from app.proxy.assignment import init_assignment_manager
 
         try:
-            mgr = init_assignment_manager(PROXY_CONFIG_PATH, PROXY_ASSIGNMENTS_PATH)
+            mgr = init_assignment_manager(
+                PROXY_CONFIG_PATH, PROXY_ASSIGNMENTS_PATH, PROXY_FAILURE_THRESHOLD
+            )
             _log.info(
-                "多 IP 代理已启用：ip_pool=%d, 已绑定渠道=%d",
+                "多 IP 代理已启用：ip_pool=%d, 已绑定渠道=%d, failure_threshold=%d",
                 len(mgr.config.ip_pool),
                 len(mgr.assignments),
+                PROXY_FAILURE_THRESHOLD,
             )
+
+            # 启动 IP 健康检查循环（可选）
+            proxy_health_check_task = None
+            if PROXY_HEALTH_CHECK_ENABLED:
+                proxy_health_check_task = asyncio.create_task(
+                    mgr.start_health_check_loop(PROXY_HEALTH_CHECK_INTERVAL)
+                )
+                _log.info(
+                    "IP 健康检查循环已启动：interval=%d秒",
+                    PROXY_HEALTH_CHECK_INTERVAL,
+                )
         except Exception as exc:
             _log.error("代理模块初始化失败（PROXY_ENABLED=true）: %s", exc, exc_info=True)
             raise
     else:
         _log.info("多 IP 代理未启用（PROXY_ENABLED=false），所有渠道直连。")
+        proxy_health_check_task = None
 
     # 重启后清理遗留的 pending 渠道：它们只在一次登录会话进行中存在，
     # 会话已随重启失效（对应的 login job 上一步已被置为 failed）。
@@ -124,6 +142,12 @@ async def lifespan(app: FastAPI):
     finally:
         cleanup_task.cancel()
         pending_sweep_task.cancel()
+        if proxy_health_check_task is not None:
+            proxy_health_check_task.cancel()
+            try:
+                await proxy_health_check_task
+            except asyncio.CancelledError:
+                pass
         try:
             await agent.remote_runner.shutdown()
         except Exception as exc:
