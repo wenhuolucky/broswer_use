@@ -76,17 +76,21 @@ def markdown_to_html(markdown_text: str) -> str:
         html_content, flags=re.DOTALL
     )
 
-    # <blockquote> 添加内联样式（保留标签）
+    # <blockquote> → <p> + 左边框样式模拟。
+    # 头条编辑器支持 <blockquote> 标签，但 code 路径通过 hidden div + execCommand('copy')
+    # 产生的剪贴板 HTML 结构异于手动复制，头条 paste handler 可能拒绝 <blockquote>。
+    # 用 <p> + border-left 模拟，视觉一致且 100% 被头条接受。
     html_content = re.sub(
-        r"<blockquote>",
-        r'<blockquote style="margin: 1em 0; padding-left: 1em; border-left: 4px solid #ccc; color: #666;">',
-        html_content
+        r'<blockquote>\s*<p>(.*?)</p>\s*</blockquote>',
+        r'<p style="margin: 1em 0; padding-left: 1em; border-left: 4px solid #ccc; color: #666;">\1</p>',
+        html_content, flags=re.DOTALL
     )
     # <strong> 添加 font-weight: bold 确保加粗生效
     html_content = html_content.replace("<strong>", '<strong style="font-weight: bold;">')
-    # <hr> 保留原生标签（头条编辑器不支持带样式的 hr）
-    # 浏览器渲染后复制时，hr 样式会被丢弃，只保留标签本身
-    # 不需要替换，保持 markdown 库生成的原始 <hr> 即可
+    # <hr> → <p> + 上边框模拟分隔线。
+    # 与 blockquote 同理，code 路径下 <hr> 可能被头条丢弃。
+    html_content = html_content.replace("<hr />", '<p style="border: none; border-top: 1px solid #ccc; margin: 2em 0;"></p>')
+    html_content = html_content.replace("<hr>", '<p style="border: none; border-top: 1px solid #ccc; margin: 2em 0;"></p>')
     # <ul> 添加内联样式
     html_content = html_content.replace("<ul>", '<ul style="margin: 1em 0; padding-left: 2em;">')
     # <li> 添加内联样式，并去掉内部的 <p> 标签（浏览器复制后会去掉 li 内的 p）
@@ -99,13 +103,9 @@ def markdown_to_html(markdown_text: str) -> str:
         .replace("<em>", '<em style="font-style: italic;">')
         .replace("<i>", '<em style="font-style: italic;">')
         .replace("</i>", "</em>"))
-    # <hr> 确保是原生标签（不是 <hr />）
-    html_content = html_content.replace("<hr />", "<hr>")
-
-    # 包裹完整的 HTML 结构（与浏览器复制保持一致）
-    html_content = f"""<html><head><meta charset="utf-8"></head><body>
-{html_content}
-</body></html>"""
+    # 压缩标签间换行，避免 execCommand('copy') 序列化时产生多余空白文本节点，
+    # 导致头条粘贴后出现大量空行。
+    html_content = re.sub(r'>\n+<', '><', html_content)
 
     return html_content
 

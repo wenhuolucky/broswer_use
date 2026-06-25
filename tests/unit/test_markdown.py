@@ -24,21 +24,21 @@ class TestMarkdownToHtml:
     def test_empty_returns_empty(self) -> None:
         assert md.markdown_to_html("") == ""
 
-    def test_heading_downgraded_to_bold_paragraph(self, force_fallback: None) -> None:
-        # h1/h2 都被降级成 <p><strong>…</strong></p>（编辑器兼容性）
+    def test_heading_kept_with_inline_style(self, force_fallback: None) -> None:
+        # h1/h2 保留原生标签 + 内联样式，不再降级为 <p><strong>
         out = md.markdown_to_html("# 标题")
-        assert "<h1>" not in out
-        assert "<strong>标题</strong>" in out
+        assert "font-size: 1.5em" in out
+        assert "标题</h1>" in out
 
-    def test_em_converted_to_i(self, force_fallback: None) -> None:
-        # <em> 统一替换成 <i>（头条编辑器对 <i> 更稳）
+    def test_em_kept_with_inline_style(self, force_fallback: None) -> None:
+        # <em> 保留 + 内联样式，不再替换为 <i>
         out = md.markdown_to_html("这是 *斜体* 文字")
-        assert "<em>" not in out
-        assert "<i>斜体</i>" in out
+        assert '<em style="font-style: italic;">斜体</em>' in out
 
-    def test_bold(self, force_fallback: None) -> None:
+    def test_bold_with_inline_style(self, force_fallback: None) -> None:
+        # <strong> 添加 font-weight: bold
         out = md.markdown_to_html("**加粗**")
-        assert "<strong>加粗</strong>" in out
+        assert '<strong style="font-weight: bold;">加粗</strong>' in out
 
 
 class TestSimpleConvert:
