@@ -70,6 +70,14 @@ def markdown_to_html(markdown_text: str) -> str:
     html_content = re.sub(r"<h1>(.*?)</h1>", r"<p><strong>\1</strong></p>", html_content, flags=re.DOTALL)
     html_content = re.sub(r"<h2>(.*?)</h2>", r"<p><strong>\1</strong></p>", html_content, flags=re.DOTALL)
 
+    # 平台编辑器不支持 <blockquote>，转换为带左边框的 <p> 标签
+    html_content = re.sub(
+        r"<blockquote>\s*<p>(.*?)</p>\s*</blockquote>",
+        r'<p style="border-left: 4px solid #ccc; padding-left: 12px; color: #666; margin: 12px 0;">\1</p>',
+        html_content,
+        flags=re.DOTALL
+    )
+
     return html_content
 
 
