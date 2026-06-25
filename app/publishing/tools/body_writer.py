@@ -209,6 +209,9 @@ def build_clipboard_html_js() -> str:
   // 转成头条能识别的格式（如 blockquote 元素 + 样式、hr 元素 + 边框）。
   if (htmlContent) {
     let renderDiv = null;
+    // 保存当前焦点元素（头条正文编辑器），避免 renderDiv.focus() 偷走焦点后
+    // Ctrl+V 无处粘贴。
+    const prevActive = document.activeElement;
     try {
       renderDiv = document.createElement('div');
       renderDiv.contentEditable = 'true';
@@ -235,7 +238,6 @@ def build_clipboard_html_js() -> str:
       const renderOk = document.execCommand('copy');
       renderSelection.removeAllRanges();
       if (renderOk) {
-        document.body.removeChild(renderDiv);
         return Promise.resolve({ ok: true, method: 'rendered_div_execCommand' });
       }
     } catch (error) {
@@ -244,6 +246,12 @@ def build_clipboard_html_js() -> str:
       if (renderDiv && renderDiv.parentNode) {
         renderDiv.parentNode.removeChild(renderDiv);
       }
+      // 回切焦点到头条编辑器，确保后续 Ctrl+V 粘贴到正确位置。
+      try {
+        if (prevActive && typeof prevActive.focus === "function") {
+          prevActive.focus();
+        }
+      } catch (_) {}
     }
   }
 
