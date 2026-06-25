@@ -213,19 +213,38 @@ def build_clipboard_html_js() -> str:
       );
     }
   } catch (error) {}
+  // Fallback: 使用临时 div 写入 HTML，保留格式
   try {
-    const textarea = document.createElement('textarea');
-    textarea.value = plainText;
-    textarea.setAttribute('readonly', '');
-    textarea.style.position = 'fixed';
-    textarea.style.left = '-9999px';
-    document.body.appendChild(textarea);
-    textarea.select();
+    const div = document.createElement('div');
+    div.contentEditable = 'true';
+    div.innerHTML = htmlContent || plainText;
+    div.style.position = 'fixed';
+    div.style.left = '-9999px';
+    document.body.appendChild(div);
+    const range = document.createRange();
+    range.selectNodeContents(div);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
     const ok = document.execCommand('copy');
-    document.body.removeChild(textarea);
-    return { ok: !!ok, method: 'execCommand' };
+    document.body.removeChild(div);
+    return { ok: !!ok, method: 'execCommand_div' };
   } catch (error) {
-    return { ok: false, method: '', error: String(error) };
+    // 最后降级：纯文本
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = plainText;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      return { ok: !!ok, method: 'execCommand_textarea' };
+    } catch (error) {
+      return { ok: false, method: '', error: String(error) };
+    }
   }
 }
 """
