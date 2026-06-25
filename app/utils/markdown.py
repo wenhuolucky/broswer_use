@@ -90,6 +90,10 @@ def normalize_markdown_for_rich_text(markdown_text: str) -> str:
             normalized_lines.append("")
             continue
 
+        # 确保列表项和 blockquote 前面有空行，以便 markdown 库正确解析为块级元素
+        if STRUCTURED_PREFIX_RE.match(line) and normalized_lines and normalized_lines[-1] != "":
+            normalized_lines.append("")
+
         if STRUCTURED_PREFIX_RE.match(line):
             normalized_lines.append(line)
             continue
