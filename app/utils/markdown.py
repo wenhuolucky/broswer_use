@@ -89,17 +89,20 @@ def markdown_to_html(markdown_text: str) -> str:
     )
     # <strong> 添加 font-weight: bold 确保加粗生效
     html_content = html_content.replace("<strong>", '<strong style="font-weight: bold;">')
-    # <hr> 保留标签，添加样式
-    html_content = html_content.replace("<hr />", '<hr style="border: none; border-top: 1px solid #eee; margin: 2em 0;">')
-    html_content = html_content.replace("<hr>", '<hr style="border: none; border-top: 1px solid #eee; margin: 2em 0;">')
+    # <hr> 保留原生标签（头条编辑器不支持带样式的 hr）
+    # 浏览器渲染后复制时，hr 样式会被丢弃，只保留标签本身
+    # 不需要替换，保持 markdown 库生成的原始 <hr> 即可
     # <ul> 添加内联样式
     html_content = html_content.replace("<ul>", '<ul style="margin: 1em 0; padding-left: 2em;">')
-    # <li> 添加内联样式
+    # <li> 添加内联样式，并去掉内部的 <p> 标签（浏览器复制后会去掉 li 内的 p）
+    html_content = re.sub(r'<li([^>]*)>\s*<p>(.*?)</p>\s*</li>', r'<li\1>\2</li>', html_content, flags=re.DOTALL)
     html_content = html_content.replace("<li>", '<li style="margin: 0.5em 0;">')
     # <ol> 添加内联样式
     html_content = html_content.replace("<ol>", '<ol style="margin: 1em 0; padding-left: 2em;">')
     # <em> 添加字体样式（用于斜体）
     html_content = html_content.replace("<i>", '<em style="font-style: italic;">')
+    # <hr> 确保是原生标签（不是 <hr />）
+    html_content = html_content.replace("<hr />", "<hr>")
 
     return html_content
 
