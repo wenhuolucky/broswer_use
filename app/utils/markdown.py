@@ -104,6 +104,11 @@ def markdown_to_html(markdown_text: str) -> str:
     # <hr> 确保是原生标签（不是 <hr />）
     html_content = html_content.replace("<hr />", "<hr>")
 
+    # 包裹完整的 HTML 结构（与浏览器复制保持一致）
+    html_content = f"""<html><head><meta charset="utf-8"></head><body>
+{html_content}
+</body></html>"""
+
     return html_content
 
 
