@@ -196,13 +196,12 @@ def build_clipboard_text_js() -> str:
 
 
 def build_clipboard_api_js() -> str:
-    """[首选方案] 使用 ClipboardItem API 直接写入 text/html 和 text/plain。
+    """[降级方案] 使用 ClipboardItem API 直接写入 text/html 和 text/plain。
 
-    这是最接近手动复制的方式，浏览器会生成标准的 text/html 格式（包含 Fragment 注释等元数据），
-    与手动全选复制的输出一致，解决头条编辑器对有序列表、引用、分隔线的识别问题。
+    注意：此方法虽然成功写入剪贴板，但缺少 Fragment 标记，会导致头条编辑器无法正确
+    渲染有序列表（显示为 1,1,1）、引用块和分隔线。仅在 iframe 方法失败时使用。
 
-    注意：此方法需要浏览器已授予 clipboard-write 权限（通过 grant_permissions）。
-    如果失败，会降级到 iframe + execCommand 方式。
+    需要浏览器已授予 clipboard-write 权限（通过 grant_permissions）。
     """
     return r"""
 (...args) => {
@@ -234,10 +233,14 @@ def build_clipboard_api_js() -> str:
 
 
 def build_clipboard_html_via_iframe_js() -> str:
-    """[降级方案] 通过隐藏 iframe 渲染 HTML 并全选复制，模拟手动复制的完整流程。
+    """[首选方案] 通过隐藏 iframe 渲染 HTML 并全选复制，模拟手动复制的完整流程。
 
-    此方案用于 Playwright Clipboard API 不可用时的降级。
-    让浏览器生成标准的 text/html 格式，包含 Fragment 注释等元数据。
+    这是最接近手动复制的方式。iframe 中的 HTML 会被浏览器完整解析和渲染，
+    然后通过 execCommand('copy') 触发浏览器的序列化逻辑，生成标准的 text/html 格式，
+    包含 Fragment 注释（<!--StartFragment--> 和 <!--EndFragment-->）和 CF_HTML 头部。
+    这些元数据是头条编辑器正确识别有序列表、引用块、分隔线的关键。
+
+    如果失败，会降级到 clipboard_api 方式。
     """
     return r"""
 (...args) => {
@@ -553,91 +556,91 @@ class BodyWriter:
             return make_body_write_failure(mode=mode, reason=reason)
 
         if mode == "rich_html" and html:
-            # 优先使用 ClipboardItem API（通过 page.evaluate 调用 navigator.clipboard.write）
-            # 这是最接近手动复制的方式，浏览器会生成标准的 text/html 格式
-            clipboard_api_start = time.perf_counter()
+            # 首选方案：iframe 方法（最接近手动复制，包含 Fragment 标记）
+            # iframe 方法会触发浏览器的完整解析和序列化流程，生成标准的剪贴板格式
+            iframe_start = time.perf_counter()
             try:
                 raw_clipboard = await self._evaluate_with_timeout(
                     page,
-                    build_clipboard_api_js(),
+                    build_clipboard_html_via_iframe_js(),
                     {"html": html, "text": text or ""},
-                    label="clipboard_api",
+                    label="clipboard_html_iframe",
                 )
-                clipboard_api_duration = time.perf_counter() - clipboard_api_start
+                iframe_duration = time.perf_counter() - iframe_start
                 clipboard = normalize_evaluate_result(raw_clipboard)
 
-                # 记录 clipboard_api 的尝试结果
+                # 记录 iframe 方法的尝试结果
                 if clipboard is None:
                     self._warning(
-                        "[BodyTool] clipboard_api_result_invalid raw_type=%s raw_preview=%r duration=%.2fs",
+                        "[BodyTool] iframe_result_invalid raw_type=%s raw_preview=%r duration=%.2fs",
                         type(raw_clipboard).__name__,
                         str(raw_clipboard)[:120],
-                        clipboard_api_duration,
+                        iframe_duration,
                     )
                 elif clipboard.get("ok"):
                     self._info(
-                        "[BodyTool] clipboard_api_success method=%s duration=%.2fs",
+                        "[BodyTool] iframe_success method=%s duration=%.2fs",
                         clipboard.get("method", "unknown"),
-                        clipboard_api_duration,
+                        iframe_duration,
                     )
                 else:
                     self._info(
-                        "[BodyTool] clipboard_api_failed method=%s error=%s duration=%.2fs, fallback_to_iframe",
+                        "[BodyTool] iframe_failed method=%s error=%s duration=%.2fs, fallback_to_clipboard_api",
                         clipboard.get("method", "unknown"),
                         clipboard.get("error", "unknown"),
-                        clipboard_api_duration,
+                        iframe_duration,
                     )
             except Exception as exc:
-                clipboard_api_duration = time.perf_counter() - clipboard_api_start
+                iframe_duration = time.perf_counter() - iframe_start
                 self._warning(
-                    "[BodyTool] clipboard_api_exception error=%s duration=%.2fs, fallback_to_iframe",
+                    "[BodyTool] iframe_exception error=%s duration=%.2fs, fallback_to_clipboard_api",
                     str(exc)[:120],
-                    clipboard_api_duration,
+                    iframe_duration,
                 )
                 clipboard = None
 
-            # 如果 ClipboardItem API 失败，降级到 iframe + execCommand 方式
+            # 如果 iframe 方法失败，降级到 clipboard_api 方式
             if clipboard is None or not clipboard.get("ok"):
-                self._info("[BodyTool] fallback_to_iframe_method")
-                iframe_start = time.perf_counter()
+                self._info("[BodyTool] fallback_to_clipboard_api_method")
+                clipboard_api_start = time.perf_counter()
                 try:
                     raw_clipboard = await self._evaluate_with_timeout(
                         page,
-                        build_clipboard_html_via_iframe_js(),
+                        build_clipboard_api_js(),
                         {"html": html, "text": text or ""},
-                        label="clipboard_html_iframe_fallback",
+                        label="clipboard_api_fallback",
                     )
-                    iframe_duration = time.perf_counter() - iframe_start
+                    clipboard_api_duration = time.perf_counter() - clipboard_api_start
                     clipboard = normalize_evaluate_result(raw_clipboard)
 
                     if clipboard is None:
                         self._warning(
-                            "[BodyTool] iframe_result_invalid raw_type=%s raw_preview=%r duration=%.2fs",
+                            "[BodyTool] clipboard_api_result_invalid raw_type=%s raw_preview=%r duration=%.2fs",
                             type(raw_clipboard).__name__,
                             str(raw_clipboard)[:120],
-                            iframe_duration,
+                            clipboard_api_duration,
                         )
                     elif clipboard.get("ok"):
                         self._info(
-                            "[BodyTool] iframe_success method=%s duration=%.2fs",
+                            "[BodyTool] clipboard_api_success method=%s duration=%.2fs",
                             clipboard.get("method", "unknown"),
-                            iframe_duration,
+                            clipboard_api_duration,
                         )
                     else:
                         self._warning(
-                            "[BodyTool] iframe_failed method=%s error=%s duration=%.2fs",
+                            "[BodyTool] clipboard_api_failed method=%s error=%s duration=%.2fs",
                             clipboard.get("method", "unknown"),
                             clipboard.get("error", "unknown"),
-                            iframe_duration,
+                            clipboard_api_duration,
                         )
                 except Exception as exc:
-                    iframe_duration = time.perf_counter() - iframe_start
+                    clipboard_api_duration = time.perf_counter() - clipboard_api_start
                     self._warning(
-                        "[BodyTool] iframe_exception error=%s duration=%.2fs",
+                        "[BodyTool] clipboard_api_exception error=%s duration=%.2fs",
                         str(exc)[:120],
-                        iframe_duration,
+                        clipboard_api_duration,
                     )
-                    clipboard = {"ok": False, "method": "iframe_exception", "error": str(exc)[:120]}
+                    clipboard = {"ok": False, "method": "clipboard_api_exception", "error": str(exc)[:120]}
         else:
             # 纯文本模式使用 navigator.clipboard.writeText
             text_start = time.perf_counter()
