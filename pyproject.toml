@@ -19,6 +19,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "scalar-fastapi>=1.0.0",
     "loguru>=0.7.3",
+    "markdown>=3.5.0",  # 用于将 Markdown 转换为 HTML
 ]
 
 [dependency-groups]
