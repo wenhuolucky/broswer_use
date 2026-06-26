@@ -40,6 +40,8 @@ ENV/
 .coverage.*
 htmlcov/
 .cache/
+tests/
+docs/
 
 # ---- IDE / editor ----
 .vscode/
