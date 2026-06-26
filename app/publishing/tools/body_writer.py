@@ -236,9 +236,11 @@ def build_clipboard_html_via_iframe_js() -> str:
     """[首选方案] 通过隐藏 iframe 渲染 HTML 并全选复制，模拟手动复制的完整流程。
 
     这是最接近手动复制的方式。iframe 中的 HTML 会被浏览器完整解析和渲染，
-    然后通过 execCommand('copy') 触发浏览器的序列化逻辑，生成标准的 text/html 格式，
-    包含 Fragment 注释（<!--StartFragment--> 和 <!--EndFragment-->）和 CF_HTML 头部。
-    这些元数据是头条编辑器正确识别有序列表、引用块、分隔线的关键。
+    然后通过 execCommand('copy') 触发浏览器的序列化逻辑，生成标准的 text/html 格式。
+
+    关键改进：在 HTML 内容前后手动添加 Fragment 标记（<!--StartFragment--> 和 <!--EndFragment-->），
+    这些标记是 Windows CF_HTML 剪贴板格式的核心元数据，用于标识实际内容的边界。
+    头条编辑器依赖这些标记正确识别有序列表、引用块、分隔线等富文本元素。
 
     如果失败，会降级到 clipboard_api 方式。
     """
@@ -253,11 +255,11 @@ def build_clipboard_html_via_iframe_js() -> str:
     + 'opacity:0;pointer-events:none;border:none;';
   document.body.appendChild(iframe);
 
-  // 步骤 2：写入完整的 HTML 文档
+  // 步骤 2：写入完整的 HTML 文档，手动添加 Fragment 标记
   const doc = iframe.contentDocument;
   doc.open();
   doc.write('<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
-    + '<body>' + htmlContent + '</body></html>');
+    + '<body><!--StartFragment-->' + htmlContent + '<!--EndFragment--></body></html>');
   doc.close();
 
   // 步骤 3：等待渲染后全选复制
