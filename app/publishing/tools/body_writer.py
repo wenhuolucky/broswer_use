@@ -195,6 +195,101 @@ def build_clipboard_text_js() -> str:
 """
 
 
+def build_clipboard_api_js() -> str:
+    """[首选方案] 使用 ClipboardItem API 直接写入 text/html 和 text/plain。
+
+    这是最接近手动复制的方式，浏览器会生成标准的 text/html 格式（包含 Fragment 注释等元数据），
+    与手动全选复制的输出一致，解决头条编辑器对有序列表、引用、分隔线的识别问题。
+
+    注意：此方法需要浏览器已授予 clipboard-write 权限（通过 grant_permissions）。
+    如果失败，会降级到 iframe + execCommand 方式。
+    """
+    return r"""
+(...args) => {
+  const payload = args[0] || {};
+  const htmlContent = payload.html || '';
+  const plainText = payload.text || '';
+
+  // 首选：ClipboardItem 直接写入 HTML 字节流。
+  // 精确控制剪贴板中的 text/html 和 text/plain，不依赖浏览器 DOM 序列化。
+  // 需要浏览器已授予 clipboard-write 权限。
+  try {
+    if (navigator.clipboard && window.ClipboardItem) {
+      const item = new ClipboardItem({
+        'text/html': new Blob([htmlContent], { type: 'text/html' }),
+        'text/plain': new Blob([plainText], { type: 'text/plain' })
+      });
+      return navigator.clipboard.write([item]).then(
+        () => ({ ok: true, method: 'clipboard_api' }),
+        (error) => ({ ok: false, method: 'clipboard_api', error: String(error) })
+      );
+    }
+  } catch (error) {
+    return { ok: false, method: 'clipboard_api', error: String(error) };
+  }
+
+  return { ok: false, method: 'clipboard_api', error: 'ClipboardItem not available' };
+}
+"""
+
+
+def build_clipboard_html_via_iframe_js() -> str:
+    """[降级方案] 通过隐藏 iframe 渲染 HTML 并全选复制，模拟手动复制的完整流程。
+
+    此方案用于 Playwright Clipboard API 不可用时的降级。
+    让浏览器生成标准的 text/html 格式，包含 Fragment 注释等元数据。
+    """
+    return r"""
+(...args) => {
+  const payload = args[0] || {};
+  const htmlContent = payload.html || '';
+
+  // 步骤 1：创建隐藏 iframe
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText = 'position:fixed;left:-9999px;top:0;width:800px;height:600px;'
+    + 'opacity:0;pointer-events:none;border:none;';
+  document.body.appendChild(iframe);
+
+  // 步骤 2：写入完整的 HTML 文档
+  const doc = iframe.contentDocument;
+  doc.open();
+  doc.write('<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
+    + '<body>' + htmlContent + '</body></html>');
+  doc.close();
+
+  // 步骤 3：等待渲染后全选复制
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      try {
+        const body = doc.body;
+        body.focus();
+
+        const range = doc.createRange();
+        range.selectNodeContents(body);
+
+        const selection = iframe.contentWindow.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+
+        const ok = doc.execCommand('copy');
+
+        selection.removeAllRanges();
+        try { document.body.removeChild(iframe); } catch (_) {}
+
+        resolve({
+          ok: !!ok,
+          method: ok ? 'iframe_execCommand' : 'iframe_execCommand_failed'
+        });
+      } catch (error) {
+        try { document.body.removeChild(iframe); } catch (_) {}
+        resolve({ ok: false, method: 'iframe_execCommand', error: String(error) });
+      }
+    }, 150);
+  });
+}
+"""
+
+
 def build_clipboard_html_js() -> str:
     return r"""
 (...args) => {
@@ -458,19 +553,132 @@ class BodyWriter:
             return make_body_write_failure(mode=mode, reason=reason)
 
         if mode == "rich_html" and html:
-            raw_clipboard = await self._evaluate_with_timeout(
-                page,
-                build_clipboard_html_js(),
-                {"html": html, "text": text or ""},
-                label="clipboard_html",
-            )
+            # 优先使用 ClipboardItem API（通过 page.evaluate 调用 navigator.clipboard.write）
+            # 这是最接近手动复制的方式，浏览器会生成标准的 text/html 格式
+            clipboard_api_start = time.perf_counter()
+            try:
+                raw_clipboard = await self._evaluate_with_timeout(
+                    page,
+                    build_clipboard_api_js(),
+                    {"html": html, "text": text or ""},
+                    label="clipboard_api",
+                )
+                clipboard_api_duration = time.perf_counter() - clipboard_api_start
+                clipboard = normalize_evaluate_result(raw_clipboard)
+
+                # 记录 clipboard_api 的尝试结果
+                if clipboard is None:
+                    self._warning(
+                        "[BodyTool] clipboard_api_result_invalid raw_type=%s raw_preview=%r duration=%.2fs",
+                        type(raw_clipboard).__name__,
+                        str(raw_clipboard)[:120],
+                        clipboard_api_duration,
+                    )
+                elif clipboard.get("ok"):
+                    self._info(
+                        "[BodyTool] clipboard_api_success method=%s duration=%.2fs",
+                        clipboard.get("method", "unknown"),
+                        clipboard_api_duration,
+                    )
+                else:
+                    self._info(
+                        "[BodyTool] clipboard_api_failed method=%s error=%s duration=%.2fs, fallback_to_iframe",
+                        clipboard.get("method", "unknown"),
+                        clipboard.get("error", "unknown"),
+                        clipboard_api_duration,
+                    )
+            except Exception as exc:
+                clipboard_api_duration = time.perf_counter() - clipboard_api_start
+                self._warning(
+                    "[BodyTool] clipboard_api_exception error=%s duration=%.2fs, fallback_to_iframe",
+                    str(exc)[:120],
+                    clipboard_api_duration,
+                )
+                clipboard = None
+
+            # 如果 ClipboardItem API 失败，降级到 iframe + execCommand 方式
+            if clipboard is None or not clipboard.get("ok"):
+                self._info("[BodyTool] fallback_to_iframe_method")
+                iframe_start = time.perf_counter()
+                try:
+                    raw_clipboard = await self._evaluate_with_timeout(
+                        page,
+                        build_clipboard_html_via_iframe_js(),
+                        {"html": html, "text": text or ""},
+                        label="clipboard_html_iframe_fallback",
+                    )
+                    iframe_duration = time.perf_counter() - iframe_start
+                    clipboard = normalize_evaluate_result(raw_clipboard)
+
+                    if clipboard is None:
+                        self._warning(
+                            "[BodyTool] iframe_result_invalid raw_type=%s raw_preview=%r duration=%.2fs",
+                            type(raw_clipboard).__name__,
+                            str(raw_clipboard)[:120],
+                            iframe_duration,
+                        )
+                    elif clipboard.get("ok"):
+                        self._info(
+                            "[BodyTool] iframe_success method=%s duration=%.2fs",
+                            clipboard.get("method", "unknown"),
+                            iframe_duration,
+                        )
+                    else:
+                        self._warning(
+                            "[BodyTool] iframe_failed method=%s error=%s duration=%.2fs",
+                            clipboard.get("method", "unknown"),
+                            clipboard.get("error", "unknown"),
+                            iframe_duration,
+                        )
+                except Exception as exc:
+                    iframe_duration = time.perf_counter() - iframe_start
+                    self._warning(
+                        "[BodyTool] iframe_exception error=%s duration=%.2fs",
+                        str(exc)[:120],
+                        iframe_duration,
+                    )
+                    clipboard = {"ok": False, "method": "iframe_exception", "error": str(exc)[:120]}
         else:
-            raw_clipboard = await self._evaluate_with_timeout(
-                page,
-                build_clipboard_text_js(),
-                text or "",
-                label="clipboard_text",
-            )
+            # 纯文本模式使用 navigator.clipboard.writeText
+            text_start = time.perf_counter()
+            try:
+                raw_clipboard = await self._evaluate_with_timeout(
+                    page,
+                    build_clipboard_text_js(),
+                    text or "",
+                    label="clipboard_text",
+                )
+                text_duration = time.perf_counter() - text_start
+                clipboard = normalize_evaluate_result(raw_clipboard)
+
+                if clipboard is None:
+                    self._warning(
+                        "[BodyTool] text_result_invalid raw_type=%s raw_preview=%r duration=%.2fs",
+                        type(raw_clipboard).__name__,
+                        str(raw_clipboard)[:120],
+                        text_duration,
+                    )
+                elif clipboard.get("ok"):
+                    self._info(
+                        "[BodyTool] text_success method=%s duration=%.2fs",
+                        clipboard.get("method", "unknown"),
+                        text_duration,
+                    )
+                else:
+                    self._warning(
+                        "[BodyTool] text_failed method=%s error=%s duration=%.2fs",
+                        clipboard.get("method", "unknown"),
+                        clipboard.get("error", "unknown"),
+                        text_duration,
+                    )
+            except Exception as exc:
+                text_duration = time.perf_counter() - text_start
+                self._warning(
+                    "[BodyTool] text_exception error=%s duration=%.2fs",
+                    str(exc)[:120],
+                    text_duration,
+                )
+                clipboard = {"ok": False, "method": "text_exception", "error": str(exc)[:120]}
         clipboard = normalize_evaluate_result(raw_clipboard)
         if clipboard is None:
             self._warning(
