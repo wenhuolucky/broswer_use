@@ -849,29 +849,64 @@ class BodyWriter:
             except Exception as exc:
                 self._warning("[BodyTool] clipboard_permission_grant_failed error=%s", str(exc)[:120])
 
-            # 4. 模拟真实键盘事件：Ctrl+A 全选 → Ctrl+C 复制
-            await new_page.click("body")
-            await asyncio.sleep(0.1)
-            await new_page.keyboard.press("Control+a")
-            self._info("[BodyTool] keyboard_select_all keys=Control+a")
-            await asyncio.sleep(0.2)
-            await new_page.keyboard.press("Control+c")
-            self._info("[BodyTool] keyboard_copy keys=Control+c")
-            await asyncio.sleep(0.3)  # 等待剪贴板写入完成
+            # 4. 读取浏览器渲染后的 DOM（浏览器已解析和规范化 HTML 结构）
+            #    然后用 ClipboardItem API 写入剪贴板（已验证能成功写入 text/html）
+            rendered_html = await new_page.evaluate("() => document.body.innerHTML")
+            self._info(
+                "[BodyTool] rendered_html_read html_len=%s",
+                len(rendered_html),
+            )
+
+            # 5. 使用 ClipboardItem API 写入剪贴板（不依赖 isTrusted 复制事件）
+            clipboard_result = await new_page.evaluate(
+                r"""(html) => {
+                    const plainText = html.replace(/<[^>]+>/g, '');
+                    try {
+                        if (navigator.clipboard && window.ClipboardItem) {
+                            const item = new ClipboardItem({
+                                'text/html': new Blob([html], { type: 'text/html' }),
+                                'text/plain': new Blob([plainText], { type: 'text/plain' })
+                            });
+                            return navigator.clipboard.write([item]).then(
+                                () => ({ ok: true, method: 'rendered_clipboard_api' }),
+                                (error) => ({ ok: false, method: 'rendered_clipboard_api', error: String(error) })
+                            );
+                        }
+                    } catch (e) {
+                        return { ok: false, method: 'rendered_clipboard_api', error: String(e) };
+                    }
+                    return { ok: false, method: 'rendered_clipboard_api', error: 'ClipboardItem unavailable' };
+                }""",
+                rendered_html,
+            )
 
             duration = time.perf_counter() - started
-            self._info(
-                "[BodyTool] real_browser_copy_completed html_len=%s duration=%.2fs",
-                len(html_content),
-                duration,
-            )
-            return {
-                "ok": True,
-                "method": "real_browser_copy",
-                "html_length": len(html_content),
-                "duration": duration,
-                "temp_file": temp_file.name,
-            }
+            if clipboard_result and clipboard_result.get("ok"):
+                self._info(
+                    "[BodyTool] real_browser_copy_success method=%s html_len=%s duration=%.2fs",
+                    clipboard_result.get("method"),
+                    len(rendered_html),
+                    duration,
+                )
+                return {
+                    "ok": True,
+                    "method": clipboard_result.get("method", "rendered_clipboard_api"),
+                    "html_length": len(rendered_html),
+                    "duration": duration,
+                    "temp_file": temp_file.name,
+                }
+            else:
+                self._warning(
+                    "[BodyTool] rendered_clipboard_api_failed error=%s duration=%.2fs",
+                    (clipboard_result or {}).get("error", "unknown"),
+                    duration,
+                )
+                return {
+                    "ok": False,
+                    "method": "rendered_clipboard_api_failed",
+                    "error": (clipboard_result or {}).get("error", "unknown"),
+                    "duration": duration,
+                }
 
         except Exception as exc:
             duration = time.perf_counter() - started
