@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -558,50 +560,68 @@ class BodyWriter:
             return make_body_write_failure(mode=mode, reason=reason)
 
         if mode == "rich_html" and html:
-            # 首选方案：iframe 方法（最接近手动复制，包含 Fragment 标记）
-            # iframe 方法会触发浏览器的完整解析和序列化流程，生成标准的剪贴板格式
-            iframe_start = time.perf_counter()
-            try:
-                raw_clipboard = await self._evaluate_with_timeout(
-                    page,
-                    build_clipboard_html_via_iframe_js(),
-                    {"html": html, "text": text or ""},
-                    label="clipboard_html_iframe",
-                )
-                iframe_duration = time.perf_counter() - iframe_start
-                clipboard = normalize_evaluate_result(raw_clipboard)
+            # 首选方案：真实浏览器渲染复制
+            # 完全复刻手动测试流程：打开 HTML 文件 → 渲染 → Ctrl+A → Ctrl+C
+            # Playwright keyboard.press() 产生真实的键盘事件，浏览器识别为用户手势
+            # 允许完整的剪贴板写入（包含 Fragment 标记、CF_HTML 头部）
+            real_browser_result = await self._paste_via_real_browser(page, html)
+            clipboard = {
+                "ok": real_browser_result["ok"],
+                "method": real_browser_result["method"],
+                "error": real_browser_result.get("error", ""),
+            }
 
-                # 记录 iframe 方法的尝试结果
-                if clipboard is None:
+            if real_browser_result["ok"]:
+                self._info(
+                    "[BodyTool] real_browser_copy_success method=%s html_len=%s duration=%.2fs",
+                    real_browser_result["method"],
+                    real_browser_result.get("html_length", 0),
+                    real_browser_result.get("duration", 0),
+                )
+            else:
+                self._info(
+                    "[BodyTool] real_browser_copy_failed error=%s duration=%.2fs, fallback_to_iframe",
+                    real_browser_result.get("error", "unknown"),
+                    real_browser_result.get("duration", 0),
+                )
+
+            # 如果真实浏览器复制失败，降级到 iframe 方法
+            if not real_browser_result["ok"]:
+                self._info("[BodyTool] fallback_to_iframe_method")
+                iframe_start = time.perf_counter()
+                try:
+                    raw_clipboard = await self._evaluate_with_timeout(
+                        page,
+                        build_clipboard_html_via_iframe_js(),
+                        {"html": html, "text": text or ""},
+                        label="clipboard_html_iframe_fallback",
+                    )
+                    iframe_duration = time.perf_counter() - iframe_start
+                    clipboard = normalize_evaluate_result(raw_clipboard)
+
+                    if clipboard is None or not clipboard.get("ok"):
+                        self._warning(
+                            "[BodyTool] iframe_fallback_failed method=%s error=%s duration=%.2fs",
+                            (clipboard or {}).get("method", "unknown"),
+                            (clipboard or {}).get("error", "unknown"),
+                            iframe_duration,
+                        )
+                    else:
+                        self._info(
+                            "[BodyTool] iframe_fallback_success method=%s duration=%.2fs",
+                            clipboard.get("method", "unknown"),
+                            iframe_duration,
+                        )
+                except Exception as exc:
+                    iframe_duration = time.perf_counter() - iframe_start
                     self._warning(
-                        "[BodyTool] iframe_result_invalid raw_type=%s raw_preview=%r duration=%.2fs",
-                        type(raw_clipboard).__name__,
-                        str(raw_clipboard)[:120],
+                        "[BodyTool] iframe_fallback_exception error=%s duration=%.2fs",
+                        str(exc)[:120],
                         iframe_duration,
                     )
-                elif clipboard.get("ok"):
-                    self._info(
-                        "[BodyTool] iframe_success method=%s duration=%.2fs",
-                        clipboard.get("method", "unknown"),
-                        iframe_duration,
-                    )
-                else:
-                    self._info(
-                        "[BodyTool] iframe_failed method=%s error=%s duration=%.2fs, fallback_to_clipboard_api",
-                        clipboard.get("method", "unknown"),
-                        clipboard.get("error", "unknown"),
-                        iframe_duration,
-                    )
-            except Exception as exc:
-                iframe_duration = time.perf_counter() - iframe_start
-                self._warning(
-                    "[BodyTool] iframe_exception error=%s duration=%.2fs, fallback_to_clipboard_api",
-                    str(exc)[:120],
-                    iframe_duration,
-                )
-                clipboard = None
+                    clipboard = {"ok": False, "method": "iframe_exception", "error": str(exc)[:120]}
 
-            # 如果 iframe 方法失败，降级到 clipboard_api 方式
+            # 如果 iframe 也失败，最终降级到 clipboard_api
             if clipboard is None or not clipboard.get("ok"):
                 self._info("[BodyTool] fallback_to_clipboard_api_method")
                 clipboard_api_start = time.perf_counter()
@@ -615,30 +635,23 @@ class BodyWriter:
                     clipboard_api_duration = time.perf_counter() - clipboard_api_start
                     clipboard = normalize_evaluate_result(raw_clipboard)
 
-                    if clipboard is None:
+                    if clipboard is None or not clipboard.get("ok"):
                         self._warning(
-                            "[BodyTool] clipboard_api_result_invalid raw_type=%s raw_preview=%r duration=%.2fs",
-                            type(raw_clipboard).__name__,
-                            str(raw_clipboard)[:120],
-                            clipboard_api_duration,
-                        )
-                    elif clipboard.get("ok"):
-                        self._info(
-                            "[BodyTool] clipboard_api_success method=%s duration=%.2fs",
-                            clipboard.get("method", "unknown"),
+                            "[BodyTool] clipboard_api_fallback_failed method=%s error=%s duration=%.2fs",
+                            (clipboard or {}).get("method", "unknown"),
+                            (clipboard or {}).get("error", "unknown"),
                             clipboard_api_duration,
                         )
                     else:
-                        self._warning(
-                            "[BodyTool] clipboard_api_failed method=%s error=%s duration=%.2fs",
+                        self._info(
+                            "[BodyTool] clipboard_api_fallback_success method=%s duration=%.2fs",
                             clipboard.get("method", "unknown"),
-                            clipboard.get("error", "unknown"),
                             clipboard_api_duration,
                         )
                 except Exception as exc:
                     clipboard_api_duration = time.perf_counter() - clipboard_api_start
                     self._warning(
-                        "[BodyTool] clipboard_api_exception error=%s duration=%.2fs",
+                        "[BodyTool] clipboard_api_fallback_exception error=%s duration=%.2fs",
                         str(exc)[:120],
                         clipboard_api_duration,
                     )
@@ -787,6 +800,141 @@ class BodyWriter:
             probe_middle_found=integrity["probe_middle_found"],
             probe_end_found=integrity["probe_end_found"],
         )
+
+    async def _paste_via_real_browser(self, page, html_content: str) -> dict:
+        """真实浏览器渲染复制方案。
+
+        完全复刻手动测试流程：
+        1. 生成临时 HTML 文件
+        2. 在浏览器新标签页中打开 file:// URL（真实渲染上下文）
+        3. 通过 Playwright keyboard.press() 模拟 Ctrl+A、Ctrl+C（真实键盘事件 → 用户手势）
+        4. 浏览器识别为用户手势，执行完整的剪贴板写入（包含 Fragment 标记、CF_HTML 头部）
+        5. 清理临时标签页和文件
+        6. 回到头条编辑器页面粘贴 Ctrl+V
+
+        这是最接近手动复制的方式，剪贴板内容与手动测试完全一致。
+        """
+        temp_file = None
+        new_page = None
+        started = time.perf_counter()
+
+        try:
+            # 1. 构建完整 HTML 并写入临时文件
+            html_doc = self._build_full_html(html_content)
+            temp_file = self._create_temp_html_file(html_doc)
+            self._info(
+                "[BodyTool] temp_html_created path=%s size=%s",
+                temp_file.name,
+                len(html_doc),
+            )
+
+            # 2. 打开新标签页渲染 HTML
+            context = page.context
+            new_page = await context.new_page()
+            await new_page.goto(f"file://{temp_file.name}")
+            await new_page.wait_for_load_state("networkidle")
+            await asyncio.sleep(0.5)  # 额外等待渲染完成
+            self._info(
+                "[BodyTool] render_page_opened url=file://%s",
+                temp_file.name,
+            )
+
+            # 3. 授予 file:// 协议的剪贴板写入权限
+            try:
+                await context.grant_permissions(
+                    ["clipboard-write"],
+                    origin=f"file://{temp_file.name}",
+                )
+                self._info("[BodyTool] clipboard_permission_granted origin=file://")
+            except Exception as exc:
+                self._warning("[BodyTool] clipboard_permission_grant_failed error=%s", str(exc)[:120])
+
+            # 4. 模拟真实键盘事件：Ctrl+A 全选 → Ctrl+C 复制
+            await new_page.click("body")
+            await asyncio.sleep(0.1)
+            await new_page.keyboard.press("Control+a")
+            self._info("[BodyTool] keyboard_select_all keys=Control+a")
+            await asyncio.sleep(0.2)
+            await new_page.keyboard.press("Control+c")
+            self._info("[BodyTool] keyboard_copy keys=Control+c")
+            await asyncio.sleep(0.3)  # 等待剪贴板写入完成
+
+            duration = time.perf_counter() - started
+            self._info(
+                "[BodyTool] real_browser_copy_completed html_len=%s duration=%.2fs",
+                len(html_content),
+                duration,
+            )
+            return {
+                "ok": True,
+                "method": "real_browser_copy",
+                "html_length": len(html_content),
+                "duration": duration,
+                "temp_file": temp_file.name,
+            }
+
+        except Exception as exc:
+            duration = time.perf_counter() - started
+            self._warning(
+                "[BodyTool] real_browser_copy_exception error=%s duration=%.2fs",
+                str(exc)[:120],
+                duration,
+            )
+            return {
+                "ok": False,
+                "method": "real_browser_copy_exception",
+                "error": str(exc)[:120],
+                "duration": duration,
+            }
+
+        finally:
+            # 5. 清理资源：关闭临时标签页，删除临时文件，恢复焦点
+            if new_page:
+                try:
+                    await new_page.close()
+                    self._info("[BodyTool] render_page_closed")
+                except Exception as exc:
+                    self._warning("[BodyTool] close_render_page_failed error=%s", str(exc)[:120])
+            # 确保原始页面回到前台并聚焦编辑器
+            try:
+                await page.bring_to_front()
+                await page.evaluate(FOCUS_EDITOR_JS)
+                self._info("[BodyTool] original_page_focused")
+            except Exception as exc:
+                self._warning("[BodyTool] focus_original_page_failed error=%s", str(exc)[:120])
+            if temp_file and os.path.exists(temp_file.name):
+                try:
+                    os.unlink(temp_file.name)
+                    self._info("[BodyTool] temp_file_removed path=%s", temp_file.name)
+                except Exception as exc:
+                    self._warning("[BodyTool] remove_temp_file_failed error=%s", str(exc)[:120])
+
+    @staticmethod
+    def _build_full_html(html_content: str) -> str:
+        """构建完整的 HTML 文档"""
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>富文本预览</title>
+</head>
+<body>
+{html_content}
+</body>
+</html>"""
+
+    @staticmethod
+    def _create_temp_html_file(html_doc: str) -> tempfile.NamedTemporaryFile:
+        """创建临时 HTML 文件"""
+        temp_file = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".html",
+            encoding="utf-8",
+            delete=False,
+        )
+        temp_file.write(html_doc)
+        temp_file.close()
+        return temp_file
 
     async def _evaluate_with_timeout(self, page, script: str, arg: Any, *, label: str) -> Any:
         try:
