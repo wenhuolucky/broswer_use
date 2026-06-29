@@ -10,23 +10,22 @@ from app.domain.job import (
     Job,
     STATUS_FAILED,
     STATUS_PUBLISHING,
+    STATUS_QUEUED,
     STATUS_SUCCEEDED,
     STATUS_WAITING_COOKIE,
 )
 
 
 class FakeAgent:
-    def __init__(self, channel: Channel | None, active_job: Job | None):
+    def __init__(self, channel: Channel | None, publish_count: int = 0):
         self.channel = channel
-        self.active_job = active_job
+        self.publish_count = publish_count
 
     def get_channel(self, channel_id: str):
         return self.channel if self.channel and self.channel.channel_id == channel_id else None
 
-    def get_active_publish_job_for_channel(self, channel_id: str):
-        if self.active_job and self.active_job.payload.get("channel_id") == channel_id:
-            return self.active_job
-        return None
+    def count_unfinished_publish_jobs_for_channel(self, channel_id: str) -> int:
+        return self.publish_count if self.channel and self.channel.channel_id == channel_id else 0
 
 
 def make_app(fake_agent: FakeAgent, monkeypatch) -> FastAPI:
@@ -69,7 +68,7 @@ def make_agent_with_channel(channel: Channel):
 
 def test_channel_publish_status_returns_idle_when_no_active_publish_job(monkeypatch):
     channel = make_channel()
-    client = TestClient(make_app(FakeAgent(channel, None), monkeypatch))
+    client = TestClient(make_app(FakeAgent(channel, publish_count=0), monkeypatch))
 
     response = client.get("/channels/channel123/publish-status")
 
@@ -77,46 +76,36 @@ def test_channel_publish_status_returns_idle_when_no_active_publish_job(monkeypa
     assert response.json() == {
         "channel_id": "channel123",
         "account_status": "idle",
-        "is_idle": True,
-        "active_job": None,
+        "publish_count": 0,
     }
 
 
-def test_channel_publish_status_returns_busy_with_active_publish_job_summary(monkeypatch):
+def test_channel_publish_status_returns_publishing_with_unfinished_publish_count(monkeypatch):
     channel = make_channel()
-    job = make_job("channel123", STATUS_PUBLISHING)
-    client = TestClient(make_app(FakeAgent(channel, job), monkeypatch))
+    client = TestClient(make_app(FakeAgent(channel, publish_count=3), monkeypatch))
 
     response = client.get("/channels/channel123/publish-status")
 
     assert response.status_code == 200
     assert response.json() == {
         "channel_id": "channel123",
-        "account_status": "busy",
-        "is_idle": False,
-        "active_job": {
-            "job_id": "publishing-job",
-            "status": "publishing",
-            "title": "测试标题",
-            "created_at": "2026-06-29T08:00:00+00:00",
-            "updated_at": "2026-06-29T08:01:00+00:00",
-        },
+        "account_status": "publishing",
+        "publish_count": 3,
     }
 
 
-def test_channel_publish_status_treats_waiting_cookie_publish_job_as_busy(monkeypatch):
+def test_channel_publish_status_treats_waiting_cookie_publish_job_as_publishing(monkeypatch):
     channel = make_channel()
-    job = make_job("channel123", STATUS_WAITING_COOKIE)
-    client = TestClient(make_app(FakeAgent(channel, job), monkeypatch))
+    client = TestClient(make_app(FakeAgent(channel, publish_count=1), monkeypatch))
 
     response = client.get("/channels/channel123/publish-status")
 
     assert response.status_code == 200
-    assert response.json()["account_status"] == "busy"
-    assert response.json()["active_job"]["status"] == "waiting_cookie"
+    assert response.json()["account_status"] == "publishing"
+    assert response.json()["publish_count"] == 1
 
 
-def test_channel_publish_status_ignores_terminal_and_login_jobs_via_agent_helper():
+def test_channel_publish_status_count_ignores_terminal_and_login_jobs_via_agent_helper():
     channel = make_channel()
     agent = make_agent_with_channel(channel)
     succeeded = agent.job_store.create(
@@ -132,26 +121,24 @@ def test_channel_publish_status_ignores_terminal_and_login_jobs_via_agent_helper
     )
     agent.job_store.update(login_job.job_id, status=STATUS_WAITING_COOKIE)
 
-    assert agent.get_active_publish_job_for_channel(channel.channel_id) is None
+    assert agent.count_unfinished_publish_jobs_for_channel(channel.channel_id) == 0
 
 
-def test_channel_publish_status_returns_latest_active_publish_job():
+def test_channel_publish_status_count_includes_executing_and_queued_publish_jobs():
     channel = make_channel()
     agent = make_agent_with_channel(channel)
-    older = agent.job_store.create({"channel_id": channel.channel_id, "platform": "toutiao", "title": "旧任务"})
-    agent.job_store.update(older.job_id, status=STATUS_WAITING_COOKIE)
-    newer = agent.job_store.create({"channel_id": channel.channel_id, "platform": "toutiao", "title": "新任务"})
-    agent.job_store.update(newer.job_id, status=STATUS_PUBLISHING)
+    queued = agent.job_store.create({"channel_id": channel.channel_id, "platform": "toutiao", "title": "排队"})
+    agent.job_store.update(queued.job_id, status=STATUS_QUEUED)
+    waiting = agent.job_store.create({"channel_id": channel.channel_id, "platform": "toutiao", "title": "等待登录"})
+    agent.job_store.update(waiting.job_id, status=STATUS_WAITING_COOKIE)
+    publishing = agent.job_store.create({"channel_id": channel.channel_id, "platform": "toutiao", "title": "发布中"})
+    agent.job_store.update(publishing.job_id, status=STATUS_PUBLISHING)
 
-    active = agent.get_active_publish_job_for_channel(channel.channel_id)
-
-    assert active is not None
-    assert active.job_id == newer.job_id
-    assert active.payload["title"] == "新任务"
+    assert agent.count_unfinished_publish_jobs_for_channel(channel.channel_id) == 3
 
 
 def test_channel_publish_status_returns_404_for_missing_channel(monkeypatch):
-    client = TestClient(make_app(FakeAgent(None, None), monkeypatch))
+    client = TestClient(make_app(FakeAgent(None), monkeypatch))
 
     response = client.get("/channels/missing/publish-status")
 

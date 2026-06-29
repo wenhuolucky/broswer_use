@@ -32,10 +32,10 @@ async def get_channel_publish_status(channel_id: str):
     if channel is None:
         raise HTTPException(status_code=404, detail="渠道不存在")
     try:
-        active_job = agent.get_active_publish_job_for_channel(channel_id)
+        publish_count = agent.count_unfinished_publish_jobs_for_channel(channel_id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="查询任务状态失败") from exc
-    return channel_publish_status_from(channel_id, active_job)
+    return channel_publish_status_from(channel_id, publish_count)
 
 
 @router.delete("/{channel_id}", response_model=ChannelDeleteResponse)
