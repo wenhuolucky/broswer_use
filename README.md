@@ -1,6 +1,6 @@
 # Browser Publish Service
 
-基于 FastAPI、Playwright、browser-use 和 OpenAI-compatible LLM（默认 Qwen）的自动发文服务。调用方提交发文任务后，服务会按 `user_id` 查找 Cookie；如果 Cookie 不存在或失效，会返回远程登录链接，用户登录后可调用保存 Cookie 接口继续原发文任务。
+基于 FastAPI、Playwright、browser-use 和 OpenAI-compatible LLM（默认 Qwen）的自动发文服务。调用方先通过登录会话获得 `channel_id`，之后提交发文任务时只传 `channel_id`；如果该渠道 Cookie 不存在或失效，服务会返回远程登录链接，用户登录后可保存 Cookie 并继续原发文任务。
 
 ## 目录结构
 
@@ -167,6 +167,7 @@ ip_pool:
 
 - 交互式 API 文档（Scalar）：`GET /scalar`
 - OpenAPI 描述：`GET /openapi.json`
+- 代码随附的企业级 API 文档：[`docs/api-reference.md`](docs/api-reference.md)
 
 除 `/health` 外，`/api/v1` 下的业务接口均需在请求头携带 Bearer Token：
 
@@ -189,7 +190,6 @@ Authorization: Bearer <PUBLISH_API_TOKEN>
 | `GET` | `/health` | 否 | 进程存活检查 |
 | `GET` | `/api/v1/platforms` | 是 | 支持的平台列表 |
 | `POST` | `/api/v1/jobs` | 是 | 创建发文任务（传 `channel_id`，立即返回不阻塞） |
-| `GET` | `/api/v1/jobs` | 是 | 发文任务列表（支持 channel_id/status 过滤） |
 | `GET` | `/api/v1/jobs/{job_id}` | 是 | 查询发文任务状态与发布结果 |
 | `POST` | `/api/v1/jobs/{job_id}/save-cookie` | 是 | 发文任务登录后保存 Cookie 并续发 |
 | `POST` | `/api/v1/jobs/{job_id}/cancel` | 是 | 取消发文任务 |
@@ -199,6 +199,8 @@ Authorization: Bearer <PUBLISH_API_TOKEN>
 | `GET` | `/api/v1/channels/{channel_id}` | 是 | 查询渠道状态（平台/账号名/cookie 是否有效） |
 | `GET` | `/api/v1/channels/{channel_id}/publish-status` | 是 | 查询渠道发文状态（idle/publishing + publish_count） |
 | `DELETE` | `/api/v1/channels/{channel_id}` | 是 | 删除渠道（含 cookie） |
+
+当前代码没有公开 `GET /api/v1/jobs` 任务列表接口，也没有公开 HTTP 日志读取接口；完整字段级说明见 `docs/api-reference.md`。
 
 发文（LLM 自动操作）与登录（真人手动操作）是两套独立资源：发文走 `/jobs`，登录走 `/login-sessions`，两者底层共用 Job 存储但在接口上互不可见（拿发文 `job_id` 去访问 `/login-sessions/*` 会得到 404，反之亦然）。
 
