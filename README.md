@@ -200,7 +200,7 @@ Authorization: Bearer <PUBLISH_API_TOKEN>
 | `GET` | `/api/v1/channels/{channel_id}/publish-status` | 是 | 查询渠道发文状态（idle/publishing + publish_count） |
 | `DELETE` | `/api/v1/channels/{channel_id}` | 是 | 删除渠道（含 cookie） |
 
-当前代码没有公开 `GET /api/v1/jobs` 任务列表接口，也没有公开 HTTP 日志读取接口；完整字段级说明见 `docs/api-reference.md`。
+完整字段级说明见 `docs/api-reference.md`。
 
 发文（LLM 自动操作）与登录（真人手动操作）是两套独立资源：发文走 `/jobs`，登录走 `/login-sessions`，两者底层共用 Job 存储但在接口上互不可见（拿发文 `job_id` 去访问 `/login-sessions/*` 会得到 404，反之亦然）。
 

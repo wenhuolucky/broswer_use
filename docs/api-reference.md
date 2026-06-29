@@ -226,8 +226,6 @@ FastAPI/业务错误通常返回：
 | `DELETE` | `/api/v1/channels/{channel_id}` | 是 | 删除渠道 |
 | `GET` | `/api/v1/channels/{channel_id}/publish-status` | 是 | 查询渠道发文状态和未完成发文数量 |
 
-当前代码没有公开 `GET /api/v1/jobs` 列表接口，也没有公开日志读取接口。
-
 ## 5. Service API
 
 ### 5.1 GET /health
@@ -340,8 +338,10 @@ Content-Type：`application/json`
 | `job_id` | string | 是 | 32 位 uuid hex | 发文任务 ID |
 | `channel_id` | string | 是 | channel id | 发文渠道句柄 |
 | `status` | string | 是 | 见 Job status | 创建后的任务状态 |
-| `live_url` | string | 是 | URL 或空字符串 | 仅需要用户登录时有值 |
+| `live_url` | string | 是 | URL 或空字符串 | 远程浏览器地址；`waiting_cookie` 时为登录 URL，`publishing` 时可能为发文实时查看 URL，其他状态通常为空 |
 | `error` | object 或 null | 否 | `ErrorInfo` | 仅失败时出现 |
+
+注意：`POST /api/v1/jobs` 返回较早，若状态为 `publishing`，创建响应中的 `live_url` 可能暂时为空；发文实时查看入口生成后，可通过 `GET /api/v1/jobs/{job_id}` 读取最新 `live_url`。
 
 可能成功状态：
 
@@ -349,7 +349,7 @@ Content-Type：`application/json`
 |---|---|---|
 | `queued` | 同一 `channel_id` 已有任务执行中，本任务已排队 | 轮询 `GET /jobs/{job_id}` |
 | `checking_cookie` | 任务已被领取，正在检查 cookie | 轮询 `GET /jobs/{job_id}` |
-| `publishing` | 正在自动化发文 | 轮询 `GET /jobs/{job_id}` |
+| `publishing` | 正在自动化发文；`live_url` 生成后可用于实时查看发文过程 | 轮询 `GET /jobs/{job_id}` |
 | `waiting_cookie` | 需要用户登录，`live_url` 有值 | 打开 `live_url` 登录；登录成功后继续轮询或调用 save-cookie |
 | `failed` | 创建后立即失败 | 查看 `error` |
 
@@ -409,7 +409,7 @@ Path 参数：
 | `platform` | string | 是 | `toutiao` / `sohu` / 空字符串 | 平台标识 |
 | `title` | string | 是 | 任意字符串 | 文章标题 |
 | `cover_image_url` | string | 是 | URL 或空字符串 | 封面图片 URL |
-| `live_url` | string | 是 | URL 或空字符串 | 登录或实时查看 URL；状态结束后可能为空 |
+| `live_url` | string | 是 | URL 或空字符串 | 远程浏览器地址；`waiting_cookie` 时为登录 URL，`publishing` 时可能为发文实时查看 URL，终态通常为空 |
 | `session_id` | string | 是 | 远程会话 ID 或空字符串 | 内部远程登录会话句柄 |
 | `article_url` | string | 是 | URL 或空字符串 | 发布成功后的文章链接 |
 | `error` | object 或 null | 否 | `ErrorInfo` | 仅失败状态下有意义 |
@@ -424,7 +424,7 @@ Path 参数：
 | `checking_cookie` | 任务已启动，正在检查登录态 | 继续轮询 |
 | `starting_remote_login` | 正在启动远程登录 | 继续轮询 |
 | `waiting_cookie` | 等待用户登录，`live_url` 通常有值 | 打开 `live_url` 完成登录 |
-| `publishing` | 正在发文 | 继续轮询 |
+| `publishing` | 正在发文；`live_url` 可能为发文实时查看入口 | 继续轮询 |
 | `succeeded` | 发布成功 | 读取 `article_url` |
 | `failed` | 发布失败 | 读取 `error.code` 和 `error.detail` |
 | `cancelled` | 已取消 | 不再等待 |
@@ -928,6 +928,4 @@ curl "{BASE_URL}/api/v1/channels/3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c/publish-status
 ## 13. 版本注意事项
 
 - 本文档以当前代码为准。
-- `GET /api/v1/jobs` 任务列表接口当前未实现。
-- 日志读取接口当前未公开；运维可在服务器侧查看 `logs/jobs/{YYYY-MM-DD}/{job_id}.log` 和 `logs/service.log`。
 - 当前同 channel 串行保证基于单进程内锁和 SQLite job 状态。若未来部署多个 API worker，需要数据库原子领取或分布式锁来保证跨进程强一致。
