@@ -38,6 +38,19 @@
 - 不改变 `GET /api/v1/jobs/{job_id}` 的核心响应结构。
 - 不改变 login-only 会话的并发模型。
 
+## 设计主线
+
+本设计的主功能是“同一账号发文串行队列”，`publish-status` 只是队列状态的外部查询视图。
+
+实施时必须先保证调度语义：
+
+- 同一 `channel_id` 下，任意时刻最多只有一个 publish job 被调度到执行流程。
+- 同一 `channel_id` 下，后续 publish job 不失败、不覆盖、不并发，保持 `queued` 等待。
+- 当前 publish job 进入终态后，系统自动领取同一 `channel_id` 最早创建的 `queued` publish job。
+- 不同 `channel_id` 使用不同队列，互不等待，仍可并发执行。
+
+`GET /channels/{channel_id}/publish-status` 的 `publish_count` 必须从这个队列状态派生，而不是单独维护计数。这样接口不会和真实队列状态漂移。
+
 ## 状态定义
 
 ### Job 内部状态
@@ -97,7 +110,14 @@
 
 ### 核心思路
 
-`queued` 成为真正的等待态。`submit()` 创建 job 后不再无条件启动；它先判断同一 `channel_id` 是否已有正在执行的 publish job。
+`queued` 成为真正的等待态。`submit()` 创建 job 后不再无条件启动；它只负责持久化任务并触发一次“尝试调度”。调度器再判断同一 `channel_id` 是否已有正在执行的 publish job。
+
+队列以 `channel_id` 为分区键，不新增独立队列表。`jobs` 表就是队列存储：
+
+- `type='publish'`
+- `channel_id='<账号渠道 id>'`
+- `status='queued'`
+- `created_at` 用于 FIFO 顺序
 
 执行中集合：
 
@@ -118,13 +138,53 @@
 调度规则：
 
 1. `submit()` 创建新 job，初始状态为 `queued`。
-2. 如果同一 channel 没有执行中 publish job，则把这个 job 领取为执行中：更新为 `checking_cookie` 并进入 cookie 检查 / 登录 / 发文流程。
-3. 如果同一 channel 已有执行中 publish job，则保持 `queued`，返回创建成功。调用方可通过 job 查询看到 `status=queued`。
-4. 任意 publish job 进入终态后，调度器查找同 channel 最早创建的 `queued` publish job 并启动它。
+2. `submit()` 调用 `_maybe_start_queued_publish(channel_id)`，但 HTTP 请求不等待排队任务完成。
+3. `_maybe_start_queued_publish(channel_id)` 在 channel 级锁内检查是否已有执行中 publish job。
+4. 如果已有执行中 job，新 job 保持 `queued`，`POST /jobs` 返回创建成功，调用方可通过 `/jobs/{job_id}` 看到 `status=queued`。
+5. 如果没有执行中 job，调度器领取同 channel 最早的 `queued` job，把它更新为 `checking_cookie`。
+6. 被领取的 job 释放 channel 锁后进入 cookie 检查、远程登录或后台发文。
+7. 任意 publish job 进入终态后，调度器再次调用 `_maybe_start_queued_publish(channel_id)`，启动下一篇。
+8. 如果当前 job 转入 `waiting_cookie`，它仍占用该 channel 队列；后续 job 不启动，直到该 job 登录后发文并进入终态，或被取消。
+
+### 状态机
+
+单个 publish job 的状态流转：
+
+```text
+queued
+  -> checking_cookie
+      -> publishing
+          -> succeeded | failed | cancelled
+      -> starting_remote_login
+          -> waiting_cookie
+              -> publishing
+                  -> succeeded | failed | cancelled
+```
+
+关键约束：
+
+- 只有 `queued` job 可以被队列调度器领取。
+- 领取动作的第一步必须把 job 更新为 `checking_cookie`，这样同 channel 的下一次调度检查会把它视为执行中。
+- `waiting_cookie` 也算执行中，因为账号正在为当前文章恢复登录；不能让下一篇抢先启动。
+- 只有 `succeeded`、`failed`、`cancelled` 会释放 channel 队列占用。
 
 ### 为什么不用直接在 `submit()` 里 await 队列
 
 `POST /jobs` 的契约是“立即返回不阻塞”。因此排队任务应该快速返回 `job_id/status=queued`，由后台调度器在轮到它时执行，而不是让 HTTP 请求一直挂起。
+
+### 同一 channel 连续提交三篇
+
+假设同一 `channel_id=channel123` 连续提交 A、B、C 三篇文章：
+
+1. 提交 A：创建 `jobA(status=queued)`，调度器发现该 channel 无执行中 job，领取 A，A 变为 `checking_cookie`，随后进入 `publishing` 或 `waiting_cookie`。
+2. 提交 B：创建 `jobB(status=queued)`，调度器发现 A 仍在执行中，B 保持 `queued`。
+3. 提交 C：创建 `jobC(status=queued)`，调度器发现 A 仍在执行中，C 保持 `queued`。
+4. 查询 `publish-status`：返回 `account_status=publishing`，`publish_count=3`。
+5. A 成功、失败或被取消后进入终态，调度器领取最早的 queued job，也就是 B。
+6. B 进入终态后，调度器领取 C。
+7. C 进入终态后，队列为空；查询 `publish-status` 返回 `idle` 和 `publish_count=0`。
+
+如果 A 需要远程登录，B 和 C 仍保持 `queued`。A 完成登录后继续发文；只有 A 发文终态才会启动 B。
 
 ### FIFO 顺序
 
@@ -148,12 +208,21 @@ def next_queued_publish_job(channel_id: str) -> Job | None
 
 ### JobStore
 
-新增只读 helper：
+新增队列查询 helper：
 
-- `count_jobs(channel_id, statuses, job_type="publish") -> int`
 - `next_queued_publish_job(channel_id) -> Job | None`
+- `has_executing_publish_job(channel_id) -> bool`
+- `count_unfinished_publish_jobs(channel_id) -> int`
+- `queued_publish_channel_ids() -> list[str]`
 
-也可以用现有 `list_jobs()` 组合实现，但计数接口能避免把一批 job 取到内存后再 `len()`。考虑当前规模小，第一版可先用 `list_jobs(..., limit=500)` 计数，若后续队列变长再优化。
+职责说明：
+
+- `next_queued_publish_job(channel_id)` 按 `created_at ASC` 返回同 channel 最早的 `queued` publish job。
+- `has_executing_publish_job(channel_id)` 只检查执行中集合，不包含 `queued`。
+- `count_unfinished_publish_jobs(channel_id)` 用于 `publish-status`，统计执行中集合 + `queued`。
+- `queued_publish_channel_ids()` 用于服务启动恢复，找出所有存在 queued publish job 的 channel。
+
+第一版可以在内存 store 和 SQLite store 都直接实现这些 helper。SQLite 侧优先使用 SQL 聚合和 `ORDER BY created_at ASC LIMIT 1`，避免把大量历史 job 拉到应用层。内存 store 使用同样排序规则，保证测试行为和 SQLite 行为一致。
 
 ### PublishAgent
 
@@ -166,23 +235,31 @@ def next_queued_publish_job(channel_id: str) -> Job | None
 调整职责：
 
 - `submit()`:
-  - 创建 job 后调用 `_maybe_start_queued_publish(channel_id)`。
+  - 创建 job，保持初始 `queued`。
+  - 写入 job 日志路径。
+  - 调用 `_maybe_start_queued_publish(channel_id)`。
   - 如果 job 被立即启动，返回 `status=checking_cookie` 或后续已更新状态。
   - 如果排队等待，返回 `status=queued`，message 可为“任务已排队，等待同账号上一任务完成”。
 
 - `_maybe_start_queued_publish(channel_id)`:
   - 使用 channel 级 `asyncio.Lock` 防止同进程内两个请求同时领取队列。
   - 如果该 channel 已有执行中 publish job，直接返回。
-  - 找到最早 `queued` publish job，启动它。
+  - 找到最早 `queued` publish job。
+  - 在锁内把该 job 更新为 `checking_cookie`，完成“领取”。
+  - 释放锁后启动 cookie 检查 / 登录 / 发文流程。
 
-- `_start_queued_publish(job_id)`:
-  - 更新 job 为 `checking_cookie`。
+- `_begin_claimed_publish_job(job_id)`:
+  - 只处理已经从 `queued` 领取到 `checking_cookie` 的 job。
+  - 确认 job 当前处于 `checking_cookie`，并继续进入执行准备。
   - 如果 cookie 有效，调用 `_schedule_publish(job_id)`。
   - 如果 cookie 无效，调用 `_start_remote_login(job_id, ...)`。
+  - 如果启动远程登录失败并把 job 置为 `failed`，必须触发同 channel 下一篇调度。
 
 - `_on_background_publish_done(job_id, task)`:
   - 当前逻辑清理 task 和 viewer 后，再读取 job 的 `channel_id`。
-  - 对终态或异常失败，都触发 `_schedule_next_for_channel(channel_id)`。
+  - 如果 task 异常退出并把 job 标记为 `failed`，触发同 channel 下一篇调度。
+  - 如果 `_publish_with_cookie()` 因 cookie 失效转入 `waiting_cookie`，该 job 未终态，不触发下一篇。
+  - 如果 job 最终为 `succeeded`、`failed`、`cancelled`，触发同 channel 下一篇调度。
 
 - `resume_after_cookie(job_id, cookies)`:
   - 登录完成后该 job 自身进入 `publishing` 并启动发文。
@@ -191,6 +268,25 @@ def next_queued_publish_job(channel_id: str) -> Job | None
 - `cancel_job(job_id)`:
   - 如果取消的是正在执行的 job，取消后启动下一篇。
   - 如果取消的是 `queued` job，只标记 `cancelled`，不需要启动下一篇，因为当前执行中任务仍在跑。
+
+建议伪代码：
+
+```python
+async def _maybe_start_queued_publish(self, channel_id: str) -> str | None:
+    async with self._publish_lock_for_channel(channel_id):
+        if self.job_store.has_executing_publish_job(channel_id):
+            return None
+        next_job = self.job_store.next_queued_publish_job(channel_id)
+        if next_job is None:
+            return None
+        self.job_store.update(next_job.job_id, status=STATUS_CHECKING_COOKIE)
+        claimed_job_id = next_job.job_id
+
+    await self._begin_claimed_publish_job(claimed_job_id)
+    return claimed_job_id
+```
+
+锁内只做“检查 + 领取”，不执行远程登录或真实发文。这样同 channel 的领取是串行的，不同 channel 的长任务仍可并发。
 
 ### Channel publish-status schema
 
@@ -236,6 +332,10 @@ def _publish_lock_for_channel(self, channel_id: str) -> asyncio.Lock:
     ...
 ```
 
+不能把整个发文流程放进锁内。真实发文、远程登录等待、用户手动登录都可能持续很久；如果锁覆盖这些长流程，会让同 channel 的取消、查询、恢复逻辑难以推进，也会增加死锁风险。正确边界是：用 job 状态表达“占用中”，用锁保护领取动作。
+
+`_channel_publish_locks` 是进程内结构，channel 数量随运行增长。第一版可以不做锁清理；若后续 channel 数量很大，再增加“队列为空且锁未被占用时清理”的优化。
+
 ### 重启恢复
 
 当前 `close_stale_running_jobs_after_restart()` 会把 `queued` 也视作 stale 并标记 failed。引入真正队列后，需要调整：
@@ -246,6 +346,13 @@ def _publish_lock_for_channel(self, channel_id: str) -> asyncio.Lock:
 服务启动后应为每个存在 `queued` publish job 的 channel 调用一次 `_maybe_start_queued_publish(channel_id)`，以恢复队列执行。
 
 如果不做启动恢复，重启后所有 queued job 会永久停留。这个恢复逻辑可以放在 server startup 调用 `agent.resume_queued_publish_jobs_after_restart()`。
+
+启动恢复顺序：
+
+1. `close_stale_running_jobs_after_restart()` 只失败执行中 publish/login job，不处理 `queued`。
+2. `queued_publish_channel_ids()` 找出还有 queued publish job 的 channel。
+3. 对每个 channel 调用 `_maybe_start_queued_publish(channel_id)`。
+4. 每个 channel 最多启动一个 queued job；同 channel 的后续 queued job 仍等待前一个终态。
 
 ### 竞态边界
 
@@ -285,6 +392,12 @@ def _publish_lock_for_channel(self, channel_id: str) -> asyncio.Lock:
 
 不同 channel 的 job 不互相等待。
 
+接口层不返回 409。排队也是创建成功：
+
+- 立即被领取：响应里的 `status` 可为 `checking_cookie`、`waiting_cookie` 或 `publishing`，取决于提交返回前状态推进到哪一步。
+- 未被领取：响应里的 `status=queued`。
+- 两者都代表 `POST /jobs` 创建成功，后续进度以 `/jobs/{job_id}` 为准。
+
 ### GET /api/v1/channels/{channel_id}/publish-status
 
 只返回 channel 级概览，不返回单个 active job 摘要：
@@ -296,19 +409,37 @@ def _publish_lock_for_channel(self, channel_id: str) -> asyncio.Lock:
 
 ## 测试计划
 
-新增或调整测试覆盖：
+测试重点必须覆盖队列调度本身，而不是只测 `publish-status` 响应。
+
+队列调度测试：
 
 - 同 channel 第一个 job 会从 `queued` 被调度到 `checking_cookie` / `publishing`。
 - 同 channel 第二个 job 保持 `queued`，不会调用 publish adapter。
 - 当前一个 job 成功后，同 channel 下一篇自动启动。
 - 当前一个 job 失败后，同 channel 下一篇自动启动。
+- 当前一个 job 因 cookie 失效进入 `waiting_cookie` 时，同 channel 下一篇不启动。
+- 当前一个 job 完成远程登录并继续发文后，同 channel 下一篇仍等待当前 job 终态。
 - 取消正在执行的 job 后，同 channel 下一篇自动启动。
 - 取消 queued job 不影响当前执行中的 job。
 - 不同 channel 的 job 可以同时进入执行中。
+
+FIFO 测试：
+
+- 同 channel 连续创建 A、B、C，A 终态后启动 B，不跳到 C。
+- B 取消后启动 C。
+- A、B、C 的 `created_at` 顺序是唯一排序依据，不按标题或 job_id 排序。
+
+接口状态测试：
+
 - `/channels/{channel_id}/publish-status` 在无未完成 publish job 时返回 `idle` 和 `publish_count=0`。
 - `/channels/{channel_id}/publish-status` 在一个执行中、两个 queued 时返回 `publishing` 和 `publish_count=3`。
 - login-only job 不计入 `publish_count`。
+
+重启恢复测试：
+
 - 重启清理不会把 `queued` publish job 标记 failed；启动恢复会启动每个 channel 的下一篇 queued job。
+- 同一个 channel 有多个 queued job 时，启动恢复只启动最早一篇。
+- 两个不同 channel 各有 queued job 时，启动恢复会各启动一篇。
 
 验证命令：
 
