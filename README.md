@@ -197,6 +197,7 @@ Authorization: Bearer <PUBLISH_API_TOKEN>
 | `GET` | `/api/v1/login-sessions/{session_id}` | 是 | 查询登录会话状态（含 `channel_id`） |
 | `DELETE` | `/api/v1/login-sessions/{session_id}` | 是 | 取消登录会话（释放 Xvnc 显示槽） |
 | `GET` | `/api/v1/channels/{channel_id}` | 是 | 查询渠道状态（平台/账号名/cookie 是否有效） |
+| `GET` | `/api/v1/channels/{channel_id}/publish-status` | 是 | 查询渠道发文占用状态（idle/busy） |
 | `DELETE` | `/api/v1/channels/{channel_id}` | 是 | 删除渠道（含 cookie） |
 
 发文（LLM 自动操作）与登录（真人手动操作）是两套独立资源：发文走 `/jobs`，登录走 `/login-sessions`，两者底层共用 Job 存储但在接口上互不可见（拿发文 `job_id` 去访问 `/login-sessions/*` 会得到 404，反之亦然）。
@@ -216,6 +217,15 @@ curl -X POST http://127.0.0.1:8833/api/v1/jobs \
     "cover_image_url": "https://example.com/cover.jpg"
   }'
 ```
+
+查询渠道是否可提交新发文：
+
+```bash
+curl http://127.0.0.1:8833/api/v1/channels/3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c/publish-status \
+  -H "Authorization: Bearer <PUBLISH_API_TOKEN>"
+```
+
+返回 `account_status=idle` 表示当前没有 active publish job；返回 `busy` 时会带 `active_job` 摘要。`waiting_cookie` 也算 busy，因为它仍属于某个发文任务的补登/续发流程。
 
 ## 运行期目录
 

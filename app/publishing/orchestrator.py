@@ -26,6 +26,16 @@ from app.remote.login import RemoteLoginRunner
 from app.core.config import LOG_DIR
 
 
+ACTIVE_PUBLISH_STATUSES = {
+    STATUS_QUEUED,
+    STATUS_CHECKING_COOKIE,
+    STATUS_COOKIE_READY,
+    STATUS_STARTING_REMOTE_LOGIN,
+    STATUS_WAITING_COOKIE,
+    STATUS_PUBLISHING,
+}
+
+
 class PublishAgent:
     """Coordinates channel lookup, remote login, and publishing.
 
@@ -177,15 +187,7 @@ class PublishAgent:
             self.job_store.update(job_id, status=STATUS_FAILED, error=str(exc))
 
     def close_stale_running_jobs_after_restart(self) -> int:
-        stale_statuses = {
-            STATUS_QUEUED,
-            STATUS_CHECKING_COOKIE,
-            STATUS_COOKIE_READY,
-            STATUS_STARTING_REMOTE_LOGIN,
-            STATUS_WAITING_COOKIE,
-            STATUS_PUBLISHING,
-        }
-        stale_jobs = self.job_store.list_by_statuses(stale_statuses)
+        stale_jobs = self.job_store.list_by_statuses(ACTIVE_PUBLISH_STATUSES)
         # 登录会话与发布任务底层共用 Job 存储、靠 job.type 区分，对外是两套解耦资源；
         # 重启清理的失败文案也要按类型给，避免登录会话拿到发布口径的提示。
         reason_by_type = {
@@ -587,6 +589,15 @@ class PublishAgent:
     # ------------------------------------------------------------------
     def get_channel(self, channel_id: str):
         return self.channel_store.get(channel_id)
+
+    def get_active_publish_job_for_channel(self, channel_id: str):
+        jobs = self.job_store.list_jobs(
+            channel_id=channel_id,
+            statuses=ACTIVE_PUBLISH_STATUSES,
+            job_type="publish",
+            limit=1,
+        )
+        return jobs[0] if jobs else None
 
     def channel_cookie_valid(self, channel_id: str) -> bool:
         return self.channel_store.has_valid_cookie(channel_id)
