@@ -26,6 +26,15 @@ from app.remote.login import RemoteLoginRunner
 from app.core.config import LOG_DIR
 
 
+EXECUTING_PUBLISH_STATUSES = {
+    STATUS_CHECKING_COOKIE,
+    STATUS_COOKIE_READY,
+    STATUS_STARTING_REMOTE_LOGIN,
+    STATUS_WAITING_COOKIE,
+    STATUS_PUBLISHING,
+}
+
+
 class PublishAgent:
     """Coordinates channel lookup, remote login, and publishing.
 
@@ -56,6 +65,7 @@ class PublishAgent:
         self._background_tasks: set[asyncio.Task] = set()
         # Index background publish tasks by job_id so cancel_job can reach them.
         self._tasks_by_job: dict[str, asyncio.Task] = {}
+        self._channel_publish_locks: dict[str, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
     # Publishing
@@ -84,34 +94,35 @@ class PublishAgent:
             request.title,
             len(request.content),
         )
-        self.job_store.update(job.job_id, status=STATUS_CHECKING_COOKIE)
 
-        if self.channel_store.has_valid_cookie(request.channel_id):
-            logger.info("Cookie 存在且有效，创建后台发布任务")
-            self._schedule_publish(job.job_id)
+        started_job_id = await self._maybe_start_queued_publish(request.channel_id)
+        if started_job_id != job.job_id:
             return self._task_response(
                 job.job_id,
-                "任务创建成功，发布任务正在后台执行",
+                "任务已排队，等待同账号上一任务完成",
                 channel_id=request.channel_id,
             )
 
-        logger.info("Cookie 不存在或无效，准备启动远程登录")
-        login_response = await self._start_remote_login(job.job_id, "Cookie 不存在或无效")
-        if login_response.code >= 500:
+        current_job = self.job_store.get(job.job_id)
+        if current_job and current_job.status == STATUS_WAITING_COOKIE:
+            return self._task_response(
+                job.job_id,
+                "任务创建成功，需要用户登录",
+                channel_id=request.channel_id,
+                live_url=(current_job.live_url or current_job.login_url),
+            )
+        if current_job and current_job.status == STATUS_FAILED:
             return self._task_response(
                 job.job_id,
                 "任务创建失败",
                 code=500,
                 channel_id=request.channel_id,
-                error_detail=login_response.message,
+                error_detail=current_job.error,
             )
-
-        current_job = self.job_store.get(job.job_id)
         return self._task_response(
             job.job_id,
-            "任务创建成功，需要用户登录",
+            "任务创建成功，发布任务正在后台执行",
             channel_id=request.channel_id,
-            live_url=(current_job.live_url or current_job.login_url) if current_job else "",
         )
 
     # ------------------------------------------------------------------
@@ -153,6 +164,41 @@ class PublishAgent:
     # ------------------------------------------------------------------
     # Background publish task plumbing
     # ------------------------------------------------------------------
+    def _publish_lock_for_channel(self, channel_id: str) -> asyncio.Lock:
+        lock = self._channel_publish_locks.get(channel_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._channel_publish_locks[channel_id] = lock
+        return lock
+
+    async def _maybe_start_queued_publish(self, channel_id: str) -> str | None:
+        async with self._publish_lock_for_channel(channel_id):
+            if self.job_store.has_executing_publish_job(channel_id):
+                return None
+            next_job = self.job_store.next_queued_publish_job(channel_id)
+            if next_job is None:
+                return None
+            self.job_store.update(next_job.job_id, status=STATUS_CHECKING_COOKIE)
+            claimed_job_id = next_job.job_id
+
+        await self._begin_claimed_publish_job(claimed_job_id)
+        return claimed_job_id
+
+    async def _begin_claimed_publish_job(self, job_id: str) -> AutoPublishResponse | None:
+        logger, _ = setup_job_logger(job_id, self.log_dir)
+        job = self.job_store.get(job_id)
+        if job is None:
+            return None
+        payload = dict(job.payload or {})
+        channel_id = str(payload.get("channel_id", "") or "")
+        if self.channel_store.has_valid_cookie(channel_id):
+            logger.info("Cookie 存在且有效，创建后台发布任务")
+            self._schedule_publish(job_id)
+            return None
+
+        logger.info("Cookie 不存在或无效，准备启动远程登录")
+        return await self._start_remote_login(job_id, "Cookie 不存在或无效")
+
     def _schedule_publish(self, job_id: str) -> None:
         task = asyncio.create_task(self._publish_with_cookie(job_id))
         self._background_tasks.add(task)
@@ -163,6 +209,8 @@ class PublishAgent:
         self._background_tasks.discard(task)
         if self._tasks_by_job.get(job_id) is task:
             self._tasks_by_job.pop(job_id, None)
+        job = self.job_store.get(job_id)
+        channel_id = str((job.payload or {}).get("channel_id", "") or "") if job else ""
         # viewer 随发文任务结束已被拆（kernel finally），摘除反代映射避免悬挂。
         from app.api.publish_viewer_proxy import unregister_viewer
 
@@ -175,17 +223,18 @@ class PublishAgent:
         except Exception as exc:
             logger.exception("后台发布任务异常退出: %s", exc)
             self.job_store.update(job_id, status=STATUS_FAILED, error=str(exc))
+        finally:
+            current_job = self.job_store.get(job_id)
+            if channel_id and current_job and current_job.status in {STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED}:
+                self._schedule_queue_advance(channel_id)
+
+    def _schedule_queue_advance(self, channel_id: str) -> None:
+        task = asyncio.create_task(self._maybe_start_queued_publish(channel_id))
+        self._background_tasks.add(task)
+        task.add_done_callback(lambda done_task: self._background_tasks.discard(done_task))
 
     def close_stale_running_jobs_after_restart(self) -> int:
-        stale_statuses = {
-            STATUS_QUEUED,
-            STATUS_CHECKING_COOKIE,
-            STATUS_COOKIE_READY,
-            STATUS_STARTING_REMOTE_LOGIN,
-            STATUS_WAITING_COOKIE,
-            STATUS_PUBLISHING,
-        }
-        stale_jobs = self.job_store.list_by_statuses(stale_statuses)
+        stale_jobs = self.job_store.list_by_statuses(EXECUTING_PUBLISH_STATUSES)
         # 登录会话与发布任务底层共用 Job 存储、靠 job.type 区分，对外是两套解耦资源；
         # 重启清理的失败文案也要按类型给，避免登录会话拿到发布口径的提示。
         reason_by_type = {
@@ -211,6 +260,14 @@ class PublishAgent:
                 remote_session_id="",
             )
         return len(stale_jobs)
+
+    async def resume_queued_publish_jobs_after_restart(self) -> int:
+        started_count = 0
+        for channel_id in self.job_store.queued_publish_channel_ids():
+            started_job_id = await self._maybe_start_queued_publish(channel_id)
+            if started_job_id:
+                started_count += 1
+        return started_count
 
     def _task_response(
         self,
@@ -587,6 +644,9 @@ class PublishAgent:
     # ------------------------------------------------------------------
     def get_channel(self, channel_id: str):
         return self.channel_store.get(channel_id)
+
+    def count_unfinished_publish_jobs_for_channel(self, channel_id: str) -> int:
+        return self.job_store.count_unfinished_publish_jobs(channel_id)
 
     def channel_cookie_valid(self, channel_id: str) -> bool:
         return self.channel_store.has_valid_cookie(channel_id)

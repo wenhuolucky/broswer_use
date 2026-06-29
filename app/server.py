@@ -83,6 +83,9 @@ async def lifespan(app: FastAPI):
     closed_count = agent.close_stale_running_jobs_after_restart()
     if closed_count:
         _log.info("Closed %d stale running job(s) after service restart.", closed_count)
+    resumed_count = await agent.resume_queued_publish_jobs_after_restart()
+    if resumed_count:
+        _log.info("Resumed %d queued publish job(s) after service restart.", resumed_count)
 
     # 多 IP 代理：PROXY_ENABLED=true 时初始化分配管理器。proxies.yaml 缺失/格式错误
     # 直接抛异常阻止启动——严格模式，避免带着无效代理配置上线后任务全失败。

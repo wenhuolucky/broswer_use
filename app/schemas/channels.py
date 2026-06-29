@@ -12,8 +12,10 @@ from app.domain.channel import Channel
 from app.platforms import registry
 
 __all__ = [
+    "ChannelPublishStatusResponse",
     "ChannelResponse",
     "ChannelDeleteResponse",
+    "channel_publish_status_from",
     "channel_has_valid_cookie",
     "channel_to_response",
 ]
@@ -59,6 +61,29 @@ class ChannelDeleteResponse(BaseModel):
     )
 
 
+class ChannelPublishStatusResponse(BaseModel):
+    channel_id: str = Field(description="渠道句柄")
+    account_status: str = Field(description="账号发文状态：idle | publishing")
+    publish_count: int = Field(ge=0, description="该渠道未完成 publish job 数量，包含执行中和排队中")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "channel_id": "3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c",
+                    "account_status": "publishing",
+                    "publish_count": 3,
+                },
+                {
+                    "channel_id": "3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c",
+                    "account_status": "idle",
+                    "publish_count": 0,
+                },
+            ]
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # Mappers
 # ---------------------------------------------------------------------------
@@ -79,4 +104,13 @@ def channel_to_response(channel: Channel) -> ChannelResponse:
         has_valid_cookie=channel_has_valid_cookie(channel),
         created_at=channel.created_at or "",
         updated_at=channel.updated_at or "",
+    )
+
+
+def channel_publish_status_from(channel_id: str, publish_count: int) -> ChannelPublishStatusResponse:
+    publish_count = max(0, int(publish_count))
+    return ChannelPublishStatusResponse(
+        channel_id=channel_id,
+        account_status="idle" if publish_count == 0 else "publishing",
+        publish_count=publish_count,
     )

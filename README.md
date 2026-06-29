@@ -197,11 +197,14 @@ Authorization: Bearer <PUBLISH_API_TOKEN>
 | `GET` | `/api/v1/login-sessions/{session_id}` | 是 | 查询登录会话状态（含 `channel_id`） |
 | `DELETE` | `/api/v1/login-sessions/{session_id}` | 是 | 取消登录会话（释放 Xvnc 显示槽） |
 | `GET` | `/api/v1/channels/{channel_id}` | 是 | 查询渠道状态（平台/账号名/cookie 是否有效） |
+| `GET` | `/api/v1/channels/{channel_id}/publish-status` | 是 | 查询渠道发文状态（idle/publishing + publish_count） |
 | `DELETE` | `/api/v1/channels/{channel_id}` | 是 | 删除渠道（含 cookie） |
 
 发文（LLM 自动操作）与登录（真人手动操作）是两套独立资源：发文走 `/jobs`，登录走 `/login-sessions`，两者底层共用 Job 存储但在接口上互不可见（拿发文 `job_id` 去访问 `/login-sessions/*` 会得到 404，反之亦然）。
 
 典型流程（登录在先）：先 `POST /api/v1/login-sessions` 传 `platform`，拿到 `channel_id` 和 `live_url`，用户在 `live_url` 登录成功后 cookie 自动绑定到该渠道；之后 `POST /api/v1/jobs` 传 `channel_id` + 文章发文，若该渠道 cookie 已失效则自动重新登录同一渠道并续发；全程用 `GET /api/v1/jobs/{job_id}` 轮询状态。
+
+同一个 `channel_id` 下多次提交发文会排队串行执行：当前任务发文完成、失败或取消后，系统自动启动同渠道下一篇。不同 `channel_id` 的发文任务互不等待，仍可并发执行。
 
 发文请求示例：
 
@@ -216,6 +219,35 @@ curl -X POST http://127.0.0.1:8833/api/v1/jobs \
     "cover_image_url": "https://example.com/cover.jpg"
   }'
 ```
+
+查询渠道是否可提交新发文：
+
+```bash
+curl http://127.0.0.1:8833/api/v1/channels/3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c/publish-status \
+  -H "Authorization: Bearer <PUBLISH_API_TOKEN>"
+```
+
+空闲返回：
+
+```json
+{
+  "channel_id": "3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c",
+  "account_status": "idle",
+  "publish_count": 0
+}
+```
+
+发文中或排队中返回：
+
+```json
+{
+  "channel_id": "3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c",
+  "account_status": "publishing",
+  "publish_count": 3
+}
+```
+
+`publish_count` 统计同一 `channel_id` 下未完成的 publish job，包含正在执行和排队中的任务，不包含已成功、已失败、已取消和 login-only 任务。`waiting_cookie` 也计入 `publishing`，因为它仍属于某个发文任务的补登/续发流程。
 
 ## 运行期目录
 
