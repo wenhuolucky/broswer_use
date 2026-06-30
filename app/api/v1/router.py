@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import accounts, channels, jobs, login_sessions, platforms
+from app.api.v1 import channels, jobs, login_sessions, platforms
 
 api_router = APIRouter()
-for module in (platforms, jobs, login_sessions, channels, accounts):
+for module in (platforms, jobs, login_sessions, channels):
     api_router.include_router(module.router)

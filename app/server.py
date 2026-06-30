@@ -76,9 +76,6 @@ async def lifespan(app: FastAPI):
     try:
         agent.job_store.ready()
         agent.channel_store.ready()
-        from app.api.v1.accounts import _default_account_service
-
-        _default_account_service().store.ready()
     except Exception as exc:
         _log.error("store is not ready: %s", exc, exc_info=True)
         raise
