@@ -31,6 +31,17 @@ SQLITE_PATH = str(_project_path(_sqlite_raw, DATA_DIR / "app.db")) if _sqlite_ra
 
 PUBLISH_API_TOKEN = os.getenv("PUBLISH_API_TOKEN", "").strip()
 
+# MySQL-backed article account store. The table is owned by operations / DBA
+# and must already exist; the application only validates configuration and uses
+# it through app.accounts.store.AccountStore.
+MYSQL_HOST = os.getenv("MYSQL_HOST", "").strip()
+MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
+MYSQL_USER = os.getenv("MYSQL_USER", "").strip()
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "").strip()
+GROUP_ID = os.getenv("GROUP_ID", "").strip()
+GROUP_TEXT = os.getenv("GROUP_TEXT", "").strip()
+
 # 僵尸 pending 渠道清理：pending 渠道只在一次登录会话进行中存在，用户放弃登录
 # （关页面/超时）会留下无 cookie 的空渠道。运行期无其他 GC（cancel/回收巡检都不删
 # 渠道），故按 TTL 周期清扫：删除创建超过 TTL 仍未绑定的 pending 渠道。
