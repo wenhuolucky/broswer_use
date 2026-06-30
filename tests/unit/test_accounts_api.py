@@ -387,3 +387,59 @@ def test_invalid_phone_returns_stable_error_code(monkeypatch):
 
     assert response.status_code == 400
     assert response.json()["detail"]["code"] == "invalid_phone"
+
+
+def test_account_platform_parameters_are_openapi_enums(monkeypatch):
+    client = make_client(FakeAccountStore(), FakeAgent(), monkeypatch)
+
+    schema = client.get("/openapi.json").json()
+    account_path = schema["paths"]["/accounts/{platform}/{phone}"]
+    get_parameters = account_path["get"]["parameters"]
+    path_platform = next(param for param in get_parameters if param["name"] == "platform")
+    assert path_platform["schema"]["enum"] == ["toutiao", "sohu"]
+
+    list_parameters = schema["paths"]["/accounts/all"]["get"]["parameters"]
+    query_platform = next(param for param in list_parameters if param["name"] == "platform")
+    assert query_platform["schema"]["anyOf"][0]["enum"] == ["toutiao", "sohu"]
+
+
+def test_account_path_rejects_unsupported_platform_before_store_lookup(monkeypatch):
+    store = FakeAccountStore()
+    agent = FakeAgent()
+    seed_account(store, agent, platform="toutiao", phone="13800138000")
+    client = make_client(store, agent, monkeypatch)
+
+    response = client.get("/accounts/wechat/13800138000?group_id=tenant-a")
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["path", "platform"]
+
+
+def test_account_openapi_contains_chinese_scalar_descriptions(monkeypatch):
+    client = make_client(FakeAccountStore(), FakeAgent(), monkeypatch)
+
+    schema = client.get("/openapi.json").json()
+    all_operation = schema["paths"]["/accounts/all"]["get"]
+    put_operation = schema["paths"]["/accounts/{platform}/{phone}"]["put"]
+    patch_schema = schema["components"]["schemas"]["AccountPatchRequest"]
+    upsert_schema = schema["components"]["schemas"]["AccountUpsertRequest"]
+    response_schema = schema["components"]["schemas"]["AccountResponse"]
+
+    assert all_operation["summary"] == "列出所有账号"
+    assert "group_id 必填" in all_operation["description"]
+    assert put_operation["summary"] == "保存或重新绑定账号"
+    assert "channel_id 必须已存在" in put_operation["description"]
+
+    put_params = {param["name"]: param for param in put_operation["parameters"]}
+    assert "枚举值：toutiao、sohu" in put_params["platform"]["description"]
+    assert "11 位手机号" in put_params["phone"]["description"]
+
+    all_params = {param["name"]: param for param in all_operation["parameters"]}
+    assert "调用方传入" in all_params["group_id"]["description"]
+    assert "status 不是 disabled 且不是 muted" in all_params["status"]["description"]
+    assert all_params["limit"]["schema"]["maximum"] == 500
+
+    assert "必填" in upsert_schema["properties"]["group_id"]["description"]
+    assert upsert_schema["properties"]["status"]["enum"] == ["normal", "warning", "muted", "disabled"]
+    assert "空字符串按未提供处理" in patch_schema["properties"]["status"]["description"]
+    assert response_schema["properties"]["platform"]["description"].startswith("平台枚举")

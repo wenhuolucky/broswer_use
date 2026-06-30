@@ -3,12 +3,13 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Path, Query
 
 from app.accounts.errors import AccountConflict, AccountStoreUnavailable
 from app.accounts.models import ACCOUNT_STATUSES, mask_phone, validate_phone
 from app.accounts.store import MySQLAccountStore
 from app.api.deps import agent
+from app.domain.job import Platform
 from app.domain.job import (
     STATUS_CHECKING_COOKIE,
     STATUS_COOKIE_READY,
@@ -102,16 +103,27 @@ def _account_response(account, *, include_channel: bool, include_runtime: bool) 
     return account_to_response(account, channel=channel, runtime=runtime)
 
 
-@router.get("/all", response_model=AccountListResponse)
+@router.get(
+    "/all",
+    response_model=AccountListResponse,
+    summary="列出所有账号",
+    description=(
+        "列出指定 group_id 下的所有账号。group_id 必填，由调用方传入，用于账号分组/租户隔离。"
+        "可按 platform 和持久 status 过滤；include_runtime=true 时会实时查询发文状态，但不会写入账号表。"
+    ),
+)
 async def list_all_accounts(
-    group_id: str = Query(default=""),
-    platform: str | None = None,
-    status: str | None = None,
-    group_text: str | None = None,
-    include_channel: bool = True,
-    include_runtime: bool = False,
-    limit: int = 100,
-    offset: int = 0,
+    group_id: str = Query(default="", description="必填。调用方传入的账号分组/租户 id；所有查询都会限制在该 group_id 下。"),
+    platform: Platform | None = Query(default=None, description="可选。平台枚举值：toutiao、sohu；不传则不过滤平台。"),
+    status: str | None = Query(
+        default=None,
+        description="可选。账号持久状态：normal、warning、muted、disabled。可用账号指 status 不是 disabled 且不是 muted。",
+    ),
+    group_text: str | None = Query(default=None, description="可选。响应展示兜底文本，不参与查询过滤和唯一性判断。"),
+    include_channel: bool = Query(default=True, description="是否在每个账号中附带 channel 摘要。"),
+    include_runtime: bool = Query(default=False, description="是否实时查询发文状态；该状态不写入 article_accounts。"),
+    limit: int = Query(default=100, ge=1, le=500, description="分页大小，范围 1..500。"),
+    offset: int = Query(default=0, ge=0, description="分页偏移，必须 >= 0。"),
 ):
     group_id = _require_group_id(group_id)
     _validate_status_or_400(status)
@@ -141,15 +153,23 @@ async def list_all_accounts(
     )
 
 
-@router.get("/available", response_model=AccountListResponse)
+@router.get(
+    "/available",
+    response_model=AccountListResponse,
+    summary="列出可用账号",
+    description=(
+        "列出指定 group_id 下的可用账号。可用只看持久状态：status 不是 disabled 且不是 muted；"
+        "normal 和 warning 都会返回。channel/cookie/runtime 状态不影响本接口是否返回。"
+    ),
+)
 async def list_available_accounts(
-    group_id: str = Query(default=""),
-    platform: str | None = None,
-    group_text: str | None = None,
-    include_channel: bool = True,
-    include_runtime: bool = False,
-    limit: int = 100,
-    offset: int = 0,
+    group_id: str = Query(default="", description="必填。调用方传入的账号分组/租户 id；所有查询都会限制在该 group_id 下。"),
+    platform: Platform | None = Query(default=None, description="可选。平台枚举值：toutiao、sohu；不传则不过滤平台。"),
+    group_text: str | None = Query(default=None, description="可选。响应展示兜底文本，不参与查询过滤和唯一性判断。"),
+    include_channel: bool = Query(default=True, description="是否在每个账号中附带 channel 摘要。"),
+    include_runtime: bool = Query(default=False, description="是否实时查询发文状态；该状态不写入 article_accounts。"),
+    limit: int = Query(default=100, ge=1, le=500, description="分页大小，范围 1..500。"),
+    offset: int = Query(default=0, ge=0, description="分页偏移，必须 >= 0。"),
 ):
     group_id = _require_group_id(group_id)
     limit = max(1, min(int(limit), 500))
@@ -177,13 +197,21 @@ async def list_available_accounts(
     )
 
 
-@router.get("/{platform}/{phone}", response_model=AccountResponse)
+@router.get(
+    "/{platform}/{phone}",
+    response_model=AccountResponse,
+    summary="查询账号详情",
+    description=(
+        "查询指定 group_id + platform + phone 下的单个账号。platform 是枚举值 toutiao 或 sohu；"
+        "phone 必须是 11 位且以 1 开头。include_runtime=true 时返回实时发文状态。"
+    ),
+)
 async def get_account(
-    platform: str,
-    phone: str,
-    group_id: str = Query(default=""),
-    include_channel: bool = True,
-    include_runtime: bool = False,
+    platform: Platform = Path(description="平台枚举值：toutiao、sohu。"),
+    phone: str = Path(description="账号标识。必须是 11 位手机号，且以 1 开头。"),
+    group_id: str = Query(default="", description="必填。调用方传入的账号分组/租户 id。"),
+    include_channel: bool = Query(default=True, description="是否附带 channel 摘要。"),
+    include_runtime: bool = Query(default=False, description="是否实时查询发文状态；该状态不写入 article_accounts。"),
 ):
     group_id = _require_group_id(group_id)
     phone = _validate_phone_or_400(phone)
@@ -196,8 +224,20 @@ async def get_account(
     return _account_response(account, include_channel=include_channel, include_runtime=include_runtime)
 
 
-@router.put("/{platform}/{phone}", response_model=AccountResponse)
-async def upsert_account(platform: str, phone: str, request: AccountUpsertRequest):
+@router.put(
+    "/{platform}/{phone}",
+    response_model=AccountResponse,
+    summary="保存或重新绑定账号",
+    description=(
+        "保存或重新绑定账号到 channel。通常在登录成功拿到 channel_id 后调用。"
+        "channel_id 必须已存在，且 channel 绑定的平台必须与 path 中的 platform 一致，否则返回 channel_platform_mismatch。"
+    ),
+)
+async def upsert_account(
+    platform: Platform = Path(description="平台枚举值：toutiao、sohu。"),
+    phone: str = Path(description="账号标识。必须是 11 位手机号，且以 1 开头。"),
+    request: AccountUpsertRequest = ...,
+):
     group_id = _require_group_id(request.group_id)
     phone = _validate_phone_or_400(phone)
     status = _validate_status_or_400(request.status) or "normal"
@@ -222,8 +262,20 @@ async def upsert_account(platform: str, phone: str, request: AccountUpsertReques
     return _account_response(account, include_channel=True, include_runtime=False)
 
 
-@router.patch("/{platform}/{phone}", response_model=AccountResponse)
-async def patch_account(platform: str, phone: str, request: AccountPatchRequest):
+@router.patch(
+    "/{platform}/{phone}",
+    response_model=AccountResponse,
+    summary="修改账号持久字段",
+    description=(
+        "修改账号手机号、展示分组文本、持久状态和连续失败次数。status 可选 normal、warning、muted、disabled。"
+        "new_phone、status、group_text 传空字符串时按未提供处理。status=normal 且未显式传 reset_failures 时会默认清零失败次数。"
+    ),
+)
+async def patch_account(
+    platform: Platform = Path(description="平台枚举值：toutiao、sohu。"),
+    phone: str = Path(description="当前账号标识。必须是 11 位手机号，且以 1 开头。"),
+    request: AccountPatchRequest = ...,
+):
     group_id = _require_group_id(request.group_id)
     phone = _validate_phone_or_400(phone)
     if request.new_phone is not None:
@@ -261,13 +313,21 @@ async def patch_account(platform: str, phone: str, request: AccountPatchRequest)
     return _account_response(account, include_channel=True, include_runtime=False)
 
 
-@router.delete("/{platform}/{phone}", response_model=AccountDeleteResponse)
+@router.delete(
+    "/{platform}/{phone}",
+    response_model=AccountDeleteResponse,
+    summary="删除账号",
+    description=(
+        "删除指定 group_id + platform + phone 下的账号。默认会同时删除关联 channel/cookie，并尝试解除 proxy assignment。"
+        "如果账号仍有未完成 publish job，force=false 时返回 account_busy；force=true 时会尽量取消未完成任务后删除。"
+    ),
+)
 async def delete_account(
-    platform: str,
-    phone: str,
-    group_id: str = Query(default=""),
-    force: bool = False,
-    delete_channel: bool = True,
+    platform: Platform = Path(description="平台枚举值：toutiao、sohu。"),
+    phone: str = Path(description="账号标识。必须是 11 位手机号，且以 1 开头。"),
+    group_id: str = Query(default="", description="必填。调用方传入的账号分组/租户 id。"),
+    force: bool = Query(default=False, description="有未完成 publish job 时是否强制取消后删除。"),
+    delete_channel: bool = Query(default=True, description="是否同时删除关联 channel/cookie。"),
 ):
     group_id = _require_group_id(group_id)
     phone = _validate_phone_or_400(phone)

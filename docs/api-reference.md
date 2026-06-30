@@ -182,6 +182,34 @@ FastAPI/业务错误通常返回：
 - `cancelled`
 - login-only 任务
 
+### 2.6 Account status
+
+`article_accounts.status` 是账号持久状态，类型为 `string`。它只记录业务可用性，不记录正在发文/排队等运行时状态。
+
+| 值 | 类型 | 含义 | 是否可用 |
+|---|---|---|:---:|
+| `normal` | string | 正常 | 是 |
+| `warning` | string | 连续失败达到警告阈值，需人工关注 | 是 |
+| `muted` | string | 疑似封号、禁言、无发布权限 | 否 |
+| `disabled` | string | 人工禁用 | 否 |
+
+可用账号定义：`status` 不是 `disabled` 且不是 `muted`。`warning` 仍算可用。
+
+账号运行时发文状态不写入 `article_accounts.status`，需要通过 `channel_id` 查询 `/api/v1/channels/{channel_id}/publish-status`，或在账号列表中使用 `include_runtime=true` 展示。
+
+### 2.7 Account group scope
+
+账号接口使用调用方传入的 `group_id` 做租户隔离。服务端 `.env` 不配置 `GROUP_ID` / `GROUP_TEXT`。
+
+规则：
+
+- `group_id` 是账号接口必填参数。
+- `group_text` 是可选展示文本，不参与查询过滤和唯一性判断。
+- 同一个 `platform + phone` 可以存在于不同 `group_id` 中。
+- 查询、修改、删除账号时只访问请求 `group_id` 下的账号。
+- 保存/重新绑定账号时，唯一键语义为 `group_id + platform + phone`。
+- `phone` 必须是 11 位且以 `1` 开头。
+
 ## 3. 发文串行与并发语义
 
 ### 3.1 同一 channel_id 串行
@@ -225,6 +253,12 @@ FastAPI/业务错误通常返回：
 | `GET` | `/api/v1/channels/{channel_id}` | 是 | 查询渠道详情 |
 | `DELETE` | `/api/v1/channels/{channel_id}` | 是 | 删除渠道 |
 | `GET` | `/api/v1/channels/{channel_id}/publish-status` | 是 | 查询渠道发文状态和未完成发文数量 |
+| `GET` | `/api/v1/accounts/all` | 是 | 列出指定 `group_id` 下的所有账号 |
+| `GET` | `/api/v1/accounts/available` | 是 | 列出指定 `group_id` 下的可用账号 |
+| `GET` | `/api/v1/accounts/{platform}/{phone}` | 是 | 查询指定账号详情 |
+| `PUT` | `/api/v1/accounts/{platform}/{phone}` | 是 | 保存或重新绑定账号到 channel |
+| `PATCH` | `/api/v1/accounts/{platform}/{phone}` | 是 | 修改账号手机号、状态、失败次数等持久字段 |
+| `DELETE` | `/api/v1/accounts/{platform}/{phone}` | 是 | 删除账号并清理关联 channel/cookie/proxy assignment |
 
 ## 5. Service API
 
@@ -841,7 +875,372 @@ Path 参数：
 | `404` | 渠道不存在 | `{"detail":"渠道不存在"}` |
 | `422` | `channel_id` 格式非法 | `{"detail":"channel_id 不合法：只能包含字母、数字、'_'、'-'，长度 1-64"}` |
 
-## 10. 内部 viewer/proxy 入口
+
+## 10. Account API
+
+Account API 只管理 `article_accounts` 表中的账号绑定、分组隔离和持久状态。登录、发文、任务查询、任务取消仍使用已有 Login Session / Job / Channel API。
+
+账号接口的业务错误使用稳定结构：
+
+```json
+{
+  "detail": {
+    "code": "account_not_found",
+    "message": "请求分组下没有该账号",
+    "extra": {}
+  }
+}
+```
+
+常见错误码：
+
+| HTTP 状态码 | code | 场景 |
+|---|---|---|
+| `400` | `missing_group_id` | 未传 `group_id` |
+| `400` | `invalid_phone` | `phone` 或 `new_phone` 不是 11 位且以 1 开头 |
+| `400` | `invalid_account_status` | `status` 不是 `normal` / `warning` / `muted` / `disabled` |
+| `400` | `empty_account_patch` | PATCH 没有任何可修改字段 |
+| `404` | `account_not_found` | 请求 `group_id` 下没有该账号 |
+| `404` | `channel_not_found` | 保存绑定时 `channel_id` 不存在 |
+| `409` | `channel_platform_mismatch` | path 中的 `platform` 与 channel 绑定的平台不一致 |
+| `409` | `account_phone_exists` | 同一 `group_id + platform` 下新手机号已存在 |
+| `409` | `account_busy` | 删除账号时仍有未完成 publish job，且 `force=false` |
+| `422` | FastAPI validation error | `platform` 不在枚举范围内，只能是 `toutiao` / `sohu` |
+| `503` | `account_store_unavailable` | MySQL 账号存储不可用 |
+| `503` | `publish_status_unavailable` | 查询运行时发文状态失败 |
+
+### 10.1 GET /api/v1/accounts/all
+
+列出指定 `group_id` 下的所有账号。
+
+鉴权：需要 Bearer Token。
+
+Query 参数：
+
+| 参数 | 类型 | 必填 | 默认 | 含义 |
+|---|---|:---:|---|---|
+| `group_id` | string | 是 | 无 | 账号分组/租户 id |
+| `platform` | Platform enum 或 null | 否 | null | 按平台过滤，只能是 `toutiao` / `sohu` |
+| `status` | string 或 null | 否 | null | 按持久账号状态过滤 |
+| `group_text` | string 或 null | 否 | null | 响应展示兜底，不参与过滤 |
+| `include_channel` | boolean | 否 | `true` | 是否附带 channel 摘要 |
+| `include_runtime` | boolean | 否 | `false` | 是否实时查询发文状态 |
+| `limit` | integer | 否 | `100` | 分页大小，服务端限制 `1..500` |
+| `offset` | integer | 否 | `0` | 分页偏移 |
+
+成功响应：`200 OK`
+
+响应体 `AccountListResponse`：
+
+| 字段 | 类型 | 必填 | 含义 |
+|---|---|:---:|---|
+| `group_id` | string | 是 | 请求分组 id |
+| `group_text` | string | 是 | 展示文本；请求未传时取首个账号的 `group_text` 或空字符串 |
+| `count` | integer | 是 | 本页返回数量 |
+| `limit` | integer | 是 | 分页大小 |
+| `offset` | integer | 是 | 分页偏移 |
+| `accounts` | array<object> | 是 | 账号列表 |
+
+`AccountResponse` 字段：
+
+| 字段 | 类型 | 必填 | 含义 |
+|---|---|:---:|---|
+| `id` | integer | 是 | `article_accounts.id` |
+| `platform` | Platform enum | 是 | 平台标识，`toutiao` / `sohu` |
+| `phone` | string | 是 | 11 位手机号账号标识 |
+| `phone_masked` | string | 是 | 脱敏手机号 |
+| `channel_id` | string | 是 | 绑定的 channel id，对应表字段 `channel` |
+| `status` | string | 是 | 持久账号状态 |
+| `consecutive_failures` | integer | 是 | 连续失败次数 |
+| `group_id` | string | 是 | 分组 id |
+| `group_text` | string | 是 | 展示文本 |
+| `created_at` | string | 是 | 创建时间 |
+| `updated_at` | string | 是 | 更新时间 |
+| `channel` | object 或 null | 是 | `include_channel=true` 时的 channel 摘要；channel 不存在时为 null |
+| `runtime` | object 或 null | 是 | `include_runtime=true` 时的运行时发文状态 |
+
+`channel` 摘要字段：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `channel_id` | string | 渠道句柄 |
+| `platform` | Platform enum | channel 绑定平台，`toutiao` / `sohu` |
+| `status` | string | channel 状态 |
+| `account_name` | string | 平台账号显示名 |
+| `has_valid_cookie` | boolean | cookie 是否有效 |
+
+`runtime` 字段：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `account_status` | string | `idle` / `publishing` |
+| `publish_count` | integer | 未完成 publish job 数量 |
+| `is_idle` | boolean | `publish_count == 0` |
+
+示例：
+
+```json
+{
+  "group_id": "TianQW",
+  "group_text": "测试组002",
+  "count": 1,
+  "limit": 100,
+  "offset": 0,
+  "accounts": [
+    {
+      "id": 1,
+      "platform": "toutiao",
+      "phone": "19015896790",
+      "phone_masked": "190****6790",
+      "channel_id": "3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c",
+      "status": "normal",
+      "consecutive_failures": 0,
+      "group_id": "TianQW",
+      "group_text": "测试组002",
+      "created_at": "2026-06-30T08:00:00+00:00",
+      "updated_at": "2026-06-30T08:00:00+00:00",
+      "channel": {
+        "channel_id": "3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c",
+        "platform": "toutiao",
+        "status": "bound",
+        "account_name": "账号名称",
+        "has_valid_cookie": true
+      },
+      "runtime": {
+        "account_status": "idle",
+        "publish_count": 0,
+        "is_idle": true
+      }
+    }
+  ]
+}
+```
+
+### 10.2 GET /api/v1/accounts/available
+
+列出指定 `group_id` 下的可用账号。
+
+可用账号只按持久状态判断：
+
+```text
+status != disabled && status != muted
+```
+
+因此 `normal` 和 `warning` 都会返回。channel 缺失、cookie 无效、正在发文、队列忙碌不影响是否出现在本接口；这些属于 channel/runtime 状态。
+
+Query 参数同 `GET /api/v1/accounts/all`，但没有 `status` 过滤。
+
+响应结构同 `GET /api/v1/accounts/all`。
+
+### 10.3 GET /api/v1/accounts/{platform}/{phone}
+
+查询指定 `group_id` 下的单个账号。
+
+鉴权：需要 Bearer Token。
+
+Path 参数：
+
+| 参数 | 类型 | 必填 | 限制 | 含义 |
+|---|---|:---:|---|---|
+| `platform` | Platform enum | 是 | `toutiao` / `sohu` | 平台标识 |
+| `phone` | string | 是 | `^1\\d{10}$` | 账号手机号 |
+
+Query 参数：
+
+| 参数 | 类型 | 必填 | 默认 | 含义 |
+|---|---|:---:|---|---|
+| `group_id` | string | 是 | 无 | 账号分组/租户 id |
+| `include_channel` | boolean | 否 | `true` | 是否附带 channel 摘要 |
+| `include_runtime` | boolean | 否 | `false` | 是否实时查询发文状态 |
+
+成功响应：`200 OK`，响应体为单个 `AccountResponse`。
+
+错误响应：
+
+| HTTP 状态码 | code | 场景 |
+|---|---|---|
+| `400` | `missing_group_id` | 未传 `group_id` |
+| `400` | `invalid_phone` | `phone` 非 11 位手机号 |
+| `404` | `account_not_found` | 请求 `group_id` 下没有该账号 |
+| `422` | FastAPI validation error | `platform` 不在枚举范围内 |
+
+### 10.4 PUT /api/v1/accounts/{platform}/{phone}
+
+保存或重新绑定账号记录。通常在 `POST /api/v1/login-sessions` 登录成功并拿到 `channel_id` 后调用。
+
+鉴权：需要 Bearer Token。
+
+Content-Type：`application/json`
+
+Path 参数同 `GET /api/v1/accounts/{platform}/{phone}`。
+
+请求体 `AccountUpsertRequest`：
+
+| 字段 | 类型 | 必填 | 默认 | 含义 |
+|---|---|:---:|---|---|
+| `group_id` | string | 是 | 无 | 账号分组/租户 id |
+| `group_text` | string | 否 | `group_id` | 展示文本，不参与过滤 |
+| `channel_id` | string | 是 | 无 | 已存在 channel id |
+| `status` | string | 否 | `normal` | 持久账号状态 |
+| `reset_failures` | boolean | 否 | `true` | 是否把 `consecutive_failures` 重置为 0 |
+| `consecutive_failures` | integer | 否 | `0` | 不重置时写入的连续失败次数 |
+
+请求示例：
+
+```json
+{
+  "group_id": "TianQW",
+  "group_text": "测试组002",
+  "channel_id": "3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c",
+  "status": "normal",
+  "reset_failures": true
+}
+```
+
+成功响应：`200 OK`，响应体为 `AccountResponse`。
+
+校验规则：
+
+- `phone` 必须是 11 位且以 `1` 开头。
+- `group_id` 必填。
+- `channel_id` 必须存在。
+- path 中的 `platform` 必须等于 channel 绑定的平台；否则返回 `409 channel_platform_mismatch`，不会写入账号表。
+- upsert 范围只限 `group_id + platform + phone`。
+
+### 10.5 PATCH /api/v1/accounts/{platform}/{phone}
+
+修改账号持久字段。修改手机号、禁用/启用、标记 warning/muted、重置失败次数都使用本接口。
+
+鉴权：需要 Bearer Token。
+
+Content-Type：`application/json`
+
+Path 参数同 `GET /api/v1/accounts/{platform}/{phone}`。
+
+请求体 `AccountPatchRequest`：
+
+| 字段 | 类型 | 必填 | 含义 |
+|---|---|:---:|---|
+| `group_id` | string | 是 | 账号分组/租户 id |
+| `group_text` | string 或 null | 否 | 更新展示文本；空字符串按未提供处理 |
+| `new_phone` | string 或 null | 否 | 新手机号；空字符串按未提供处理 |
+| `status` | string 或 null | 否 | 新持久状态；空字符串按未提供处理 |
+| `reset_failures` | boolean 或 null | 否 | `true` 时把 `consecutive_failures` 置 0 |
+| `consecutive_failures` | integer 或 null | 否 | 显式设置连续失败次数，必须 `>=0` |
+
+请求示例：禁用账号
+
+```json
+{
+  "group_id": "TianQW",
+  "status": "disabled"
+}
+```
+
+请求示例：恢复账号并清零失败次数
+
+```json
+{
+  "group_id": "TianQW",
+  "status": "normal",
+  "reset_failures": true
+}
+```
+
+请求示例：修改手机号
+
+```json
+{
+  "group_id": "TianQW",
+  "new_phone": "19015896791"
+}
+```
+
+请求示例：API Client 里未使用的可选字段可以为空字符串，后端会按未提供处理
+
+```json
+{
+  "group_id": "TianQW",
+  "group_text": "测试组002",
+  "new_phone": "",
+  "status": "",
+  "reset_failures": true,
+  "consecutive_failures": 0
+}
+```
+
+成功响应：`200 OK`，响应体为 `AccountResponse`。
+
+规则：
+
+- path 中的 `platform + phone` 必须先在请求 `group_id` 下存在。
+- `new_phone` 非空时必须是 11 位且以 `1` 开头。
+- 同一 `group_id + platform + new_phone` 已存在时返回 `409 account_phone_exists`。
+- `status=normal` 且未显式传 `reset_failures` 时，后端默认清零失败次数。
+
+### 10.6 DELETE /api/v1/accounts/{platform}/{phone}
+
+删除账号记录，并按参数清理关联 channel/cookie/proxy assignment。
+
+鉴权：需要 Bearer Token。
+
+Path 参数同 `GET /api/v1/accounts/{platform}/{phone}`。
+
+Query 参数：
+
+| 参数 | 类型 | 必填 | 默认 | 含义 |
+|---|---|:---:|---|---|
+| `group_id` | string | 是 | 无 | 账号分组/租户 id |
+| `force` | boolean | 否 | `false` | 有未完成 publish job 时是否强制取消后删除 |
+| `delete_channel` | boolean | 否 | `true` | 是否删除关联 channel/cookie |
+
+默认删除语义：
+
+- 请求 `group_id` 下必须存在该账号。
+- 如果关联 channel 有未完成 publish job，`force=false` 返回 `409 account_busy`，不删除。
+- `force=true` 时，后端会尽量取消未完成 publish job。
+- 删除 `article_accounts` 记录。
+- `delete_channel=true` 时删除关联 channel/cookie。
+- 尝试解除 proxy assignment。
+- 历史 jobs/logs 保留。
+
+成功响应：`200 OK`
+
+响应体 `AccountDeleteResponse`：
+
+| 字段 | 类型 | 必填 | 含义 |
+|---|---|:---:|---|
+| `platform` | Platform enum | 是 | 平台标识，`toutiao` / `sohu` |
+| `phone` | string | 是 | 被删除账号手机号 |
+| `phone_masked` | string | 是 | 脱敏手机号 |
+| `group_id` | string | 是 | 分组 id |
+| `group_text` | string | 是 | 展示文本 |
+| `deleted` | boolean | 是 | 是否删除账号表记录 |
+| `channel_id` | string | 是 | 原绑定 channel id |
+| `channel_deleted` | boolean | 是 | 是否删除 channel/cookie |
+| `proxy_unassigned` | boolean | 是 | 是否解除 proxy assignment |
+| `cancelled_jobs` | array<string> | 是 | 强制删除时被取消的 job id |
+| `cleanup_warnings` | array<string> | 是 | 清理过程中的非致命告警 |
+
+示例：
+
+```json
+{
+  "platform": "toutiao",
+  "phone": "19015896790",
+  "phone_masked": "190****6790",
+  "group_id": "TianQW",
+  "group_text": "测试组002",
+  "deleted": true,
+  "channel_id": "3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c",
+  "channel_deleted": true,
+  "proxy_unassigned": false,
+  "cancelled_jobs": [],
+  "cleanup_warnings": []
+}
+```
+
+## 11. 内部 viewer/proxy 入口
 
 以下入口存在于服务中，但 `include_in_schema=False`，不作为第三方业务 API 主契约。调用方通常只需要使用业务接口返回的 `live_url`，不要自行拼接这些路径。
 
@@ -858,27 +1257,30 @@ Path 参数：
 | `404` | session/viewer 不存在 |
 | `410` | session/viewer 已结束 |
 
-## 11. 推荐调用流程
+## 12. 推荐调用流程
 
-### 11.1 首次接入账号并发文
+### 12.1 首次接入账号并保存账号
 
 1. 调用 `POST /api/v1/login-sessions` 创建登录会话。
 2. 打开响应中的 `live_url`，由用户完成平台登录。
 3. 轮询 `GET /api/v1/login-sessions/{session_id}`，直到 `status=succeeded`。
 4. 读取响应中的 `channel_id`。
-5. 调用 `POST /api/v1/jobs` 提交文章。
-6. 轮询 `GET /api/v1/jobs/{job_id}`，直到 `status=succeeded` / `failed` / `cancelled`。
-7. 成功时读取 `article_url`。
+5. 调用 `PUT /api/v1/accounts/{platform}/{phone}`，传 `group_id` 和 `channel_id`，保存账号绑定。
+6. 调用 `GET /api/v1/accounts/{platform}/{phone}?group_id=...` 取回 `channel_id`。
+7. 调用 `POST /api/v1/jobs` 提交文章。
+8. 轮询 `GET /api/v1/jobs/{job_id}`，直到 `status=succeeded` / `failed` / `cancelled`。
+9. 成功时读取 `article_url`。
 
-### 11.2 已有 channel_id 发文
+### 12.2 已有账号按 phone 发文
 
-1. 可选：调用 `GET /api/v1/channels/{channel_id}/publish-status` 查询当前队列状态。
-2. 调用 `POST /api/v1/jobs` 提交文章。
-3. 如果返回 `queued`，说明同账号前面还有文章，继续轮询 job。
-4. 如果返回 `waiting_cookie`，打开 `live_url` 完成登录。
-5. 轮询 `GET /api/v1/jobs/{job_id}` 到终态。
+1. 调用 `GET /api/v1/accounts/{platform}/{phone}?group_id=...` 查询账号，读取 `channel_id`。
+2. 可选：调用 `GET /api/v1/channels/{channel_id}/publish-status` 查询当前队列状态。
+3. 调用 `POST /api/v1/jobs` 提交文章。
+4. 如果返回 `queued`，说明同账号前面还有文章，继续轮询 job。
+5. 如果返回 `waiting_cookie`，打开 `live_url` 完成登录。
+6. 轮询 `GET /api/v1/jobs/{job_id}` 到终态。
 
-### 11.3 同账号多文章提交
+### 12.3 同账号多文章提交
 
 可以连续调用 `POST /api/v1/jobs` 提交多篇文章。系统保证：
 
@@ -886,7 +1288,7 @@ Path 参数：
 - 返回 `queued` 的任务已经进入队列，不需要调用方重试创建。
 - 取消当前执行中的任务后，下一篇 queued 任务会自动启动。
 
-## 12. curl 示例
+## 13. curl 示例
 
 ### 创建登录会话
 
@@ -925,7 +1327,55 @@ curl "{BASE_URL}/api/v1/channels/3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c/publish-status
   -H "Authorization: Bearer <PUBLISH_API_TOKEN>"
 ```
 
-## 13. 版本注意事项
+### 保存账号绑定
+
+```bash
+curl -X PUT "{BASE_URL}/api/v1/accounts/toutiao/19015896790" \
+  -H "Authorization: Bearer <PUBLISH_API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "group_id": "TianQW",
+    "group_text": "测试组002",
+    "channel_id": "3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c",
+    "status": "normal",
+    "reset_failures": true
+  }'
+```
+
+### 查询账号详情
+
+```bash
+curl "{BASE_URL}/api/v1/accounts/toutiao/19015896790?group_id=TianQW&include_runtime=true" \
+  -H "Authorization: Bearer <PUBLISH_API_TOKEN>"
+```
+
+### 列出可用账号
+
+```bash
+curl "{BASE_URL}/api/v1/accounts/available?group_id=TianQW&platform=toutiao" \
+  -H "Authorization: Bearer <PUBLISH_API_TOKEN>"
+```
+
+### 禁用账号
+
+```bash
+curl -X PATCH "{BASE_URL}/api/v1/accounts/toutiao/19015896790" \
+  -H "Authorization: Bearer <PUBLISH_API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "group_id": "TianQW",
+    "status": "disabled"
+  }'
+```
+
+### 删除账号
+
+```bash
+curl -X DELETE "{BASE_URL}/api/v1/accounts/toutiao/19015896790?group_id=TianQW&force=true" \
+  -H "Authorization: Bearer <PUBLISH_API_TOKEN>"
+```
+
+## 14. 版本注意事项
 
 - 本文档以当前代码为准。
 - 当前同 channel 串行保证基于单进程内锁和 SQLite job 状态。若未来部署多个 API worker，需要数据库原子领取或分布式锁来保证跨进程强一致。
