@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.accounts.models import ArticleAccount, mask_phone
 
@@ -64,6 +64,13 @@ class AccountPatchRequest(BaseModel):
     consecutive_failures: int | None = Field(default=None, ge=0)
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("group_text", "new_phone", "status", mode="before")
+    @classmethod
+    def blank_string_to_none(cls, value):
+        if isinstance(value, str) and value == "":
+            return None
+        return value
 
 
 class AccountDeleteResponse(BaseModel):

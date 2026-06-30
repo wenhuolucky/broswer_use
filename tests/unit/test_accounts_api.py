@@ -324,6 +324,31 @@ def test_patch_account_returns_404_outside_group_scope(monkeypatch):
     assert response.json()["detail"]["code"] == "account_not_found"
 
 
+def test_patch_account_ignores_blank_optional_text_fields_from_api_client(monkeypatch):
+    store = FakeAccountStore()
+    agent = FakeAgent()
+    seed_account(store, agent, group_id="TianQW", group_text="测试组002", phone="19015896790", failures=3)
+    client = make_client(store, agent, monkeypatch)
+
+    response = client.patch(
+        "/accounts/toutiao/19015896790",
+        json={
+            "group_id": "TianQW",
+            "group_text": "测试组002",
+            "new_phone": "",
+            "status": "",
+            "reset_failures": True,
+            "consecutive_failures": 0,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["phone"] == "19015896790"
+    assert body["status"] == "normal"
+    assert body["consecutive_failures"] == 0
+
+
 def test_delete_account_refuses_busy_channel_without_force(monkeypatch):
     store = FakeAccountStore()
     agent = FakeAgent()
