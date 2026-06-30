@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI
 
 from app.api import publish_viewer_proxy, vnc_proxy
 from app.api.deps import agent
+from app.api.v1.accounts import account_store
 from app.api.v1.router import api_router
 from app.core.config import (
     PENDING_CHANNEL_SWEEP_INTERVAL_SECONDS,
@@ -76,6 +77,7 @@ async def lifespan(app: FastAPI):
     try:
         agent.job_store.ready()
         agent.channel_store.ready()
+        account_store.ready()
     except Exception as exc:
         _log.error("store is not ready: %s", exc, exc_info=True)
         raise

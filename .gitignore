@@ -40,7 +40,6 @@ ENV/
 .coverage.*
 htmlcov/
 .cache/
-tests/
 docs/
 
 # ---- IDE / editor ----
@@ -69,7 +68,7 @@ output.html
 debug_output.html
 test*.html
 test*.md
-test*.py
+/test*.py
 rich_paste.py
 run_rich_paste.bat
 
