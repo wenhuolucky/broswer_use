@@ -34,9 +34,20 @@ __all__ = [
 class JobCreatedResponse(BaseModel):
     job_id: str = Field(description="发文任务 ID")
     channel_id: str = Field(default="", description="发文渠道句柄")
-    status: str = Field(description="任务状态（原始内部状态，如 publishing/waiting_cookie/failed）")
-    # 仅 waiting_cookie 时有意义：让用户去这个流式浏览器地址完成登录。
-    live_url: str = Field(default="", description="远程登录流式浏览器地址（仅 waiting_cookie 时有值）")
+    status: str = Field(
+        description=(
+            "创建发文任务后返回的当前状态。常见值：queued、checking_cookie、waiting_cookie、"
+            "publishing、failed。Cookie 检查和等待登录状态请使用带 ing 的完整状态名。"
+        )
+    )
+    # waiting_cookie 时用于登录；publishing 时可能用于实时查看发文过程。
+    live_url: str = Field(
+        default="",
+        description=(
+            "状态相关的远程浏览器地址：waiting_cookie 时为登录地址，publishing 时可能为发文实时查看地址，"
+            "其余状态通常为空。"
+        ),
+    )
     # 仅 failed 时出现。
     error: ErrorInfo | None = None
 
@@ -59,12 +70,23 @@ class JobCreatedResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class JobResponse(BaseModel):
     job_id: str = Field(description="发文任务 ID")
-    status: str = Field(description="任务状态（原始内部状态，如 queued/publishing/waiting_cookie/succeeded/failed/cancelled）")
+    status: str = Field(
+        description=(
+            "发文任务状态。常见值：queued、checking_cookie、starting_remote_login、"
+            "waiting_cookie、publishing、succeeded、failed、cancelled。"
+        )
+    )
     channel_id: str = Field(default="", description="发文渠道句柄")
-    platform: str = Field(default="", description="平台标识")
+    platform: str = Field(default="", description="平台枚举值：toutiao、sohu；取不到时为空字符串。")
     title: str = Field(default="", description="文章标题")
     cover_image_url: str = Field(default="", description="封面图片 URL")
-    live_url: str = Field(default="", description="远程登录流式浏览器地址（login_required 时打开它完成登录；其余状态可用于服务端实时调试查看）")
+    live_url: str = Field(
+        default="",
+        description=(
+            "状态相关的远程浏览器地址：waiting_cookie 时为登录地址，publishing 时可能为发文实时查看地址，"
+            "终态通常为空。"
+        ),
+    )
     session_id: str = Field(default="", description="远程登录会话 ID（内部句柄，第三方集成可忽略）")
     article_url: str = Field(default="", description="发布成功后的文章链接")
     # 仅 failed 时出现；统一失败建模，不再有 reason/error 两个并存的字符串字段。

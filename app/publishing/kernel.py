@@ -90,6 +90,10 @@ class PublishService:
             "请求失败",
             "网络错误",
             "请重试",
+            "今日发布的文章已达上限",
+            "发布的文章已达上限",
+            "今日文章发布数量已达上限",
+            "每日文章发布数量限制",
         )
 
     def _platform(self):
@@ -1173,6 +1177,10 @@ class PublishService:
                 "   - 如果头条自动将正文第一张图片设为封面，保留即可。\n"
                 "   - 如果未自动匹配，选择'无封面'。\n"
                 "   - 不要主动去打开封面选择器或上传对话框。\n"
+                "   - 选择'无封面'只是封面设置步骤完成，不代表已经发布。\n"
+                "   - 选择'无封面'后，如果页面只显示“预览并发布”而没有“确认发布”，说明还没有进入最终确认层。\n"
+                "   - 必须先点击页面底部的“预览并发布”按钮，再点击弹出的最终确认层里的“确认发布”按钮。\n"
+                "   - 只有完成“确认发布”点击后，才允许调用 get_published_article_url 工具。\n"
             )
 
         plain_text = platform.strip_markdown(content) if is_markdown else content
@@ -1741,6 +1749,14 @@ class PublishService:
                     "attempts": attempt,
                     "reason": "",
                 }
+            if article_detail.get("reason"):
+                return {
+                    "found": False,
+                    "article_url": "",
+                    "matched_title": str(article_detail.get("detail_title", "") or ""),
+                    "attempts": attempt,
+                    "reason": str(article_detail.get("reason", "") or ""),
+                }
             if article_detail.get("detail_title"):
                 last_reason = (
                     f"第 {attempt} 次查询作品列表未匹配到同标题文章，"
@@ -1804,6 +1820,9 @@ class PublishService:
                         logger.warning("无法将最终结果解析为 JSON")
                     if history.is_successful():
                         result["success"] = True
+                    failure_reason = self._extract_failure_reason_from_text(str(final))
+                    if failure_reason:
+                        result["failure_reason"] = failure_reason
                     fallback_url = self._extract_article_url_from_text(str(final))
                     if fallback_url:
                         result["article_url"] = fallback_url
@@ -1834,6 +1853,32 @@ class PublishService:
             result["failure_reason"] = detected_failure.get("matched_text", "") or detected_failure.get("signal", "")
 
         return result
+
+    @staticmethod
+    def _extract_failure_reason_from_text(text: str) -> str:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return ""
+
+        labels = (
+            "失败原因：",
+            "失败原因:",
+            "发布失败原因：",
+            "发布失败原因:",
+            "Failure Reason:",
+            "Failure reason:",
+        )
+        for label in labels:
+            start = normalized.find(label)
+            if start < 0:
+                continue
+            reason = normalized[start + len(label):].strip()
+            for marker in ("\n\n", "\r\n\r\n", "当前文章状态：", "当前文章状态:", "建议：", "建议:"):
+                marker_index = reason.find(marker)
+                if marker_index >= 0:
+                    reason = reason[:marker_index].strip()
+            return " ".join(reason.split())
+        return ""
 
     @staticmethod
     def _build_post_confirm_lookup_result(lookup_result: dict) -> dict:

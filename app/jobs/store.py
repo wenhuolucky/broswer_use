@@ -6,7 +6,15 @@ from typing import Any
 
 from app.core.config import SQLITE_PATH
 from app.core.sqlite_store import SqliteStoreMixin, now_iso
-from app.domain.job import Job, STATUS_QUEUED
+from app.domain.job import (
+    Job,
+    STATUS_CHECKING_COOKIE,
+    STATUS_COOKIE_READY,
+    STATUS_PUBLISHING,
+    STATUS_QUEUED,
+    STATUS_STARTING_REMOTE_LOGIN,
+    STATUS_WAITING_COOKIE,
+)
 from app.utils.urls import normalize_article_url
 
 
@@ -52,6 +60,15 @@ _SELECT_COLUMNS = (
     "login_url, live_url, article_url, error, log_file_path, payload, result, "
     "created_at, updated_at"
 )
+
+EXECUTING_PUBLISH_STATUSES = {
+    STATUS_CHECKING_COOKIE,
+    STATUS_COOKIE_READY,
+    STATUS_STARTING_REMOTE_LOGIN,
+    STATUS_WAITING_COOKIE,
+    STATUS_PUBLISHING,
+}
+UNFINISHED_PUBLISH_STATUSES = EXECUTING_PUBLISH_STATUSES | {STATUS_QUEUED}
 
 
 def _job_type_from_payload(payload: dict[str, Any]) -> str:
@@ -212,6 +229,90 @@ class JobStore(SqliteStoreMixin):
                 params,
             ).fetchall()
         return [self._row_to_job(row) for row in rows]
+
+    def next_queued_publish_job(self, channel_id: str) -> Job | None:
+        """返回同一 channel 中最早创建的 queued publish job。"""
+        if self._conn is None:
+            with self._lock:
+                jobs = [
+                    job
+                    for job in self._jobs.values()
+                    if job.type == "publish"
+                    and job.status == STATUS_QUEUED
+                    and (job.payload or {}).get("channel_id") == channel_id
+                ]
+            jobs.sort(key=lambda job: job.created_at)
+            return jobs[0] if jobs else None
+
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM jobs "
+                "WHERE channel_id = ? AND type = 'publish' AND status = ? "
+                "ORDER BY created_at ASC LIMIT 1",
+                (channel_id, STATUS_QUEUED),
+            ).fetchone()
+        return self._row_to_job(row) if row else None
+
+    def has_executing_publish_job(self, channel_id: str) -> bool:
+        statuses = EXECUTING_PUBLISH_STATUSES
+        if self._conn is None:
+            with self._lock:
+                return any(
+                    job.type == "publish"
+                    and job.status in statuses
+                    and (job.payload or {}).get("channel_id") == channel_id
+                    for job in self._jobs.values()
+                )
+
+        placeholders = ", ".join("?" for _ in statuses)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM jobs "
+                f"WHERE channel_id = ? AND type = 'publish' AND status IN ({placeholders}) "
+                "LIMIT 1",
+                (channel_id, *statuses),
+            ).fetchone()
+        return row is not None
+
+    def count_unfinished_publish_jobs(self, channel_id: str) -> int:
+        statuses = UNFINISHED_PUBLISH_STATUSES
+        if self._conn is None:
+            with self._lock:
+                return sum(
+                    1
+                    for job in self._jobs.values()
+                    if job.type == "publish"
+                    and job.status in statuses
+                    and (job.payload or {}).get("channel_id") == channel_id
+                )
+
+        placeholders = ", ".join("?" for _ in statuses)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM jobs "
+                f"WHERE channel_id = ? AND type = 'publish' AND status IN ({placeholders})",
+                (channel_id, *statuses),
+            ).fetchone()
+        return int(row["count"] if row else 0)
+
+    def queued_publish_channel_ids(self) -> list[str]:
+        if self._conn is None:
+            with self._lock:
+                channel_ids = {
+                    str((job.payload or {}).get("channel_id", "") or "")
+                    for job in self._jobs.values()
+                    if job.type == "publish" and job.status == STATUS_QUEUED
+                }
+            return sorted(channel_id for channel_id in channel_ids if channel_id)
+
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT channel_id FROM jobs "
+                "WHERE type = 'publish' AND status = ? AND channel_id <> '' "
+                "ORDER BY channel_id ASC",
+                (STATUS_QUEUED,),
+            ).fetchall()
+        return [str(row["channel_id"] or "") for row in rows]
 
     # ------------------------------------------------------------------
     # SQLite internals

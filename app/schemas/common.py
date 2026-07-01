@@ -62,7 +62,7 @@ class HealthResponse(BaseModel):
 
 
 class PlatformInfo(BaseModel):
-    id: str = Field(description="平台标识", examples=["toutiao"])
+    id: str = Field(description="平台枚举值：toutiao、sohu。", examples=["toutiao"])
     name: str = Field(description="平台名称", examples=["toutiao"])
     home_url: str = Field(description="平台主页", examples=["https://mp.toutiao.com"])
     login_url: str = Field(

@@ -255,6 +255,12 @@ class ProxyAssignmentManager:
             logger.info(
                 f"[Proxy] 解除 {channel_id} 的 IP 绑定 (原 ip_index={old_ip_index})"
             )
+            return True
+        return False
+
+    def unassign_channel(self, channel_id: str) -> bool:
+        """解除 channel 的 IP 绑定，供账号删除等业务清理调用。"""
+        return self._unassign_channel(channel_id)
 
     def get_protocol_for(self, channel_id: str) -> str:
         """获取渠道对应 IP 池条目的协议（ip_pool 条目 protocol 覆盖 defaults）"""
