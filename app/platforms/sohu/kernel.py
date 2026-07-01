@@ -12,7 +12,8 @@ class AutoSohuPublishService(PublishService):
     """Sohu publishing service."""
 
     article_lookup_attempts = 3
-    article_lookup_retry_delay_seconds = 5
+    article_lookup_retry_delay_seconds = 2
+    article_candidate_poll_seconds = 5
 
     def __init__(self, account_id: str = ""):
         super().__init__()
@@ -58,22 +59,30 @@ class AutoSohuPublishService(PublishService):
                     f"{articles_url} | attempt={attempt}/{self.article_lookup_attempts}"
                 )
             await page.goto(articles_url)
-            await asyncio.sleep(3)
 
-            items = await self._extract_article_candidates(page, logger)
-            self._log_article_candidates(items, logger, attempt)
-            selected = self._select_candidate_article(items, expected_title)
-            if selected.get("article_url"):
+            selected = await self._probe_article_candidates(page, expected_title, logger, attempt)
+            if selected.get("matched") and selected.get("article_url"):
                 if logger:
                     logger.info(
                         "[PublishGuard] selected sohu title-matched article: "
-                        f"url={selected.get('article_url', '')} | text={selected.get('detail_title', '')}"
+                        "url=%s | status=%s | text=%s",
+                        selected.get("article_url", ""),
+                        selected.get("status", ""),
+                        selected.get("detail_title", ""),
                     )
                 return {
                     "matched": True,
                     "article_url": selected.get("article_url", ""),
                     "detail_title": selected.get("detail_title", ""),
+                    "status": selected.get("status", ""),
                 }
+            if selected.get("status") == "draft":
+                if logger:
+                    logger.warning(
+                        "[PublishGuard] sohu title-matched draft found; publish failed: text=%s",
+                        selected.get("detail_title", ""),
+                    )
+                return selected
 
             if logger:
                 logger.info(
@@ -83,7 +92,18 @@ class AutoSohuPublishService(PublishService):
             if attempt < self.article_lookup_attempts:
                 await asyncio.sleep(self.article_lookup_retry_delay_seconds)
 
-        return {"matched": False, "article_url": "", "detail_title": ""}
+        return {"matched": False, "article_url": "", "detail_title": "", "status": "", "reason": ""}
+
+    async def _probe_article_candidates(self, page, expected_title: str, logger, attempt: int) -> dict:
+        for poll_index in range(self.article_candidate_poll_seconds + 1):
+            if poll_index:
+                await asyncio.sleep(1)
+            items = await self._extract_article_candidates(page, logger)
+            self._log_article_candidates(items, logger, attempt, poll_index=poll_index)
+            selected = self._select_candidate_article(items, expected_title)
+            if selected.get("matched") or selected.get("status") == "draft":
+                return selected
+        return {"matched": False, "article_url": "", "detail_title": "", "status": "", "reason": ""}
 
     async def _extract_article_candidates(self, page, logger) -> list:
         items = await page.evaluate(
@@ -138,25 +158,46 @@ class AutoSohuPublishService(PublishService):
 
     def _select_candidate_article(self, items: list, expected_title: str) -> dict:
         dict_items = [item for item in items if isinstance(item, dict)]
+        draft_match = None
         for item in dict_items:
             item_text = str(item.get("text", "") or "").strip()
             item_href = str(item.get("href", "") or "").strip()
             if not item_href or not self._looks_like_sohu_article_url(item_href):
                 continue
-            if self._platform().title_matches(expected_title, item_text):
+            if not self._platform().title_matches(expected_title, item_text):
+                continue
+            status = self._candidate_publish_status(item_href, item_text)
+            if status == "draft":
+                draft_match = {
+                    "matched": False,
+                    "article_url": "",
+                    "detail_title": item_text,
+                    "status": "draft",
+                    "reason": "搜狐号文章仍为草稿，未发布成功",
+                }
+                continue
+            if status in {"reviewing", "published"} or self._is_final_sohu_article_url(item_href):
                 return {
+                    "matched": True,
                     "article_url": normalize_sohu_article_url(item_href, self._account_id()),
                     "detail_title": item_text,
+                    "status": status,
+                    "reason": "",
                 }
-        return {}
+        if draft_match:
+            return draft_match
+        return {"matched": False, "article_url": "", "detail_title": "", "status": "", "reason": ""}
 
-    def _log_article_candidates(self, items: list, logger, attempt: int) -> None:
+    def _log_article_candidates(self, items: list, logger, attempt: int, poll_index: int | None = None) -> None:
         if not logger:
             return
         dict_items = [item for item in items if isinstance(item, dict)]
         logger.info(
             "[PublishGuard] sohu article candidates extracted: "
-            f"count={len(dict_items)} | attempt={attempt}"
+            "count=%s | attempt=%s | poll=%s",
+            len(dict_items),
+            attempt,
+            "" if poll_index is None else poll_index,
         )
         if not dict_items:
             logger.warning("[PublishGuard] no sohu preview/article links found on content management page")
@@ -164,9 +205,14 @@ class AutoSohuPublishService(PublishService):
         for index, item in enumerate(dict_items[:5], start=1):
             href = str(item.get("href", "") or "").strip()
             text = self._compact_log_text(str(item.get("text", "") or ""))
+            status = self._candidate_publish_status(href, text)
             logger.info(
                 "[PublishGuard] sohu article candidate "
-                f"#{index}: href={href} | text={text}"
+                "#%s: status=%s | href=%s | text=%s",
+                index,
+                status,
+                href,
+                text,
             )
 
     @staticmethod
@@ -185,6 +231,19 @@ class AutoSohuPublishService(PublishService):
             if self._looks_like_sohu_article_url(cleaned_url):
                 return normalize_sohu_article_url(cleaned_url, self._account_id())
         return ""
+
+    @classmethod
+    def _candidate_publish_status(cls, href: str, text: str) -> str:
+        normalized_text = " ".join((text or "").split())
+        if "草稿" in normalized_text:
+            return "draft"
+        if any(marker in normalized_text for marker in ("审核中", "提交审核", "待审核")):
+            return "reviewing"
+        if cls._is_final_sohu_article_url(href) or any(
+            marker in normalized_text for marker in ("阅读", "评论")
+        ):
+            return "published"
+        return "unknown"
 
     def _parse_agent_outcome(self, history, tracker, logger, detected_failure: dict | None = None):
         result = super()._parse_agent_outcome(history, tracker, logger, detected_failure=detected_failure)
@@ -209,3 +268,7 @@ class AutoSohuPublishService(PublishService):
         if "mp.sohu.com" in url and "/news/articlepreview" in url and "id=" in url:
             return True
         return False
+
+    @staticmethod
+    def _is_final_sohu_article_url(url: str) -> bool:
+        return bool(url and "sohu.com/a/" in url and ("m.sohu.com" in url or "www.sohu.com" in url))

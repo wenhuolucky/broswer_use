@@ -1741,6 +1741,14 @@ class PublishService:
                     "attempts": attempt,
                     "reason": "",
                 }
+            if article_detail.get("reason"):
+                return {
+                    "found": False,
+                    "article_url": "",
+                    "matched_title": str(article_detail.get("detail_title", "") or ""),
+                    "attempts": attempt,
+                    "reason": str(article_detail.get("reason", "") or ""),
+                }
             if article_detail.get("detail_title"):
                 last_reason = (
                     f"第 {attempt} 次查询作品列表未匹配到同标题文章，"
