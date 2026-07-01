@@ -163,7 +163,7 @@ ip_pool:
 
 ### 信任模型（重要）
 
-完整的请求/响应结构以服务自带的交互式文档为准（基于 OpenAPI 自动生成，无需手工维护）：
+完整的请求/响应结构以服务自带的交互式文档为准（基于 OpenAPI 自动生成，无需手工维护）。Scalar 页面已尽量使用中文摘要、参数说明、字段说明、枚举值、必填项和默认值；代码随附文档用于补充流程语义和集成注意事项：
 
 - 交互式 API 文档（Scalar）：`GET /scalar`
 - OpenAPI 描述：`GET /openapi.json`
@@ -199,10 +199,18 @@ Authorization: Bearer <PUBLISH_API_TOKEN>
 | `GET` | `/api/v1/channels/{channel_id}` | 是 | 查询渠道状态（平台/账号名/cookie 是否有效） |
 | `GET` | `/api/v1/channels/{channel_id}/publish-status` | 是 | 查询渠道发文状态（idle/publishing + publish_count） |
 | `DELETE` | `/api/v1/channels/{channel_id}` | 是 | 删除渠道（含 cookie） |
+| `GET` | `/api/v1/accounts/all` | 是 | 列出指定 `group_id` 下的所有账号 |
+| `GET` | `/api/v1/accounts/available` | 是 | 列出指定 `group_id` 下的可用账号（仅排除 `disabled` / `muted`） |
+| `GET` | `/api/v1/accounts/{platform}/{phone}` | 是 | 查询指定账号详情 |
+| `PUT` | `/api/v1/accounts/{platform}/{phone}` | 是 | 保存或重新绑定账号到 channel |
+| `PATCH` | `/api/v1/accounts/{platform}/{phone}` | 是 | 修改账号手机号、状态、失败次数等持久字段 |
+| `DELETE` | `/api/v1/accounts/{platform}/{phone}` | 是 | 删除账号并清理关联 channel/cookie/proxy assignment |
 
 完整字段级说明见 `docs/api-reference.md`。
 
 发文（LLM 自动操作）与登录（真人手动操作）是两套独立资源：发文走 `/jobs`，登录走 `/login-sessions`，两者底层共用 Job 存储但在接口上互不可见（拿发文 `job_id` 去访问 `/login-sessions/*` 会得到 404，反之亦然）。
+
+账号管理接口使用调用方传入的 `group_id` 做分组/租户隔离，服务端 `.env` 不提供默认 `group_id`。凡文档标为必填的 `group_id` 都没有默认值：缺少该字段会由 FastAPI/OpenAPI 校验返回 `422`；传空字符串会返回业务错误 `400 missing_group_id`。
 
 典型流程（登录在先）：先 `POST /api/v1/login-sessions` 传 `platform`，拿到 `channel_id` 和 `live_url`，用户在 `live_url` 登录成功后 cookie 自动绑定到该渠道；之后 `POST /api/v1/jobs` 传 `channel_id` + 文章发文，若该渠道 cookie 已失效则自动重新登录同一渠道并续发；全程用 `GET /api/v1/jobs/{job_id}` 轮询状态。
 

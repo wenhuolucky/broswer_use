@@ -257,10 +257,24 @@ def test_put_account_requires_group_id_and_validates_channel_platform(monkeypatc
         json={"group_id": "tenant-a", "channel_id": "channel-a"},
     )
 
-    assert missing_group.status_code == 400
-    assert missing_group.json()["detail"]["code"] == "missing_group_id"
+    assert missing_group.status_code == 422
     assert mismatch.status_code == 409
     assert mismatch.json()["detail"]["code"] == "channel_platform_mismatch"
+
+
+def test_blank_account_group_id_returns_stable_error_code(monkeypatch):
+    store = FakeAccountStore()
+    agent = FakeAgent()
+    agent.add_channel("channel-a")
+    client = make_client(store, agent, monkeypatch)
+
+    response = client.put(
+        "/accounts/toutiao/13800138000",
+        json={"group_id": "", "channel_id": "channel-a"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "missing_group_id"
 
 
 def test_put_account_upserts_only_within_request_group(monkeypatch):
@@ -443,3 +457,36 @@ def test_account_openapi_contains_chinese_scalar_descriptions(monkeypatch):
     assert upsert_schema["properties"]["status"]["enum"] == ["normal", "warning", "muted", "disabled"]
     assert "空字符串按未提供处理" in patch_schema["properties"]["status"]["description"]
     assert response_schema["properties"]["platform"]["description"].startswith("平台枚举")
+
+
+def test_account_group_id_is_required_without_default_in_openapi(monkeypatch):
+    client = make_client(FakeAccountStore(), FakeAgent(), monkeypatch)
+
+    schema = client.get("/openapi.json").json()
+    all_params = {
+        param["name"]: param
+        for param in schema["paths"]["/accounts/all"]["get"]["parameters"]
+    }
+    available_params = {
+        param["name"]: param
+        for param in schema["paths"]["/accounts/available"]["get"]["parameters"]
+    }
+    detail_params = {
+        param["name"]: param
+        for param in schema["paths"]["/accounts/{platform}/{phone}"]["get"]["parameters"]
+    }
+    delete_params = {
+        param["name"]: param
+        for param in schema["paths"]["/accounts/{platform}/{phone}"]["delete"]["parameters"]
+    }
+    upsert_schema = schema["components"]["schemas"]["AccountUpsertRequest"]
+    patch_schema = schema["components"]["schemas"]["AccountPatchRequest"]
+
+    for params in (all_params, available_params, detail_params, delete_params):
+        assert params["group_id"]["required"] is True
+        assert "default" not in params["group_id"]["schema"]
+
+    assert "group_id" in upsert_schema["required"]
+    assert "default" not in upsert_schema["properties"]["group_id"]
+    assert "group_id" in patch_schema["required"]
+    assert "default" not in patch_schema["properties"]["group_id"]

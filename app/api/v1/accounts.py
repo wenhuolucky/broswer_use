@@ -113,7 +113,7 @@ def _account_response(account, *, include_channel: bool, include_runtime: bool) 
     ),
 )
 async def list_all_accounts(
-    group_id: str = Query(default="", description="必填。调用方传入的账号分组/租户 id；所有查询都会限制在该 group_id 下。"),
+    group_id: str = Query(..., description="必填。调用方传入的账号分组/租户 id；所有查询都会限制在该 group_id 下。"),
     platform: Platform | None = Query(default=None, description="可选。平台枚举值：toutiao、sohu；不传则不过滤平台。"),
     status: str | None = Query(
         default=None,
@@ -163,7 +163,7 @@ async def list_all_accounts(
     ),
 )
 async def list_available_accounts(
-    group_id: str = Query(default="", description="必填。调用方传入的账号分组/租户 id；所有查询都会限制在该 group_id 下。"),
+    group_id: str = Query(..., description="必填。调用方传入的账号分组/租户 id；所有查询都会限制在该 group_id 下。"),
     platform: Platform | None = Query(default=None, description="可选。平台枚举值：toutiao、sohu；不传则不过滤平台。"),
     group_text: str | None = Query(default=None, description="可选。响应展示兜底文本，不参与查询过滤和唯一性判断。"),
     include_channel: bool = Query(default=True, description="是否在每个账号中附带 channel 摘要。"),
@@ -209,7 +209,7 @@ async def list_available_accounts(
 async def get_account(
     platform: Platform = Path(description="平台枚举值：toutiao、sohu。"),
     phone: str = Path(description="账号标识。必须是 11 位手机号，且以 1 开头。"),
-    group_id: str = Query(default="", description="必填。调用方传入的账号分组/租户 id。"),
+    group_id: str = Query(..., description="必填。调用方传入的账号分组/租户 id。"),
     include_channel: bool = Query(default=True, description="是否附带 channel 摘要。"),
     include_runtime: bool = Query(default=False, description="是否实时查询发文状态；该状态不写入 article_accounts。"),
 ):
@@ -325,7 +325,7 @@ async def patch_account(
 async def delete_account(
     platform: Platform = Path(description="平台枚举值：toutiao、sohu。"),
     phone: str = Path(description="账号标识。必须是 11 位手机号，且以 1 开头。"),
-    group_id: str = Query(default="", description="必填。调用方传入的账号分组/租户 id。"),
+    group_id: str = Query(..., description="必填。调用方传入的账号分组/租户 id。"),
     force: bool = Query(default=False, description="有未完成 publish job 时是否强制取消后删除。"),
     delete_channel: bool = Query(default=True, description="是否同时删除关联 channel/cookie。"),
 ):

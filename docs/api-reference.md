@@ -4,6 +4,13 @@
 
 本文档描述当前代码中对外可用的 HTTP API。业务接口统一位于 `/api/v1` 前缀下，除 `/health` 外均需要 Bearer Token 鉴权。
 
+交互式文档：
+
+- Scalar：`GET /scalar`
+- OpenAPI JSON：`GET /openapi.json`
+
+Scalar 页面来自实时 OpenAPI schema，已包含中文接口摘要、参数说明、请求/响应字段说明、枚举值、必填项和默认值。本文档用于补充流程语义、状态说明和集成注意事项；若两者冲突，以当前代码生成的 OpenAPI 为准。
+
 ## 1. 通用约定
 
 ### 1.1 Base URL
@@ -347,10 +354,10 @@ Content-Type：`application/json`
 
 | 字段 | 类型 | 必填 | 限制/枚举 | 含义 |
 |---|---|:---:|---|---|
-| `channel_id` | string | 是 | `^[A-Za-z0-9_-]{1,64}$` | 发文渠道句柄 |
+| `channel_id` | string | 是 | `^[A-Za-z0-9_-]{1,64}$` | 发文渠道句柄，登录会话签发 |
 | `title` | string | 是 | 长度 `1..200` | 文章标题 |
-| `content` | string | 是 | 最小长度 `1` | 文章正文 |
-| `cover_image_url` | string 或 null | 否 | URL 字符串；代码未做 URL schema 强校验 | 封面图片 URL |
+| `content` | string | 是 | 最小长度 `1` | 文章正文，不能为空 |
+| `cover_image_url` | string 或 null | 否 | URL 字符串；代码未做 URL schema 强校验 | 封面图片 URL；不传或传 `null` 时不设置封面 |
 
 请求示例：
 
@@ -600,7 +607,7 @@ Content-Type：`application/json`
 
 | 字段 | 类型 | 必填 | 限制/枚举 | 含义 |
 |---|---|:---:|---|---|
-| `platform` | string | 否 | `toutiao` / `sohu`，默认 `toutiao` | 要登录的平台 |
+| `platform` | string | 否 | 枚举：`toutiao` / `sohu`；默认 `toutiao` | 要登录的平台；不传时登录 `toutiao` |
 
 请求示例：
 
@@ -896,7 +903,7 @@ Account API 只管理 `article_accounts` 表中的账号绑定、分组隔离和
 
 | HTTP 状态码 | code | 场景 |
 |---|---|---|
-| `400` | `missing_group_id` | 未传 `group_id` |
+| `400` | `missing_group_id` | `group_id` 为空字符串 |
 | `400` | `invalid_phone` | `phone` 或 `new_phone` 不是 11 位且以 1 开头 |
 | `400` | `invalid_account_status` | `status` 不是 `normal` / `warning` / `muted` / `disabled` |
 | `400` | `empty_account_patch` | PATCH 没有任何可修改字段 |
@@ -905,7 +912,7 @@ Account API 只管理 `article_accounts` 表中的账号绑定、分组隔离和
 | `409` | `channel_platform_mismatch` | path 中的 `platform` 与 channel 绑定的平台不一致 |
 | `409` | `account_phone_exists` | 同一 `group_id + platform` 下新手机号已存在 |
 | `409` | `account_busy` | 删除账号时仍有未完成 publish job，且 `force=false` |
-| `422` | FastAPI validation error | `platform` 不在枚举范围内，只能是 `toutiao` / `sohu` |
+| `422` | FastAPI validation error | 缺少必填字段，或 `platform` 不在枚举范围内，只能是 `toutiao` / `sohu` |
 | `503` | `account_store_unavailable` | MySQL 账号存储不可用 |
 | `503` | `publish_status_unavailable` | 查询运行时发文状态失败 |
 
@@ -1059,10 +1066,10 @@ Query 参数：
 
 | HTTP 状态码 | code | 场景 |
 |---|---|---|
-| `400` | `missing_group_id` | 未传 `group_id` |
+| `400` | `missing_group_id` | `group_id` 为空字符串 |
 | `400` | `invalid_phone` | `phone` 非 11 位手机号 |
 | `404` | `account_not_found` | 请求 `group_id` 下没有该账号 |
-| `422` | FastAPI validation error | `platform` 不在枚举范围内 |
+| `422` | FastAPI validation error | 缺少必填 `group_id`，或 `platform` 不在枚举范围内 |
 
 ### 10.4 PUT /api/v1/accounts/{platform}/{phone}
 
@@ -1102,7 +1109,7 @@ Path 参数同 `GET /api/v1/accounts/{platform}/{phone}`。
 校验规则：
 
 - `phone` 必须是 11 位且以 `1` 开头。
-- `group_id` 必填。
+- `group_id` 必填且没有默认值；缺少时返回 `422`，空字符串返回 `400 missing_group_id`。
 - `channel_id` 必须存在。
 - path 中的 `platform` 必须等于 channel 绑定的平台；否则返回 `409 channel_platform_mismatch`，不会写入账号表。
 - upsert 范围只限 `group_id + platform + phone`。
@@ -1174,6 +1181,7 @@ Path 参数同 `GET /api/v1/accounts/{platform}/{phone}`。
 规则：
 
 - path 中的 `platform + phone` 必须先在请求 `group_id` 下存在。
+- `group_id` 必填且没有默认值；缺少时返回 `422`，空字符串返回 `400 missing_group_id`。
 - `new_phone` 非空时必须是 11 位且以 `1` 开头。
 - 同一 `group_id + platform + new_phone` 已存在时返回 `409 account_phone_exists`。
 - `status=normal` 且未显式传 `reset_failures` 时，后端默认清零失败次数。
@@ -1197,6 +1205,7 @@ Query 参数：
 默认删除语义：
 
 - 请求 `group_id` 下必须存在该账号。
+- `group_id` 必填且没有默认值；缺少时返回 `422`，空字符串返回 `400 missing_group_id`。
 - 如果关联 channel 有未完成 publish job，`force=false` 返回 `409 account_busy`，不删除。
 - `force=true` 时，后端会尽量取消未完成 publish job。
 - 删除 `article_accounts` 记录。

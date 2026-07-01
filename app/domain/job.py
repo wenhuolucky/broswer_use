@@ -49,13 +49,21 @@ _EXAMPLE_COVER = "https://darizi.com.my/media/article/images/b58ce_a6cb2a1bdff0b
 class AutoPublishRequest(BaseModel):
     # 发文只认 channel_id：平台由该渠道解析，不再单独传 platform/user_id。
     channel_id: str = Field(
-        ..., min_length=1, description="渠道 ID（登录时由服务签发）",
+        ...,
+        min_length=1,
+        description="必填。渠道 ID，登录时由服务签发；必须先通过登录会话获得 channel_id。",
         examples=["3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c"],
     )
-    title: str = Field(..., min_length=1, max_length=200, description="文章标题", examples=[_EXAMPLE_TITLE])
-    content: str = Field(..., min_length=1, description="文章正文", examples=[_EXAMPLE_CONTENT])
+    title: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        description="必填。文章标题，长度 1..200。",
+        examples=[_EXAMPLE_TITLE],
+    )
+    content: str = Field(..., min_length=1, description="必填。文章正文，不能为空。", examples=[_EXAMPLE_CONTENT])
     cover_image_url: str | None = Field(
-        default=None, description="封面图片 URL", examples=[_EXAMPLE_COVER]
+        default=None, description="可选。封面图片 URL；不传或传 null 时不设置封面。", examples=[_EXAMPLE_COVER]
     )
 
     model_config = {
@@ -79,7 +87,11 @@ class AutoPublishRequest(BaseModel):
 
 class LoginRequest(BaseModel):
     # 登录只需平台：服务据此签发一个新的 channel_id。
-    platform: Platform = Field(default="toutiao", description="登录平台", examples=["toutiao"])
+    platform: Platform = Field(
+        default="toutiao",
+        description="可选。登录平台，枚举值：toutiao、sohu；不传时默认 toutiao。",
+        examples=["toutiao"],
+    )
 
     model_config = {
         "json_schema_extra": {"examples": [{"platform": "toutiao"}]}

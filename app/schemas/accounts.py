@@ -74,7 +74,7 @@ class AccountListResponse(BaseModel):
 
 class AccountUpsertRequest(BaseModel):
     group_id: str = Field(
-        default="",
+        ...,
         description="必填。调用方传入的账号分组/租户 id；服务端不会从 .env 读取 GROUP_ID。",
         examples=["TianQW"],
     )
@@ -96,7 +96,7 @@ class AccountUpsertRequest(BaseModel):
 
 class AccountPatchRequest(BaseModel):
     group_id: str = Field(
-        default="",
+        ...,
         description="必填。调用方传入的账号分组/租户 id；只会修改该 group_id 下的账号。",
         examples=["TianQW"],
     )

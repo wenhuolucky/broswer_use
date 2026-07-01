@@ -160,16 +160,30 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Browser Publish Service",
-    description="One-call publish service with automatic per-user cookie acquisition.",
+    title="浏览器发文服务 Browser Publish Service",
+    description="自动发文服务：提供登录会话、发文任务、渠道状态和账号管理 API。",
     version="2.0.0",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
+    openapi_tags=[
+        {"name": "service", "description": "服务存活检查。"},
+        {"name": "platforms", "description": "平台列表与平台枚举说明。"},
+        {"name": "jobs", "description": "发文任务：创建、查询、保存 cookie、取消。"},
+        {"name": "login-sessions", "description": "登录会话：创建、查询、取消真人远程登录会话。"},
+        {"name": "channels", "description": "渠道：查询 channel、实时发文状态、删除 channel。"},
+        {"name": "accounts", "description": "账号管理：按 group_id 管理账号、绑定 channel、维护持久状态。"},
+    ],
 )
 
 
-@app.get("/health", response_model=HealthResponse, tags=["service"])
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    tags=["service"],
+    summary="健康检查",
+    description="服务存活探针。返回 ok 表示 HTTP 服务进程可响应请求。",
+)
 async def health():
     return HealthResponse()
 

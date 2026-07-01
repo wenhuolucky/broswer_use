@@ -36,7 +36,9 @@ class LoginSessionCreatedResponse(BaseModel):
     session_id: str = Field(description="登录会话 ID")
     # 本次登录绑定/将绑定到的渠道句柄；登录成功后用它发文。
     channel_id: str = Field(default="", description="登录绑定的渠道句柄")
-    status: str = Field(description="登录会话状态（原始内部状态，如 waiting_cookie/failed）")
+    status: str = Field(
+        description="登录会话状态。常见值：waiting_cookie、succeeded、failed、cancelled。"
+    )
     # 让用户去这个流式浏览器地址完成登录。
     live_url: str = Field(default="", description="远程登录流式浏览器地址")
     # 仅 failed 时出现。
@@ -62,10 +64,8 @@ class LoginSessionCreatedResponse(BaseModel):
 class LoginSessionResponse(BaseModel):
     session_id: str = Field(description="登录会话 ID")
     channel_id: str = Field(default="", description="登录绑定的渠道句柄")
-    status: str = Field(
-        description="登录会话状态（原始内部状态，如 waiting_cookie/succeeded/failed/cancelled）"
-    )
-    platform: str = Field(default="", description="平台标识")
+    status: str = Field(description="登录会话状态。常见值：waiting_cookie、succeeded、failed、cancelled。")
+    platform: str = Field(default="", description="平台枚举值：toutiao、sohu；取不到时为空字符串。")
     live_url: str = Field(default="", description="远程登录流式浏览器地址")
     # 仅 failed 时出现。
     error: ErrorInfo | None = None

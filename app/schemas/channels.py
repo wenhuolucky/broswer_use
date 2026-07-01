@@ -26,8 +26,8 @@ __all__ = [
 # ---------------------------------------------------------------------------
 class ChannelResponse(BaseModel):
     channel_id: str = Field(description="渠道句柄")
-    platform: str = Field(default="", description="平台标识")
-    status: str = Field(description="pending | bound | invalid")
+    platform: str = Field(default="", description="平台枚举值：toutiao、sohu；取不到时为空字符串。")
+    status: str = Field(description="channel 状态。pending 表示等待登录；bound 表示已绑定账号；invalid 表示不可用。")
     account_name: str = Field(default="", description="平台账号名")
     has_valid_cookie: bool = Field(default=False, description="cookie 是否仍有效")
     created_at: str = Field(default="", description="创建时间")
@@ -63,7 +63,7 @@ class ChannelDeleteResponse(BaseModel):
 
 class ChannelPublishStatusResponse(BaseModel):
     channel_id: str = Field(description="渠道句柄")
-    account_status: str = Field(description="账号发文状态：idle | publishing")
+    account_status: str = Field(description="账号发文状态。idle 表示空闲；publishing 表示正在发文或队列中。")
     publish_count: int = Field(ge=0, description="该渠道未完成 publish job 数量，包含执行中和排队中")
 
     model_config = ConfigDict(
