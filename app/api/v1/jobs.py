@@ -31,6 +31,9 @@ async def create_publish_job(request: CreatePublishJobRequest):
     if resp.code == 404:
         detail = str((resp.data or {}).get("error_detail") or "") or "渠道不存在，请先登录"
         raise HTTPException(status_code=404, detail=detail)
+    if resp.code == 422:
+        detail = str((resp.data or {}).get("error_detail") or "") or resp.message or "请求参数不合法"
+        raise HTTPException(status_code=422, detail=detail)
     return job_created_from(resp)
 
 

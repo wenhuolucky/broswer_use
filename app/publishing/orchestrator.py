@@ -82,6 +82,17 @@ class PublishAgent:
                 status=STATUS_FAILED,
             )
 
+        title_error = self._validate_title_for_platform(channel.platform, request.title)
+        if title_error:
+            return self._task_response(
+                "",
+                title_error,
+                code=422,
+                channel_id=request.channel_id,
+                error_detail=title_error,
+                status=STATUS_FAILED,
+            )
+
         payload = request.model_dump()
         payload["platform"] = channel.platform
         job = self.job_store.create(payload)
@@ -124,6 +135,18 @@ class PublishAgent:
             "任务创建成功，发布任务正在后台执行",
             channel_id=request.channel_id,
         )
+
+    @staticmethod
+    def _validate_title_for_platform(platform: str, title: str) -> str:
+        limits = {
+            "toutiao": (2, 30),
+            "sohu": (5, 72),
+        }
+        title_length = len((title or "").strip())
+        minimum, maximum = limits.get((platform or "").strip(), (1, 200))
+        if title_length < minimum or title_length > maximum:
+            return "标题长度不符合要求"
+        return ""
 
     # ------------------------------------------------------------------
     # Login-only / re-login

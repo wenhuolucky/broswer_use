@@ -58,7 +58,7 @@ class AutoPublishRequest(BaseModel):
         ...,
         min_length=1,
         max_length=200,
-        description="必填。文章标题，长度 1..200。",
+        description="必填。文章标题；头条号长度 2..30 个字，搜狐号长度 5..72 个字。",
         examples=[_EXAMPLE_TITLE],
     )
     content: str = Field(..., min_length=1, description="必填。文章正文，不能为空。", examples=[_EXAMPLE_CONTENT])

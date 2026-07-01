@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from app.domain.channel import Channel, STATUS_CHANNEL_BOUND
-from app.domain.job import AutoPublishRequest, STATUS_CANCELLED, STATUS_PUBLISHING, STATUS_QUEUED
+from app.domain.job import AutoPublishRequest, STATUS_CANCELLED, STATUS_CHECKING_COOKIE, STATUS_PUBLISHING, STATUS_QUEUED
 from app.domain.job import STATUS_FAILED
 from app.domain.job import STATUS_WAITING_COOKIE
 from app.jobs.store import JobStore
@@ -13,11 +13,11 @@ from app.publishing.orchestrator import PublishAgent
 
 
 class FakeChannelStore:
-    def __init__(self, *channel_ids: str):
+    def __init__(self, *channel_ids: str, platform: str = "toutiao"):
         self.channels = {
             channel_id: Channel(
                 channel_id=channel_id,
-                platform="toutiao",
+                platform=platform,
                 status=STATUS_CHANNEL_BOUND,
                 cookie={"cookies": [{"name": "sessionid", "value": "ok"}], "origins": []},
             )
@@ -86,6 +86,64 @@ class FakeRemoteRunner:
 
 def make_request(channel_id: str, title: str) -> AutoPublishRequest:
     return AutoPublishRequest(channel_id=channel_id, title=title, content="正文")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("platform", "title"),
+    [
+        ("toutiao", "短"),
+        ("toutiao", "头" * 31),
+        ("sohu", "短题"),
+        ("sohu", "搜" * 73),
+    ],
+)
+async def test_publish_rejects_platform_title_length_out_of_range(platform: str, title: str):
+    agent = PublishAgent(
+        job_store=JobStore(path=""),
+        channel_store=FakeChannelStore("channel-a", platform=platform),
+        publish_adapter=BlockingPublishAdapter(),
+        remote_runner=object(),
+    )
+
+    response = await agent.submit(make_request("channel-a", title))
+
+    assert response.code == 422
+    assert response.message == "标题长度不符合要求"
+    assert response.data["status"] == STATUS_FAILED
+    assert response.data["error_detail"] == "标题长度不符合要求"
+    assert agent.job_store.list_jobs() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("platform", "title"),
+    [
+        ("toutiao", "头" * 2),
+        ("toutiao", "头" * 30),
+        ("sohu", "搜" * 5),
+        ("sohu", "搜" * 72),
+    ],
+)
+async def test_publish_accepts_platform_title_length_boundaries(platform: str, title: str):
+    adapter = BlockingPublishAdapter()
+    agent = PublishAgent(
+        job_store=JobStore(path=""),
+        channel_store=FakeChannelStore("channel-a", platform=platform),
+        publish_adapter=adapter,
+        remote_runner=object(),
+    )
+
+    response = await agent.submit(make_request("channel-a", title))
+    await asyncio.sleep(0)
+
+    assert response.code == 200
+    assert response.data["status"] in {STATUS_CHECKING_COOKIE, STATUS_PUBLISHING}
+    assert len(agent.job_store.list_jobs()) == 1
+
+    await wait_until(lambda: assert_started(adapter, [response.data["job_id"]]))
+    adapter.release.set()
+    await asyncio.gather(*list(agent._background_tasks))
 
 
 async def wait_until(assertion, attempts: int = 20) -> None:

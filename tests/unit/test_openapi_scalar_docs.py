@@ -61,6 +61,8 @@ def test_request_and_response_schemas_explain_required_fields_and_enums_in_chine
     assert publish_request["required"] == ["channel_id", "title", "content"]
     assert "必填" in publish_request["properties"]["channel_id"]["description"]
     assert "必填" in publish_request["properties"]["title"]["description"]
+    assert "头条号长度 2..30" in publish_request["properties"]["title"]["description"]
+    assert "搜狐号长度 5..72" in publish_request["properties"]["title"]["description"]
     assert "可选" in publish_request["properties"]["cover_image_url"]["description"]
 
     assert login_request["properties"]["platform"]["enum"] == ["toutiao", "sohu"]

@@ -355,7 +355,7 @@ Content-Type：`application/json`
 | 字段 | 类型 | 必填 | 限制/枚举 | 含义 |
 |---|---|:---:|---|---|
 | `channel_id` | string | 是 | `^[A-Za-z0-9_-]{1,64}$` | 发文渠道句柄，登录会话签发 |
-| `title` | string | 是 | 长度 `1..200` | 文章标题 |
+| `title` | string | 是 | 头条号 `2..30` 个字；搜狐号 `5..72` 个字 | 文章标题，不符合平台长度要求时直接返回 `标题长度不符合要求` |
 | `content` | string | 是 | 最小长度 `1` | 文章正文，不能为空 |
 | `cover_image_url` | string 或 null | 否 | URL 字符串；代码未做 URL schema 强校验 | 封面图片 URL；不传或传 `null` 时不设置封面 |
 
@@ -426,7 +426,7 @@ Content-Type：`application/json`
 |---|---|---|
 | `401` | token 缺失或错误 | `{"detail":"unauthorized"}` |
 | `404` | `channel_id` 不存在 | `{"detail":"channel not found"}` 或 `{"detail":"渠道不存在，请先登录"}` |
-| `422` | 请求体字段校验失败，如 `title` 为空、`channel_id` 非法 | FastAPI validation error |
+| `422` | 请求体字段校验失败，如 `title` 为空、标题长度不符合平台要求、`channel_id` 非法 | FastAPI validation error 或 `标题长度不符合要求` |
 
 ### 7.2 GET /api/v1/jobs/{job_id}
 
