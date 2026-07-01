@@ -31,8 +31,7 @@ ENV/
 .uv/
 
 # ---- Test / type / lint caches ----
-# 注意：只忽略缓存，不忽略 tests/ 本身——测试代码需要纳入版本控制。
-# （tests/ 在 .dockerignore 中排除，不进运行镜像即可。）
+tests/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
