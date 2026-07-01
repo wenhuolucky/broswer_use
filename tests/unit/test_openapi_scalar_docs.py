@@ -75,6 +75,16 @@ def test_request_and_response_schemas_explain_required_fields_and_enums_in_chine
     assert "枚举值：toutiao、sohu" in platform_info["properties"]["id"]["description"]
 
 
+def test_create_job_status_docs_use_actual_cookie_status_names():
+    schema = app.openapi()
+    description = schema["components"]["schemas"]["JobCreatedResponse"]["properties"]["status"]["description"]
+
+    assert "checking_cookie" in description
+    assert "waiting_cookie" in description
+    assert "check_cookie" not in description
+    assert "wait_cookie" not in description
+
+
 def test_service_openapi_title_tags_and_health_are_chinese_friendly():
     schema = app.openapi()
 

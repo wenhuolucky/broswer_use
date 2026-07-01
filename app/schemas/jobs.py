@@ -36,8 +36,8 @@ class JobCreatedResponse(BaseModel):
     channel_id: str = Field(default="", description="发文渠道句柄")
     status: str = Field(
         description=(
-            "发文任务状态。常见值：queued、checking_cookie、starting_remote_login、"
-            "waiting_cookie、publishing、succeeded、failed、cancelled。"
+            "创建发文任务后返回的当前状态。常见值：queued、checking_cookie、waiting_cookie、"
+            "publishing、failed。Cookie 检查和等待登录状态请使用带 ing 的完整状态名。"
         )
     )
     # waiting_cookie 时用于登录；publishing 时可能用于实时查看发文过程。

@@ -384,7 +384,9 @@ Content-Type：`application/json`
 
 注意：`POST /api/v1/jobs` 返回较早，若状态为 `publishing`，创建响应中的 `live_url` 可能暂时为空；发文实时查看入口生成后，可通过 `GET /api/v1/jobs/{job_id}` 读取最新 `live_url`。
 
-可能成功状态：
+创建响应中 `status` 的常见值：
+
+注意：Cookie 检查和等待登录状态请使用带 `ing` 的完整状态名：`checking_cookie`、`waiting_cookie`。
 
 | status | 含义 | 调用方下一步 |
 |---|---|---|
@@ -392,7 +394,7 @@ Content-Type：`application/json`
 | `checking_cookie` | 任务已被领取，正在检查 cookie | 轮询 `GET /jobs/{job_id}` |
 | `publishing` | 正在自动化发文；`live_url` 生成后可用于实时查看发文过程 | 轮询 `GET /jobs/{job_id}` |
 | `waiting_cookie` | 需要用户登录，`live_url` 有值 | 打开 `live_url` 登录；登录成功后继续轮询或调用 save-cookie |
-| `failed` | 创建后立即失败 | 查看 `error` |
+| `failed` | 创建后立即失败，例如远程登录启动失败 | 查看 `error` |
 
 示例：排队中
 
