@@ -59,8 +59,8 @@ class ToutiaoPlatform(PlatformConfig):
 5. 聚焦正文编辑器，调用 `paste_rich_html_body`，确认返回 ok=true 且 probe_found=true。
 6. {cover_instruction.strip()}
 7. 只有页面明确显示分类等字段必填时才补齐；没有明确必填提示时不要反复滚动寻找分类。
-8. 点击“预览并发布”，再点击“确认发布”。
-9. 点击“确认发布”后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done。
+8. 点击“预览并发布”，再点击“确认发布”。点击“确认发布”前必须先调用 prepare_publish_observer。
+9. 点击“确认发布”后进入发布结果观察阶段，按下方规则处理。
 """
 
     def _tool_plain_text_prompt(self, title: str, content: str, cover_instruction: str) -> str:
@@ -87,29 +87,33 @@ class ToutiaoPlatform(PlatformConfig):
 5. 聚焦正文编辑器，调用 `paste_plain_text_body`，确认返回 ok=true 且 probe_found=true。
 6. {cover_instruction.strip()}
 7. 只有页面明确显示分类等字段必填时才补齐；没有明确必填提示时不要反复滚动寻找分类。
-8. 点击“预览并发布”，再点击“确认发布”。
-9. 点击“确认发布”后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done。
+8. 点击“预览并发布”，再点击“确认发布”。点击“确认发布”前必须先调用 prepare_publish_observer。
+9. 点击“确认发布”后进入发布结果观察阶段，按下方规则处理。
 """
 
     def _with_url_tool_rule(self, prompt: str, title: str) -> str:
         return prompt + f"""
 
-发布后 URL 获取硬性规则：
-- 点击“确认发布”后，不要直接调用 done。
-- 点击“确认发布”后不要再次点击“预览并发布”或“确认发布”，即使页面停留在发布页、loading、骨架屏或没有成功提示。
-- 点击“确认发布”后，直接调用 get_published_article_url 工具，参数 title="{title}"。
-- 该工具会在内部最多查询 3 次作品列表。
-- 如果工具返回 found=true，必须用工具返回的 article_url 调用 done，并返回 success=true。
-- found=true 时 article_url 不允许为空，必须原样填写工具返回的 article_url。
-- 如果工具返回 found=false，必须用工具返回的 reason 调用 done，并返回 success=false。
-- 不要在工具返回 found=false 后继续反复查询。
+发布结果观察阶段：
+- 点击最终发布按钮前，必须先调用 prepare_publish_observer。
+- 点击“确认发布”后不要立刻调用 get_published_article_url，也不要立刻 done。
+- 点击“确认发布”后不要再次点击“预览并发布”或“确认发布”，除非你已经根据页面提示修复了一个可恢复问题并准备重新提交。
+- 点击后调用 observe_publish_result(wait_seconds=6)，读取短暂提示缓存和当前页面证据。
+- 你需要根据页面原文和上下文自行判断：成功、可恢复失败、不可恢复失败或不确定。
+- 成功信号可以是页面表达已发布、提交成功、进入审核、跳转/进入作品管理页，或出现本次文章的明确成功证据。
+- 如果判断已经成功但页面没有直接给出文章 URL，再调用 get_published_article_url(title="{title}")。
+- 如果工具返回 found=true，必须用工具返回的 article_url 调用 done，并返回 success=true；article_url 不允许为空。
+- 如果判断是可恢复失败，按页面原文修复缺失字段、分类、封面或协议勾选等问题后重新发布；同一个问题最多修复 2 次。
+- 如果判断是不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
+- reason 优先使用页面原文或最接近页面原文的失败原因；调用 finish_publish_failed 后不要继续操作。
+- 如果达到观察上限仍无法确认发布结果，调用 finish_publish_failed，reason 写“无法确认发布结果”，evidence 写入 observe_publish_result 的关键证据。
 """
 
     def _agent_recovery_rules(self) -> str:
         return """Agent 执行规则：
 - 你是自主 Agent，不是固定 workflow。遇到轻微、可恢复的问题时，可以自己判断并恢复，例如按钮暂时不可点、弹窗遮挡、页面加载慢、输入框未聚焦、分类未选择、预览弹窗未出现等。
 - 同一个可恢复问题最多尝试 2 次。第 2 次仍然失败时，停止并调用 done 返回失败 JSON，不要继续循环。
-- 遇到不可恢复问题时不要重试，立即调用 done 返回失败 JSON。不可恢复问题包括：账号被禁言、账号异常、账号无发布权限、登录失效、需要重新登录、验证码/风控验证、内容违规/审核拦截、平台明确提示禁止发布、网络长时间不可用。
+- 遇到不可恢复问题时不要重试；如果已经进入发布结果观察阶段，必须调用 finish_publish_failed(reason=..., evidence=...) 结构化终止。不可恢复问题包括：账号被禁言、账号异常、账号无发布权限、登录失效、需要重新登录、验证码/风控验证、内容违规/审核拦截、平台明确提示禁止发布、网络长时间不可用。
 - 如果页面异常回到首页、登录页、发布页初始状态，且没有明确的“发布成功/提交成功/文章已发布”证据，不要认为已经发布成功；先尝试恢复到当前步骤，最多 2 次，仍无法确认则返回失败。
 - 不要因为已经点击“确认发布”就直接认为成功。只有看到明确成功提示、文章管理页出现同标题文章、或拿到有效文章 URL，才返回 success=true。
 - 如果页面没有明确提示分类必填，不要为了寻找分类反复滚动；不要因为找不到分类而阻塞发布。
@@ -181,9 +185,8 @@ async (htmlContent) => {{
 12. 绝对不要使用 `innerHTML` 或任何 DOM 注入方式伪造粘贴成功。
 13. {cover_instruction.strip()}
 14. 只有页面明确显示分类等字段必填时才补齐；如果没有明确必填提示，不要反复滚动寻找分类。
-15. 点击“预览并发布”，再点击“确认发布”。
-16. 点击“确认发布”后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
-    {{"success": true, "account_name": "步骤3读到的账号名", "article_url": "工具返回的 article_url", "failure_reason": ""}}
+15. 点击“预览并发布”前调用 prepare_publish_observer，然后点击“预览并发布”，再点击“确认发布”。
+16. 点击“确认发布”后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。成功但没有文章 URL 时再调用 get_published_article_url 工具；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
 
 完整 HTML 长度：{html_length} 字符
 
@@ -208,9 +211,8 @@ async (htmlContent) => {{
 5. 找到正文编辑器，粘贴或输入正文内容。
 6. {cover_instruction.strip()}
 7. 只有页面明确显示分类等字段必填时才补齐；如果没有明确必填提示，不要反复滚动寻找分类。
-8. 点击“预览并发布”，再点击“确认发布”。
-9. 点击“确认发布”后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
-   {{"success": true, "account_name": "步骤2读到的账号名", "article_url": "工具返回的 article_url", "failure_reason": ""}}
+8. 点击“预览并发布”前调用 prepare_publish_observer，然后点击“预览并发布”，再点击“确认发布”。
+9. 点击“确认发布”后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。成功但没有文章 URL 时再调用 get_published_article_url 工具；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
 
 正文长度：{content_length} 字符
 正文预览：{content_preview}
@@ -260,7 +262,6 @@ async (bodyText) => {{
 </content>
 6. {cover_instruction.strip()}
 7. 只有页面明确显示分类等字段必填时才补齐；如果没有明确必填提示，不要反复滚动寻找分类。
-8. 点击“预览并发布”，再点击“确认发布”。
-9. 点击“确认发布”后不要等待页面成功提示，也不要重复点击发布按钮；直接调用 get_published_article_url 工具，并用工具返回的 article_url 调用 done，返回合法 JSON 字符串：
-   {{"success": true, "account_name": "步骤2读到的账号名", "article_url": "工具返回的 article_url", "failure_reason": ""}}
+8. 点击“预览并发布”前调用 prepare_publish_observer，然后点击“预览并发布”，再点击“确认发布”。
+9. 点击“确认发布”后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。成功但没有文章 URL 时再调用 get_published_article_url 工具；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
 """

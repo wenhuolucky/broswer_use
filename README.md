@@ -42,11 +42,11 @@ cp .env.example .env
 LLM_API_KEY=your_qwen_key
 LLM_BASE_URL=http://47.242.205.13:8110/v1
 LLM_MODEL=Qwen/Qwen3.5-397B-A17B
-BROWSER_USE_VISION=auto
+BROWSER_USE_VISION=true
 BROWSER_USE_VISION_DETAIL=low
 ```
 
-`BROWSER_USE_VISION` 支持 `auto`、`true`、`false`；默认 `auto`，便于使用多模态模型时按需启用截图输入。`BROWSER_USE_VISION_DETAIL` 支持 `low`、`high`、`auto`，默认 `low` 以控制图片负载。
+`BROWSER_USE_VISION` 支持 `auto`、`true`、`false`；发布 agent 默认 `true`，确保 browser-use 每步截图会进入支持视觉的 LLM 输入，便于识别短暂弹窗、toast 和页面异常。`BROWSER_USE_VISION_DETAIL` 支持 `low`、`high`、`auto`，默认 `low` 以控制图片负载。
 
 搜狐号发布会把后台预览链接转换为 `https://www.sohu.com/a/{article_id}_{account_id}`。其中的搜狐号数字 id 按渠道存在各 channel 的 `metadata`（`account_number`）里，登录期抓取。
 
