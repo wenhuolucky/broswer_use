@@ -1127,8 +1127,8 @@ class PublishService:
             )
 
         @controller.action(
-            "当你根据页面原文和上下文判断这是不可恢复发布失败时必须调用。"
-            "reason 优先填写页面原文，evidence 可填写 observe_publish_result 返回的关键证据；"
+            "任意阶段当你根据页面原文和上下文判断这是不可恢复问题或不可恢复失败时必须调用。"
+            "reason 优先填写页面原文，evidence 可填写页面证据、当前阶段、已执行动作或 observe_publish_result 返回的关键证据；"
             "调用后任务立即以失败结束，不要继续点击或调用其他发布相关工具。"
         )
         async def finish_publish_failed(reason: str, evidence: str = "", browser_session=None):

@@ -57,6 +57,23 @@ PUBLISH_OBSERVER_SCRIPT = r"""() => {
     }
   };
 
+  const messageSelectors = [
+    '[role="alert"]',
+    '[aria-live]',
+    '.toast',
+    '.message',
+    '.modal',
+    '.error',
+    '.ant-message',
+    '.ant-modal',
+    '.semi-toast',
+    '.semi-modal',
+    '.byte-message',
+    '.byte-modal',
+    '.el-message',
+    '.el-message__content'
+  ].join(',');
+
   window.__publishResultSignals = window.__publishResultSignals || window[globalKey];
 
   if (window.__publishResultSignals && window.__publishResultSignals.observerInstalled) {
@@ -81,12 +98,21 @@ PUBLISH_OBSERVER_SCRIPT = r"""() => {
       if (mutation.type === 'characterData') {
         pushSignal(mutation.target && mutation.target.textContent, mutation.target && mutation.target.parentElement);
       }
+      if (mutation.type === 'attributes') {
+        const target = mutation.target;
+        if (target && target.nodeType === 1) {
+          pushSignal(target.innerText || target.textContent || '', target);
+          if (target.matches && target.matches(messageSelectors)) {
+            pushSignal(target.innerText || target.textContent || '', target);
+          }
+        }
+      }
       for (const node of Array.from(mutation.addedNodes || [])) {
         if (!node) continue;
         const text = node.innerText || node.textContent || '';
         pushSignal(text, node);
         if (node.querySelectorAll) {
-          for (const child of Array.from(node.querySelectorAll('[role="alert"],[aria-live],.toast,.message,.modal,.error,.ant-message,.ant-modal,.semi-toast,.semi-modal,.byte-message,.byte-modal'))) {
+          for (const child of Array.from(node.querySelectorAll(messageSelectors))) {
             pushSignal(child.innerText || child.textContent || '', child);
           }
         }
@@ -95,7 +121,13 @@ PUBLISH_OBSERVER_SCRIPT = r"""() => {
   });
 
   if (document.body) {
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["class", "style", "hidden", "aria-hidden"]
+    });
     window.__publishResultSignals.observer = observer;
   }
 
@@ -159,6 +191,8 @@ PUBLISH_OBSERVATION_SCRIPT = r"""(articleTitle) => {
     '.ant-message',
     '.semi-toast',
     '.byte-message',
+    '.el-message',
+    '.el-message__content',
     '.notice',
     '.notification'
   ].join(',');
