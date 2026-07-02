@@ -100,10 +100,10 @@ class ToutiaoPlatform(PlatformConfig):
 - 点击“确认发布”后不要再次点击“预览并发布”或“确认发布”，除非你已经根据页面提示修复了一个可恢复问题并准备重新提交。
 - 点击后调用 observe_publish_result(wait_seconds=6)，读取短暂提示缓存和当前页面证据。
 - 你需要根据页面原文和上下文自行判断：成功、可恢复失败、不可恢复失败或不确定。
-- 成功信号可以是页面表达已发布、提交成功、进入审核、跳转/进入作品管理页，或出现本次文章的明确成功证据。
-- 如果判断已经成功但页面没有直接给出文章 URL，再调用 get_published_article_url(title="{title}")。
-- 如果工具返回 found=true，必须用工具返回的 article_url 调用 done，并返回 success=true；article_url 不允许为空。
-- 如果判断是可恢复失败，按页面原文修复缺失字段、分类、封面或协议勾选等问题后重新发布；同一个问题最多修复 2 次。
+- 成功信号可以是页面表达已发布、提交成功、进入审核，或出现与本次文章相关的明确成功证据；不要只依赖某一个固定页面或固定 URL 形态。
+- 如果判断已经成功但页面没有直接给出文章 URL，且当前任务需要 article_url，可调用 get_published_article_url(title="{title}") 尝试补充 URL。
+- 如果该工具暂未找到 URL，不等同于发布失败；继续结合页面证据判断。
+- 如果判断是可恢复失败，按页面原文修复缺失字段、分类、封面或协议勾选等问题后重新发布；同一个问题可以短暂重试，但不要机械循环。
 - 如果判断是不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
 - reason 优先使用页面原文或最接近页面原文的失败原因；调用 finish_publish_failed 后不要继续操作。
 - 如果达到观察上限仍无法确认发布结果，调用 finish_publish_failed，reason 写“无法确认发布结果”，evidence 写入 observe_publish_result 的关键证据。
@@ -113,9 +113,9 @@ class ToutiaoPlatform(PlatformConfig):
         return """Agent 执行规则：
 - 你是自主 Agent，不是固定 workflow。遇到轻微、可恢复的问题时，可以自己判断并恢复，例如按钮暂时不可点、弹窗遮挡、页面加载慢、输入框未聚焦、分类未选择、预览弹窗未出现等。
 - 同一个可恢复问题最多尝试 2 次。第 2 次仍然失败时，停止并调用 done 返回失败 JSON，不要继续循环。
-- 遇到不可恢复问题时不要重试；如果已经进入发布结果观察阶段，必须调用 finish_publish_failed(reason=..., evidence=...) 结构化终止。不可恢复问题包括：账号被禁言、账号异常、账号无发布权限、登录失效、需要重新登录、验证码/风控验证、内容违规/审核拦截、平台明确提示禁止发布、网络长时间不可用。
+- 遇到页面明确表达当前流程无法继续的不可恢复问题时不要重试；如果已经进入发布结果观察阶段，必须调用 finish_publish_failed(reason=..., evidence=...) 结构化终止。是否不可恢复由你根据页面原文和上下文判断，不要依赖固定异常清单。
 - 如果页面异常回到首页、登录页、发布页初始状态，且没有明确的“发布成功/提交成功/文章已发布”证据，不要认为已经发布成功；先尝试恢复到当前步骤，最多 2 次，仍无法确认则返回失败。
-- 不要因为已经点击“确认发布”就直接认为成功。只有看到明确成功提示、文章管理页出现同标题文章、或拿到有效文章 URL，才返回 success=true。
+- 不要因为已经点击“确认发布”就直接认为成功。只有看到明确成功提示、进入审核/提交成功状态、出现本次文章的明确证据，或拿到有效文章 URL，才返回 success=true。
 - 如果页面没有明确提示分类必填，不要为了寻找分类反复滚动；不要因为找不到分类而阻塞发布。
 - 如果点击“预览并发布”后页面明确提示分类/字段必填，再按页面提示补齐；没有提示时继续确认发布。
 - 处理封面时，不要点击文章正文区域的“预览”按钮；只有进入发布前最终确认时才点击“预览并发布”。
@@ -123,8 +123,7 @@ class ToutiaoPlatform(PlatformConfig):
 - 输入标题必须使用真实点击标题输入框后的 input/type/paste/send_keys 操作，不要用 evaluate 或直接设置 textarea.value 作为标题输入成功依据。
 - 点击“预览并发布”前，必须确认标题计数正常且页面没有“标题不能为空”或“还需输入”提示。
 - 如果看到明确失败提示，failure_reason 必须尽量使用页面原文；如果没有页面原文，再用简短中文总结原因。
-- done 返回必须是合法 JSON 字符串，格式为：
-  {"success": false, "account_name": "已读取到则填写", "article_url": "", "failure_reason": "失败原因"}
+- 如果还没有进入发布结果观察阶段但必须停止，也要返回合法 JSON 字符串，failure_reason 尽量使用页面原文。
 """
 
     def _rich_html_ready_prompt(self, title: str, cover_instruction: str, rich_html: str) -> str:
@@ -186,7 +185,7 @@ async (htmlContent) => {{
 13. {cover_instruction.strip()}
 14. 只有页面明确显示分类等字段必填时才补齐；如果没有明确必填提示，不要反复滚动寻找分类。
 15. 点击“预览并发布”前调用 prepare_publish_observer，然后点击“预览并发布”，再点击“确认发布”。
-16. 点击“确认发布”后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。成功但没有文章 URL 时再调用 get_published_article_url 工具；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
+16. 点击“确认发布”后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。判断成功后如仍需要 article_url，可调用 get_published_article_url 工具尝试补充；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
 
 完整 HTML 长度：{html_length} 字符
 
@@ -212,7 +211,7 @@ async (htmlContent) => {{
 6. {cover_instruction.strip()}
 7. 只有页面明确显示分类等字段必填时才补齐；如果没有明确必填提示，不要反复滚动寻找分类。
 8. 点击“预览并发布”前调用 prepare_publish_observer，然后点击“预览并发布”，再点击“确认发布”。
-9. 点击“确认发布”后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。成功但没有文章 URL 时再调用 get_published_article_url 工具；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
+9. 点击“确认发布”后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。判断成功后如仍需要 article_url，可调用 get_published_article_url 工具尝试补充；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
 
 正文长度：{content_length} 字符
 正文预览：{content_preview}
@@ -263,5 +262,5 @@ async (bodyText) => {{
 6. {cover_instruction.strip()}
 7. 只有页面明确显示分类等字段必填时才补齐；如果没有明确必填提示，不要反复滚动寻找分类。
 8. 点击“预览并发布”前调用 prepare_publish_observer，然后点击“预览并发布”，再点击“确认发布”。
-9. 点击“确认发布”后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。成功但没有文章 URL 时再调用 get_published_article_url 工具；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
+9. 点击“确认发布”后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。判断成功后如仍需要 article_url，可调用 get_published_article_url 工具尝试补充；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
 """

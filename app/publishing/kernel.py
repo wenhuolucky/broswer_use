@@ -84,17 +84,6 @@ class PublishService:
         # 发文渠道句柄：用于按渠道获取绑定的代理 IP。由 publish() 入参注入，
         # 默认空串（代理未启用 / 无渠道时直连）。
         self._channel_id = ""
-        self._publish_failure_texts = (
-            "发布失败",
-            "提交失败",
-            "请求失败",
-            "网络错误",
-            "请重试",
-            "今日发布的文章已达上限",
-            "发布的文章已达上限",
-            "今日文章发布数量已达上限",
-            "每日文章发布数量限制",
-        )
 
     def _platform(self):
         from app.platforms.toutiao import ToutiaoPlatform
@@ -995,8 +984,9 @@ class PublishService:
             )
 
         @controller.action(
-            "发布后调用此工具获取文章链接。输入本次发布标题 title。工具会打开作品管理页，最多查询 3 次同标题文章；"
-            "found=true 时必须用 article_url 调用 done(success=true)；found=false 时必须用 reason 调用 done(success=false)。"
+            "仅当你根据页面证据判断发布已经成功、但仍需要补充 article_url 时调用。"
+            "输入本次发布标题 title；工具会尝试查找同标题文章 URL。"
+            "如果暂未找到 URL，不等同于发布失败；你仍需结合页面证据自行判断下一步。"
         )
         async def get_published_article_url(title: str, browser_session):
             tool_start = time.perf_counter()
@@ -1139,7 +1129,7 @@ class PublishService:
         @controller.action(
             "当你根据页面原文和上下文判断这是不可恢复发布失败时必须调用。"
             "reason 优先填写页面原文，evidence 可填写 observe_publish_result 返回的关键证据；"
-            "调用后任务立即以失败结束，不要继续点击或回查作品列表。"
+            "调用后任务立即以失败结束，不要继续点击或调用其他发布相关工具。"
         )
         async def finish_publish_failed(reason: str, evidence: str = "", browser_session=None):
             payload = build_terminal_failure_payload(reason=reason, evidence=evidence)
@@ -1315,34 +1305,6 @@ class PublishService:
             if any(marker in normalized_text for marker in cover_markers):
                 return True
         return False
-
-    async def _detect_publish_failure(self, session, logger) -> dict:
-        try:
-            page = await session.get_current_page()
-            page_url = ""
-            page_text = ""
-
-            if page is not None:
-                try:
-                    page_url = await session.get_current_page_url()
-                except Exception:
-                    page_url = ""
-
-                try:
-                    page_text = await page.evaluate(
-                        """() => {
-                            const bodyText = document.body ? (document.body.innerText || "") : "";
-                            return bodyText.slice(0, 5000);
-                        }"""
-                    )
-                except Exception:
-                    page_text = ""
-
-            return self._detect_publish_failure_from_state(page_url=page_url, page_text=page_text)
-        except Exception as exc:
-            if logger:
-                logger.warning(f"[PublishGuard] detect_publish_failure failed: {exc}")
-            return {"failed": False, "signal": "", "page_url": "", "matched_text": ""}
 
     async def _capture_page_state(
         self,
@@ -1861,21 +1823,6 @@ class PublishService:
             "reason": last_reason,
         }
 
-    def _detect_publish_failure_from_state(self, page_url: str, page_text: str) -> dict:
-        normalized_url = page_url or ""
-        normalized_text = page_text or ""
-
-        for text in self._publish_failure_texts:
-            if text and text in normalized_text:
-                return {
-                    "failed": True,
-                    "signal": "failure_text",
-                    "page_url": normalized_url,
-                    "matched_text": text,
-                }
-
-        return {"failed": False, "signal": "", "page_url": normalized_url, "matched_text": ""}
-
     def _parse_agent_outcome(
         self,
         history,
@@ -1968,27 +1915,6 @@ class PublishService:
                     reason = reason[:marker_index].strip()
             return " ".join(reason.split())
         return ""
-
-    @staticmethod
-    def _build_post_confirm_lookup_result(lookup_result: dict) -> dict:
-        article_url = (lookup_result or {}).get("article_url", "") or ""
-        if (lookup_result or {}).get("found") and article_url:
-            return {
-                "success": True,
-                "article_url": article_url,
-                "account": "",
-                "failure_reason": "",
-                "publish_signal": "post_confirm_lookup_found",
-            }
-
-        reason = (lookup_result or {}).get("reason", "") or "post_confirm_lookup_miss"
-        return {
-            "success": False,
-            "article_url": "",
-            "account": "",
-            "failure_reason": reason,
-            "publish_signal": "post_confirm_lookup_miss",
-        }
 
     def _extract_article_url_from_text(self, text: str) -> str:
         urls = re.findall(r"https?://[^\s<>\"'，。；、)）\]]+", text or "")

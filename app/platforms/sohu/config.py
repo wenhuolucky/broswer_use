@@ -104,7 +104,7 @@ class SohuPlatform(PlatformConfig):
 - 平台是搜狐号，不是今日头条。
 - 外部接口要求成功结果必须包含 article_url。
 - 必须获取真实 URL，不要编造 URL。
-- 如果判断已经发布成功但页面没有直接显示 URL，再调用工具 `get_published_article_url(title="{title}")` 回查作品列表。
+- 如果判断已经发布成功但页面没有直接显示 URL，且当前任务需要 article_url，可调用工具 `get_published_article_url(title="{title}")` 尝试补充 URL。
 - 当前正文已由系统转换为富文本 HTML，但 HTML 内容由后端工具持有，prompt 中不再内嵌完整 HTML。
 - 找到搜狐号正文富文本编辑器并点击聚焦后，必须调用 `paste_rich_html_body` 工具。
 - 只有工具返回 ok=true 且 probe_found=true，才允许继续“下一步”、封面设置或发布。
@@ -118,7 +118,7 @@ Agent 执行规则：
 - 不要因为已经点击"发布"就直接认为成功。只有看到明确成功信号或拿到有效文章 URL，才返回 success=true。
 - 点击最终发布按钮前，必须先调用 prepare_publish_observer；点击后必须调用 observe_publish_result(wait_seconds=6) 读取短暂提示缓存和当前页面证据。
 - 如果判断是不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)，reason 优先使用页面原文。
-- done 返回必须是合法 JSON 字符串。
+- 如果还没有进入发布结果观察阶段但必须停止，也要返回合法 JSON 字符串，failure_reason 尽量使用页面原文。
 
 执行步骤：
 1. 打开搜狐号发布页：{self.publish_url}
@@ -129,7 +129,7 @@ Agent 执行规则：
 6. {cover_instruction.strip()}
 {self._sohu_cover_rules(cover_instruction)}
 7. 下滑到页面底部，调用 prepare_publish_observer 后点击"发布"按钮完成发布。
-8. 点击"发布"后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。成功但没有文章 URL 时再调用 `get_published_article_url(title="{title}")` 工具；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
+8. 点击"发布"后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。判断成功后如仍需要 article_url，可调用 `get_published_article_url(title="{title}")` 工具尝试补充；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
 """
 
     def _tool_plain_text_prompt(
@@ -145,7 +145,7 @@ Agent 执行规则：
 - 平台是搜狐号，不是今日头条。
 - 外部接口要求成功结果必须包含 article_url。
 - 必须获取真实 URL，不要编造 URL。
-- 如果判断已经发布成功但页面没有直接显示 URL，再调用工具 `get_published_article_url(title="{title}")` 回查作品列表。
+- 如果判断已经发布成功但页面没有直接显示 URL，且当前任务需要 article_url，可调用工具 `get_published_article_url(title="{title}")` 尝试补充 URL。
 - 当前正文是普通文本，正文内容由后端工具持有，优先使用确定性的工具写入。
 - 找到搜狐号正文编辑器并点击聚焦后，必须调用 `paste_plain_text_body` 工具。
 - 只有工具返回 ok=true 且 probe_found=true，才允许继续“下一步”、封面设置或发布。
@@ -159,7 +159,7 @@ Agent 执行规则：
 - 不要因为已经点击"发布"就直接认为成功。只有看到明确成功信号或拿到有效文章 URL，才返回 success=true。
 - 点击最终发布按钮前，必须先调用 prepare_publish_observer；点击后必须调用 observe_publish_result(wait_seconds=6) 读取短暂提示缓存和当前页面证据。
 - 如果判断是不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)，reason 优先使用页面原文。
-- done 返回必须是合法 JSON 字符串。
+- 如果还没有进入发布结果观察阶段但必须停止，也要返回合法 JSON 字符串，failure_reason 尽量使用页面原文。
 
 执行步骤：
 1. 打开搜狐号发布页：{self.publish_url}
@@ -170,7 +170,7 @@ Agent 执行规则：
 6. {cover_instruction.strip()}
 {self._sohu_cover_rules(cover_instruction)}
 7. 下滑到页面底部，调用 prepare_publish_observer 后点击"发布"按钮完成发布。
-8. 点击"发布"后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。成功但没有文章 URL 时再调用 `get_published_article_url(title="{title}")` 工具；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
+8. 点击"发布"后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。判断成功后如仍需要 article_url，可调用 `get_published_article_url(title="{title}")` 工具尝试补充；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
 """
 
     def _rich_html_ready_prompt(
@@ -186,15 +186,15 @@ Agent 执行规则：
 关键规则：
 - 平台是搜狐号，不是今日头条。
 - 外部接口要求成功结果必须包含 article_url。
-- 搜狐号发布后如果页面显示提交审核、审核中或发布成功，并且能拿到文章 URL，也算发布成功。
+- 搜狐号发布后如果页面显示提交审核、审核中或发布成功，通常可以视为成功信号；是否仍需要 article_url 由当前任务结果要求决定。
 - 必须获取真实 URL，不要编造 URL。
 - 可接受的 URL 包括：
   1. https://mp.sohu.com/h5/v2/newsPreview?id=...&type=article
   2. https://mp.sohu.com/mpfe/v4/contentManagement/.../news/articlepreview?id=...&accountId=...
   3. https://m.sohu.com/a/...
   4. https://www.sohu.com/a/...
-- 如果判断已经发布成功但页面没有直接显示 URL，再调用工具 `get_published_article_url(title="{title}")` 回查作品列表；found=true 时使用工具返回的 article_url。
-- 如果只看到提交审核成功但没有拿到 URL，必须返回 success=false。
+- 如果判断已经发布成功但页面没有直接显示 URL，且当前任务需要 article_url，可调用工具 `get_published_article_url(title="{title}")` 尝试补充 URL。
+- 如果该工具暂未找到 URL，不等同于发布失败；继续结合页面证据判断。
 - 搜狐号编辑器对 Ctrl+V 粘贴富文本友好，标题、加粗、列表、链接、图片都会自动渲染。
 - 本次正文导入只允许一条路径：先写入浏览器剪贴板，再执行 Ctrl+V 粘贴。
 - 禁止通过 `editor.innerHTML`、DOM 注入、直接替换节点、直接拼接 HTML 片段等方式写入正文。
@@ -205,14 +205,11 @@ Agent 执行规则：
 Agent 执行规则：
 - 你是自主 Agent，不是固定 workflow。遇到轻微、可恢复的问题时，可以自己判断并恢复，例如按钮暂时不可点、弹窗遮挡、页面加载慢、输入框未聚焦、分类未选择、预览弹窗未出现等。
 - 同一个可恢复问题最多尝试 2 次。第 2 次仍然失败时，停止并调用 done 返回失败 JSON，不要继续循环。
-- 遇到不可恢复问题时不要重试；如果已经进入发布结果观察阶段，必须调用 finish_publish_failed(reason=..., evidence=...) 结构化终止。不可恢复问题包括：账号被禁言、账号异常、账号无发布权限、登录失效、需要重新登录、验证码/风控验证、内容违规/审核拦截、平台明确提示禁止发布、网络长时间不可用。
+- 遇到页面明确表达当前流程无法继续的不可恢复问题时不要重试；如果已经进入发布结果观察阶段，必须调用 finish_publish_failed(reason=..., evidence=...) 结构化终止。是否不可恢复由你根据页面原文和上下文判断，不要依赖固定异常清单。
 - 不要因为已经点击"发布"就直接认为成功。只有看到明确成功提示或拿到有效文章 URL，才返回 success=true。
 - 点击最终发布按钮前，必须先调用 prepare_publish_observer；点击后必须调用 observe_publish_result(wait_seconds=6) 读取短暂提示缓存和当前页面证据。
 - 如果看到明确失败提示，failure_reason 必须尽量使用页面原文；如果没有页面原文，再用简短中文总结原因。
-- done 返回必须是合法 JSON 字符串，格式为：
-  {{"success": true, "account_name": "步骤3读到的账号名", "article_url": "拿到的搜狐文章URL", "failure_reason": "", "publish_signal": "submitted_for_review"}}
-  或
-  {{"success": false, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": "失败原因", "publish_signal": ""}}
+- 如果还没有进入发布结果观察阶段但必须停止，也要返回合法 JSON 字符串，failure_reason 尽量使用页面原文。
 
 执行步骤：
 1. 打开搜狐号发布页：{self.publish_url}
@@ -259,8 +256,8 @@ async (htmlContent) => {{
 9. {cover_instruction.strip()}
 10. {self._sohu_cover_rules(cover_instruction)}
 11. 下滑到页面底部，调用 prepare_publish_observer 后点击"发布"按钮完成发布。
-12. 点击"发布"后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。成功但没有文章 URL 时再调用 `get_published_article_url(title="{title}")` 工具；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
-13. 如果工具返回 found=false，调用 finish_publish_failed(reason="搜狐号发布成功，但未获取到文章 URL", evidence=工具返回内容)。
+12. 点击"发布"后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。判断成功后如仍需要 article_url，可调用 `get_published_article_url(title="{title}")` 工具尝试补充；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
+13. 如果 get_published_article_url 暂未找到 URL，不要直接当作发布失败；继续结合页面成功证据、当前 URL、页面提示和任务结果要求判断。
 
 完整 HTML 长度：{html_length} 字符
 
@@ -282,15 +279,15 @@ async (htmlContent) => {{
 关键规则：
 - 平台是搜狐号，不是今日头条。
 - 外部接口要求成功结果必须包含 article_url。
-- 搜狐号发布后如果页面显示提交审核、审核中或发布成功，并且能拿到文章 URL，也算发布成功。
+- 搜狐号发布后如果页面显示提交审核、审核中或发布成功，通常可以视为成功信号；是否仍需要 article_url 由当前任务结果要求决定。
 - 必须获取真实 URL，不要编造 URL。
 - 可接受的 URL 包括：
   1. https://mp.sohu.com/h5/v2/newsPreview?id=...&type=article
   2. https://mp.sohu.com/mpfe/v4/contentManagement/.../news/articlepreview?id=...&accountId=...
   3. https://m.sohu.com/a/...
   4. https://www.sohu.com/a/...
-- 如果判断已经发布成功但页面没有直接显示 URL，再调用工具 `get_published_article_url(title="{title}")` 回查作品列表；found=true 时使用工具返回的 article_url。
-- 如果只看到提交审核成功但没有拿到 URL，必须返回 success=false。
+- 如果判断已经发布成功但页面没有直接显示 URL，且当前任务需要 article_url，可调用工具 `get_published_article_url(title="{title}")` 尝试补充 URL。
+- 如果该工具暂未找到 URL，不等同于发布失败；继续结合页面证据判断。
 - 本次系统没有提供富文本 HTML。只能使用纯文本写入正文。
 - 不要把 HTML 源码写入搜狐号编辑器。
 - 优先将下面 `<content>` 中的纯文本写入剪贴板（navigator.clipboard.writeText 或 execCommand），再使用 Ctrl+V 粘贴。
@@ -299,14 +296,11 @@ async (htmlContent) => {{
 Agent 执行规则：
 - 你是自主 Agent，不是固定 workflow。遇到轻微、可恢复的问题时，可以自己判断并恢复，例如按钮暂时不可点、弹窗遮挡、页面加载慢、输入框未聚焦、分类未选择、预览弹窗未出现等。
 - 同一个可恢复问题最多尝试 2 次。第 2 次仍然失败时，停止并调用 done 返回失败 JSON，不要继续循环。
-- 遇到不可恢复问题时不要重试；如果已经进入发布结果观察阶段，必须调用 finish_publish_failed(reason=..., evidence=...) 结构化终止。不可恢复问题包括：账号被禁言、账号异常、账号无发布权限、登录失效、需要重新登录、验证码/风控验证、内容违规/审核拦截、平台明确提示禁止发布、网络长时间不可用。
+- 遇到页面明确表达当前流程无法继续的不可恢复问题时不要重试；如果已经进入发布结果观察阶段，必须调用 finish_publish_failed(reason=..., evidence=...) 结构化终止。是否不可恢复由你根据页面原文和上下文判断，不要依赖固定异常清单。
 - 不要因为已经点击"发布"就直接认为成功。只有看到明确成功提示或拿到有效文章 URL，才返回 success=true。
 - 点击最终发布按钮前，必须先调用 prepare_publish_observer；点击后必须调用 observe_publish_result(wait_seconds=6) 读取短暂提示缓存和当前页面证据。
 - 如果看到明确失败提示，failure_reason 必须尽量使用页面原文；如果没有页面原文，再用简短中文总结原因。
-- done 返回必须是合法 JSON 字符串，格式为：
-  {{"success": true, "account_name": "步骤3读到的账号名", "article_url": "拿到的搜狐文章URL", "failure_reason": "", "publish_signal": "submitted_for_review"}}
-  或
-  {{"success": false, "account_name": "步骤3读到的账号名", "article_url": "", "failure_reason": "失败原因", "publish_signal": ""}}
+- 如果还没有进入发布结果观察阶段但必须停止，也要返回合法 JSON 字符串，failure_reason 尽量使用页面原文。
 
 执行步骤：
 1. 打开搜狐号发布页：{self.publish_url}
@@ -329,8 +323,8 @@ Agent 执行规则：
 7. {cover_instruction.strip()}
 8. {self._sohu_cover_rules(cover_instruction)}
 9. 下滑到页面底部，调用 prepare_publish_observer 后点击"发布"按钮完成发布。
-10. 点击"发布"后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。成功但没有文章 URL 时再调用 `get_published_article_url(title="{title}")` 工具；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
-11. 如果工具返回 found=false，调用 finish_publish_failed(reason="搜狐号发布成功，但未获取到文章 URL", evidence=工具返回内容)。
+10. 点击"发布"后进入发布结果观察阶段：调用 observe_publish_result(wait_seconds=6)，根据页面原文自行判断成功、可恢复失败、不可恢复失败或不确定。判断成功后如仍需要 article_url，可调用 `get_published_article_url(title="{title}")` 工具尝试补充；不可恢复失败，必须调用 finish_publish_failed(reason=..., evidence=...)。
+11. 如果 get_published_article_url 暂未找到 URL，不要直接当作发布失败；继续结合页面成功证据、当前 URL、页面提示和任务结果要求判断。
 
 正文内容：
 <content>
