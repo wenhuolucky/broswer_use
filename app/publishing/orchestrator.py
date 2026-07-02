@@ -24,6 +24,7 @@ from app.domain.job import (
 from app.platforms import registry
 from app.remote.login import RemoteLoginRunner
 from app.core.config import LOG_DIR
+from app.utils.urls import normalize_article_url
 
 
 EXECUTING_PUBLISH_STATUSES = {
@@ -33,6 +34,8 @@ EXECUTING_PUBLISH_STATUSES = {
     STATUS_WAITING_COOKIE,
     STATUS_PUBLISHING,
 }
+
+MISSING_ARTICLE_URL_FAILURE_REASON = "发布已提交或可能成功，但未获取到文章 URL"
 
 
 class PublishAgent:
@@ -426,6 +429,7 @@ class PublishAgent:
                 log_file_path=log_file_path,
             )
 
+        result = self._enforce_publish_success_contract(platform, result, article_account_id)
         status = STATUS_SUCCEEDED if result.get("success") else STATUS_FAILED
         if status == STATUS_FAILED and self._looks_like_login_required(result) and not self._cookie_refresh_attempted(job):
             logger.info("检测到 Cookie 可能失效，切换远程登录 failure_reason=%s", result.get("failure_reason", ""))
@@ -450,6 +454,23 @@ class PublishAgent:
             log_file_path=log_file_path,
             result=result,
         )
+
+    @staticmethod
+    def _enforce_publish_success_contract(platform: str, result: dict, article_account_id: str = "") -> dict:
+        normalized = dict(result or {})
+        article_url = normalize_article_url(
+            platform,
+            str(normalized.get("article_url", "") or "").strip(),
+            account_id=article_account_id,
+        )
+        normalized["article_url"] = article_url
+        if normalized.get("success") and not article_url:
+            normalized["success"] = False
+            normalized["failure_reason"] = (
+                str(normalized.get("failure_reason", "") or "").strip()
+                or MISSING_ARTICLE_URL_FAILURE_REASON
+            )
+        return normalized
 
     # ------------------------------------------------------------------
     # Cookie capture → channel binding → resume

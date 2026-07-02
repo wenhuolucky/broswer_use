@@ -984,9 +984,9 @@ class PublishService:
             )
 
         @controller.action(
-            "仅当你根据页面证据判断发布已经成功、但仍需要补充 article_url 时调用。"
+            "当你根据页面证据判断文章已经发布成功或已提交审核后，必须调用本工具获取 article_url。"
             "输入本次发布标题 title；工具会尝试查找同标题文章 URL。"
-            "如果暂未找到 URL，不等同于发布失败；你仍需结合页面证据自行判断下一步。"
+            "如果未返回有效 article_url，发文任务不能返回 success=true；请观察页面和工具证据后调用 finish_publish_failed。"
         )
         async def get_published_article_url(title: str, browser_session):
             tool_start = time.perf_counter()
