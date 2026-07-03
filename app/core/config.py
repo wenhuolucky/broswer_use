@@ -31,6 +31,10 @@ SQLITE_PATH = str(_project_path(_sqlite_raw, DATA_DIR / "app.db")) if _sqlite_ra
 
 PUBLISH_API_TOKEN = os.getenv("PUBLISH_API_TOKEN", "").strip()
 
+# 单个发文后台任务硬超时。agent / browser-use / 平台页面都可能因网络、LLM 或页面
+# 状态卡住；超过该时间仍未返回时，服务层强制把 job 置为失败并释放队列。
+PUBLISH_JOB_TIMEOUT_SECONDS = float(os.getenv("PUBLISH_JOB_TIMEOUT_SECONDS", "1800"))
+
 # 僵尸 pending 渠道清理：pending 渠道只在一次登录会话进行中存在，用户放弃登录
 # （关页面/超时）会留下无 cookie 的空渠道。运行期无其他 GC（cancel/回收巡检都不删
 # 渠道），故按 TTL 周期清扫：删除创建超过 TTL 仍未绑定的 pending 渠道。

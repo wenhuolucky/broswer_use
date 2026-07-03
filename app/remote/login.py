@@ -55,6 +55,9 @@ REMOTE_LOGIN_COOKIE_POLL_STABLE = int(os.getenv("REMOTE_LOGIN_COOKIE_POLL_STABLE
 # 单个会话自动轮询的最长时长（秒）：超过则停止轮询，仅保留手动 save-cookie 兜底，
 # 避免被抛弃的会话在后台无限轮询。
 REMOTE_LOGIN_COOKIE_POLL_MAX_WAIT = float(os.getenv("REMOTE_LOGIN_COOKIE_POLL_MAX_WAIT", "600"))
+# 单个真实登录会话等待用户完成登录的硬上限（秒）：无论用户是否还开着 viewer，
+# 超过后都回收浏览器/Xvnc，并通知上游 job 失败，避免登录会话无限占用资源。
+REMOTE_LOGIN_WAITING_TTL = float(os.getenv("REMOTE_LOGIN_WAITING_TTL", "600"))
 
 # ── 登录成功后的「宽限期」回收 ─────────────────────────────────
 # 抓到 cookie 后不再立刻拆会话，而是让 viewer 多停留一会：给用户「登录成功」的
@@ -290,7 +293,7 @@ class RemoteLoginSession:
     context: object | None = None
     stream: object | None = None
     slot: Slot | None = None
-    # 预热会话的构建时刻（time.monotonic()），用于 TTL 回收；真实会话填 0 不参与
+    # 会话构建/交给用户的时刻（time.monotonic()），用于等待登录 TTL 与预热 TTL 回收
     created_monotonic: float = 0.0
     # 自动检测登录 cookie 的后台轮询任务；会话销毁时取消。预热会话为 None
     cookie_watcher: object | None = None
@@ -312,12 +315,14 @@ class RemoteLoginRunner:
         self,
         starter: Callable[[str, str, str], Awaitable[str]] | None = None,
         on_cookie_ready: Callable[[str, list[dict]], Awaitable[None]] | None = None,
+        on_session_timeout: Callable[[str, str], Awaitable[None]] | None = None,
         logger_factory: Callable[[str], LoggerAdapter] | None = None,
         warm_per_platform: int | None = None,
         warm_platforms: list[str] | None = None,
     ):
         self._starter = starter
         self._on_cookie_ready = on_cookie_ready
+        self._on_session_timeout = on_session_timeout
         self._logger_factory = logger_factory
         self._sessions: dict[str, RemoteLoginSession] = {}
 
@@ -361,6 +366,7 @@ class RemoteLoginRunner:
                 platform=platform,
                 channel_id=channel_id,
                 login_url=login_url,
+                created_monotonic=time.monotonic(),
             )
             self._sessions[session_id] = session
             return session
@@ -369,6 +375,7 @@ class RemoteLoginRunner:
         warm = await self._claim_warm(platform)
         if warm is not None:
             warm.channel_id = channel_id
+            warm.created_monotonic = time.monotonic()
             self._sessions[warm.session_id] = warm
             self._begin_cookie_watch(warm)
             self._schedule_replenish(platform)
@@ -672,7 +679,11 @@ class RemoteLoginRunner:
         now = time.monotonic()
         expired: list[tuple[str, str]] = []
         for session_id, session in list(self._sessions.items()):
-            # 只回收已捕获 cookie、进入宽限期的会话；登录中的会话不动。
+            waiting_reason = self._waiting_expiry_reason(session, now)
+            if waiting_reason:
+                expired.append((session_id, waiting_reason))
+                continue
+            # 回收已捕获 cookie、进入宽限期的会话。
             if session.status != "completed" or not session.completed_monotonic:
                 continue
             reason = self._linger_expiry_reason(session, now)
@@ -680,9 +691,26 @@ class RemoteLoginRunner:
                 expired.append((session_id, reason))
         for session_id, reason in expired:
             self._warm_logger().info(
-                "回收宽限登录会话 session_id=%s reason=%s", session_id, reason
+                "回收登录会话 session_id=%s reason=%s", session_id, reason
             )
             await self.cleanup(session_id)
+            if reason == "waiting_cookie_ttl" and self._on_session_timeout:
+                try:
+                    await self._on_session_timeout(session_id, reason)
+                except Exception as exc:
+                    self._warm_logger().warning(
+                        "通知登录会话超时失败 session_id=%s: %s", session_id, exc
+                    )
+
+    def _waiting_expiry_reason(self, session: RemoteLoginSession, now: float) -> str:
+        """判定等待用户登录的会话是否到达硬上限。"""
+        if session.status != "waiting_cookie":
+            return ""
+        if REMOTE_LOGIN_WAITING_TTL <= 0 or not session.created_monotonic:
+            return ""
+        if now - session.created_monotonic > REMOTE_LOGIN_WAITING_TTL:
+            return "waiting_cookie_ttl"
+        return ""
 
     def _linger_expiry_reason(self, session: RemoteLoginSession, now: float) -> str:
         """判定一个宽限会话是否到期回收，返回原因（ttl/idle）或空串。"""
