@@ -7,6 +7,7 @@ Docker/Linux 环境中运行，不依赖宿主机桌面、剪贴板或本地临�
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -43,7 +44,7 @@ PUBLISH_OBSERVER_SCRIPT = r"""() => {
     const store = window[globalKey];
     const duplicate = store.signals.some((item) => item.text === normalized && Date.now() - item.time < 1500);
     if (duplicate) return;
-    store.signals.push({
+    const signal = {
       text: normalized.slice(0, 500),
       kind,
       url: window.location.href,
@@ -51,7 +52,16 @@ PUBLISH_OBSERVER_SCRIPT = r"""() => {
         ? `${node.tagName.toLowerCase()}${node.id ? '#' + node.id : ''}${node.className ? '.' + String(node.className).trim().replace(/\s+/g, '.') : ''}`.slice(0, 200)
         : '',
       time: Date.now()
-    });
+    };
+    store.signals.push(signal);
+    if (typeof window.__publishSignalPush === 'function') {
+      try {
+        const pushed = window.__publishSignalPush(signal);
+        if (pushed && typeof pushed.catch === 'function') {
+          pushed.catch(() => {});
+        }
+      } catch (error) {}
+    }
     if (store.signals.length > 50) {
       store.signals.splice(0, store.signals.length - 50);
     }
@@ -138,6 +148,9 @@ PUBLISH_OBSERVER_SCRIPT = r"""() => {
     signal_count: window.__publishResultSignals.signals.length
   };
 }"""
+
+
+PUBLISH_OBSERVER_BOOTSTRAP_SCRIPT = f"({PUBLISH_OBSERVER_SCRIPT})()"
 
 
 PUBLISH_OBSERVATION_SCRIPT = r"""(articleTitle) => {
@@ -253,6 +266,68 @@ def build_terminal_failure_payload(reason: str, evidence: str = "") -> str:
     )
 
 
+@dataclass
+class PublishObservationBuffer:
+    """保存 JS 推送回 Python 的发布结果信号，避免页面刷新后丢失。"""
+
+    session_id: str
+    max_signals: int = 50
+    captured_signals: list[dict[str, Any]] = field(default_factory=list)
+    dialogs: list[str] = field(default_factory=list)
+    navigations: list[str] = field(default_factory=list)
+    snapshot_errors: list[str] = field(default_factory=list)
+
+    def record_signal(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            self.snapshot_errors.append(f"ignored non-dict signal payload: {type(payload).__name__}")
+            self.snapshot_errors = self.snapshot_errors[-10:]
+            return
+        text = _truncate_text(payload.get("text"))
+        if not text:
+            return
+        signal = {
+            "text": text,
+            "kind": _truncate_text(payload.get("kind"), limit=80) or "toast_or_message",
+            "url": _truncate_text(payload.get("url"), limit=1000),
+            "age_seconds": _safe_float(payload.get("age_seconds")),
+            "selector_hint": _truncate_text(payload.get("selector_hint"), limit=200),
+        }
+        if any(item.get("text") == signal["text"] for item in self.captured_signals[-5:]):
+            return
+        self.captured_signals.append(signal)
+        self.captured_signals = self.captured_signals[-self.max_signals :]
+
+    def record_dialog(self, message: Any) -> None:
+        text = _truncate_text(message)
+        if text and text not in self.dialogs:
+            self.dialogs.append(text)
+            self.dialogs = self.dialogs[-MAX_LIST_ITEMS:]
+
+    def record_navigation(self, url: Any) -> None:
+        text = _truncate_text(url, limit=1000)
+        if text:
+            self.navigations.append(text)
+            self.navigations = self.navigations[-10:]
+
+    def record_snapshot_error(self, message: Any) -> None:
+        text = _truncate_text(message)
+        if text:
+            self.snapshot_errors.append(text)
+            self.snapshot_errors = self.snapshot_errors[-10:]
+
+    def merge_snapshot(self, snapshot: dict[str, Any] | None) -> dict[str, Any]:
+        raw = dict(snapshot or {})
+        raw_signals = _normalize_signal_list(raw.get("captured_signals"))
+        raw["captured_signals"] = self.captured_signals[-20:] + raw_signals
+        raw["dialogs"] = _normalize_text_list(raw.get("dialogs")) + self.dialogs[-MAX_LIST_ITEMS:]
+        raw["observer_session_id"] = self.session_id
+        if self.navigations:
+            raw["observer_navigation_urls"] = self.navigations[-10:]
+        if self.snapshot_errors and not raw.get("snapshot_error"):
+            raw["snapshot_error"] = self.snapshot_errors[-1]
+        return raw
+
+
 def normalize_observed_snapshot(
     snapshot: dict[str, Any] | None,
     *,
@@ -285,6 +360,9 @@ def normalize_observed_snapshot(
         "signals_found": signals_found,
         "wait_seconds": float(wait_seconds),
         "observed_at": datetime.now(timezone.utc).isoformat(),
+        "observer_session_id": _truncate_text(raw.get("observer_session_id"), limit=120),
+        "observer_navigation_urls": _normalize_text_list(raw.get("observer_navigation_urls")),
+        "snapshot_error": _truncate_text(raw.get("snapshot_error"), limit=500),
     }
 
 

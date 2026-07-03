@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
+from urllib.parse import urlparse
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -490,29 +491,77 @@ class PublishService:
 
     async def _preflight_login_state(self, session, platform, logger) -> dict:
         page = await session.get_current_page()
+        target_url = platform.publish_url
+        page_url = ""
+        session_url = ""
+        current_url = ""
+        attempts = 0
         await page.goto(platform.publish_url)
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=5000)
             await page.wait_for_load_state("networkidle", timeout=5000)
         except Exception:
             pass
-        try:
-            current_url = str(await session.get_current_page_url() or "")
-        except Exception as exc:
-            current_url = str(getattr(page, "url", "") or "")
-            if logger:
-                logger.warning("[LoginPreflight] current url unavailable: %s", exc)
-        if not current_url:
-            if logger:
-                logger.warning("[LoginPreflight] current url empty, skip preflight")
-            return {}
+        for attempts in range(1, 6):
+            page_url = str(getattr(page, "url", "") or "")
+            try:
+                session_url = str(await session.get_current_page_url() or "")
+            except Exception as exc:
+                session_url = ""
+                if logger:
+                    logger.warning("[LoginPreflight] session url unavailable: %s", exc)
+            candidates = [page_url, session_url]
+            current_url = next(
+                (url for url in candidates if url and not self._is_unknown_preflight_url(url)),
+                page_url or session_url,
+            )
+            if current_url and not self._is_unknown_preflight_url(current_url):
+                break
+            await asyncio.sleep(0.2)
+
         if not platform.is_login_page(current_url):
+            if self._is_expected_preflight_url(platform, current_url):
+                if logger:
+                    logger.info(
+                        "[LoginPreflight] status=authenticated target_url=%s page_url=%s "
+                        "session_url=%s final_url=%s attempts=%s",
+                        target_url,
+                        page_url,
+                        session_url,
+                        current_url,
+                        attempts,
+                    )
+                return {}
             if logger:
-                logger.info("[LoginPreflight] passed url=%s", current_url)
-            return {}
+                logger.warning(
+                    "[LoginPreflight] status=unknown target_url=%s page_url=%s "
+                    "session_url=%s final_url=%s attempts=%s reason=unexpected_or_blank_url",
+                    target_url,
+                    page_url,
+                    session_url,
+                    current_url,
+                    attempts,
+                )
+            display_url = current_url or "(空)"
+            return {
+                "success": False,
+                "article_url": "",
+                "failure_reason": f"无法确认登录状态：访问发布页后当前 URL 为 {display_url}",
+                "publish_signal": "login_preflight_unknown",
+                "login_required": False,
+                "page_url": current_url,
+            }
         reason = f"Cookie 已失效，需要重新登录：当前页面跳转到登录页 {current_url}"
         if logger:
-            logger.info("[LoginPreflight] login_required url=%s", current_url)
+            logger.info(
+                "[LoginPreflight] status=login_required target_url=%s page_url=%s "
+                "session_url=%s final_url=%s attempts=%s",
+                target_url,
+                page_url,
+                session_url,
+                current_url,
+                attempts,
+            )
         return {
             "success": False,
             "article_url": "",
@@ -521,6 +570,28 @@ class PublishService:
             "login_required": True,
             "page_url": current_url,
         }
+
+    @staticmethod
+    def _is_unknown_preflight_url(url: str) -> bool:
+        normalized = str(url or "").strip().lower()
+        return not normalized or normalized == "about:blank" or normalized.startswith("data:")
+
+    @staticmethod
+    def _is_expected_preflight_url(platform, url: str) -> bool:
+        normalized = str(url or "").strip()
+        if not normalized:
+            return False
+        try:
+            current = urlparse(normalized)
+            publish = urlparse(str(platform.publish_url or ""))
+            home = urlparse(str(platform.home_url or ""))
+        except Exception:
+            return False
+        current_host = (current.netloc or "").lower()
+        expected_hosts = {host for host in ((publish.netloc or "").lower(), (home.netloc or "").lower()) if host}
+        if not current_host or current_host not in expected_hosts:
+            return False
+        return bool(current.scheme in {"http", "https"})
 
     @staticmethod
     def _looks_like_port_conflict(exc: Exception) -> bool:
@@ -935,15 +1006,20 @@ class PublishService:
         from browser_use import ActionResult, Controller
         from app.publishing.tools import (
             PUBLISH_OBSERVATION_SCRIPT,
+            PUBLISH_OBSERVER_BOOTSTRAP_SCRIPT,
             PUBLISH_OBSERVER_SCRIPT,
             BodyWritePayload,
             BodyWriter,
+            PublishObservationBuffer,
             build_terminal_failure_payload,
             normalize_observed_snapshot,
         )
 
         controller = Controller()
         writer = None
+        observation_buffer = PublishObservationBuffer(session_id=f"publish-{int(time.time() * 1000)}")
+        observer_bound_pages: set[int] = set()
+        observer_initialized_pages: set[int] = set()
         platform_name = (getattr(body_payload, "platform_name", "") or "").lower() if body_payload else ""
         if body_payload:
             writer = BodyWriter(
@@ -1055,6 +1131,75 @@ class PublishService:
                 include_in_memory=True,
             )
 
+        async def _ensure_publish_observer(page) -> dict:
+            result = {
+                "ok": False,
+                "observer_installed": False,
+                "signal_count": len(observation_buffer.captured_signals),
+                "observer_session_id": observation_buffer.session_id,
+                "reason": "",
+            }
+            if page is None:
+                result["reason"] = "current_page_unavailable"
+                return result
+
+            page_key = id(page)
+
+            async def _push_publish_signal(_source, payload=None):
+                observation_buffer.record_signal(payload)
+
+            if page_key not in observer_bound_pages:
+                try:
+                    if hasattr(page, "expose_binding"):
+                        await page.expose_binding("__publishSignalPush", _push_publish_signal)
+                except Exception as exc:
+                    message = str(exc)
+                    if "already" not in message.lower() and "exist" not in message.lower():
+                        observation_buffer.record_snapshot_error(f"expose_binding_failed: {message}")
+                        result["reason"] = message
+                try:
+                    if hasattr(page, "on"):
+                        page.on(
+                            "dialog",
+                            lambda dialog: observation_buffer.record_dialog(
+                                getattr(dialog, "message", "") or str(dialog)
+                            ),
+                        )
+                        page.on(
+                            "framenavigated",
+                            lambda frame: observation_buffer.record_navigation(getattr(frame, "url", "")),
+                        )
+                except Exception as exc:
+                    observation_buffer.record_snapshot_error(f"event_hook_failed: {exc}")
+                observer_bound_pages.add(page_key)
+
+            if page_key not in observer_initialized_pages:
+                try:
+                    if hasattr(page, "add_init_script"):
+                        await page.add_init_script(PUBLISH_OBSERVER_BOOTSTRAP_SCRIPT)
+                except Exception as exc:
+                    observation_buffer.record_snapshot_error(f"add_init_script_failed: {exc}")
+                observer_initialized_pages.add(page_key)
+
+            try:
+                evaluated = await page.evaluate(PUBLISH_OBSERVER_SCRIPT)
+                if isinstance(evaluated, dict):
+                    result.update(evaluated)
+                else:
+                    result.update(
+                        {
+                            "ok": True,
+                            "observer_installed": True,
+                            "raw_result": str(evaluated or "")[:300],
+                        }
+                    )
+            except Exception as exc:
+                result["reason"] = str(exc)
+                observation_buffer.record_snapshot_error(f"observer_install_failed: {exc}")
+            result["signal_count"] = len(observation_buffer.captured_signals)
+            result["observer_session_id"] = observation_buffer.session_id
+            return result
+
         @controller.action(
             "点击最终发布/确认发布按钮前必须调用。"
             "在页面内安装发布结果监听器，捕获 2-3 秒自动消失的 toast、弹窗、字段校验或错误提示。"
@@ -1069,30 +1214,18 @@ class PublishService:
             }
             try:
                 page = await browser_session.get_current_page()
-                if page is None:
-                    result["reason"] = "current_page_unavailable"
-                else:
-                    evaluated = await page.evaluate(PUBLISH_OBSERVER_SCRIPT)
-                    if isinstance(evaluated, dict):
-                        result.update(evaluated)
-                    else:
-                        result.update(
-                            {
-                                "ok": True,
-                                "observer_installed": True,
-                                "raw_result": str(evaluated or "")[:300],
-                            }
-                        )
+                result.update(await _ensure_publish_observer(page))
             except Exception as exc:
                 result["reason"] = str(exc)
             if logger:
                 logger.info(
                     "[AgentTool] name=prepare_publish_observer duration=%.2fs ok=%s "
-                    "installed=%s signals=%s reason=%r",
+                    "installed=%s signals=%s observer_session_id=%s reason=%r",
                     time.perf_counter() - tool_start,
                     result.get("ok"),
                     result.get("observer_installed"),
                     result.get("signal_count"),
+                    result.get("observer_session_id", ""),
                     result.get("reason", ""),
                 )
             return ActionResult(
@@ -1110,43 +1243,61 @@ class PublishService:
             wait_seconds = max(0.5, min(float(wait_seconds or 6.0), 12.0))
             deadline = time.perf_counter() + wait_seconds
             last_snapshot = {}
-            page = None
             try:
-                page = await browser_session.get_current_page()
                 while time.perf_counter() < deadline:
-                    if page is None:
-                        page = await browser_session.get_current_page()
+                    page = await browser_session.get_current_page()
                     if page is None:
                         last_snapshot = self._publish_observation_error_snapshot(
                             "observe_publish_result_current_page_unavailable"
                         )
+                        observation_buffer.record_snapshot_error("observe_publish_result_current_page_unavailable")
                         await asyncio.sleep(0.3)
                         continue
-                    current = await page.evaluate(PUBLISH_OBSERVATION_SCRIPT, original_title or "")
+                    await _ensure_publish_observer(page)
+                    try:
+                        current = await page.evaluate(PUBLISH_OBSERVATION_SCRIPT, original_title or "")
+                    except Exception as exc:
+                        observation_buffer.record_snapshot_error(f"observe_evaluate_failed: {exc}")
+                        current = self._publish_observation_error_snapshot(f"observe_evaluate_failed: {exc}")
                     if isinstance(current, dict):
-                        last_snapshot = current
-                        normalized = normalize_observed_snapshot(
-                            last_snapshot,
-                            wait_seconds=wait_seconds,
-                            article_title=original_title,
+                        if not current.get("url"):
+                            observation_buffer.record_snapshot_error("observation_snapshot_missing_url")
+                            current = dict(current)
+                            current["url"] = str(getattr(page, "url", "") or "")
+                        last_snapshot = observation_buffer.merge_snapshot(current)
+                    else:
+                        observation_buffer.record_snapshot_error(
+                            f"observe_evaluate_returned_{type(current).__name__}"
                         )
-                        if normalized.get("signals_found"):
-                            break
+                        last_snapshot = observation_buffer.merge_snapshot(
+                            self._publish_observation_error_snapshot(
+                                f"observe_evaluate_returned_{type(current).__name__}"
+                            )
+                        )
+                    normalized = normalize_observed_snapshot(
+                        last_snapshot,
+                        wait_seconds=wait_seconds,
+                        article_title=original_title,
+                    )
+                    if normalized.get("signals_found"):
+                        break
                     await asyncio.sleep(0.3)
             except Exception as exc:
                 last_snapshot = self._publish_observation_error_snapshot(
                     f"observe_publish_result_failed: {exc}"
                 )
+                observation_buffer.record_snapshot_error(f"observe_publish_result_failed: {exc}")
 
             normalized = normalize_observed_snapshot(
-                last_snapshot,
+                observation_buffer.merge_snapshot(last_snapshot),
                 wait_seconds=wait_seconds,
                 article_title=original_title,
             )
             if logger:
                 logger.info(
                     "[AgentTool] name=observe_publish_result duration=%.2fs signals_found=%s "
-                    "captured=%s dialogs=%s toasts=%s errors=%s url=%s",
+                    "captured=%s dialogs=%s toasts=%s errors=%s url=%s "
+                    "observer_session_id=%s snapshot_error=%r",
                     time.perf_counter() - tool_start,
                     normalized.get("signals_found"),
                     len(normalized.get("captured_signals", [])),
@@ -1154,6 +1305,8 @@ class PublishService:
                     len(normalized.get("toasts", [])),
                     len(normalized.get("form_errors", [])),
                     normalized.get("url", ""),
+                    normalized.get("observer_session_id", ""),
+                    normalized.get("snapshot_error", ""),
                 )
             return ActionResult(
                 extracted_content=json.dumps(normalized, ensure_ascii=False),
