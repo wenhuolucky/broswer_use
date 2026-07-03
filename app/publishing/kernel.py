@@ -496,16 +496,17 @@ class PublishService:
             await page.wait_for_load_state("networkidle", timeout=5000)
         except Exception:
             pass
-        snapshot = await page.evaluate(
-            """() => ({
-                url: location.href,
-                title: document.title || "",
-                visible_text: (document.body && document.body.innerText || "").slice(0, 2000)
-            })"""
-        )
-        current_url = str((snapshot or {}).get("url") or getattr(page, "url", "") or "")
-        visible_text = str((snapshot or {}).get("visible_text") or "")
-        if not platform.is_login_page(current_url, visible_text):
+        try:
+            current_url = str(await session.get_current_page_url() or "")
+        except Exception as exc:
+            current_url = str(getattr(page, "url", "") or "")
+            if logger:
+                logger.warning("[LoginPreflight] current url unavailable: %s", exc)
+        if not current_url:
+            if logger:
+                logger.warning("[LoginPreflight] current url empty, skip preflight")
+            return {}
+        if not platform.is_login_page(current_url):
             if logger:
                 logger.info("[LoginPreflight] passed url=%s", current_url)
             return {}

@@ -20,7 +20,6 @@ class SohuPlatform(PlatformConfig):
     # 就被自动绑定。SUV 是匿名访客标识，只用于 extract_native_key 兜底，不作登录依据。
     login_cookie_names: list = field(default_factory=lambda: ["ppinf", "ppmdig"])
     login_url_markers: list = field(default_factory=lambda: ["/login", "passport.sohu.com"])
-    login_text_markers: list = field(default_factory=lambda: ["搜狐号", "登录", "验证码", "扫码"])
 
     def extract_native_key(self, cookies: list) -> str:
         # 搜狐用 passport 标识 ppinf 作为账号去重键，回退到 ppmdig / SUV。
