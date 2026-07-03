@@ -257,6 +257,11 @@ class PublishService:
             browser_elapsed = asyncio.get_event_loop().time() - browser_start
             logger.info(f"[Step 6] 浏览器启动完成，耗时 {browser_elapsed:.2f}s")
 
+            preflight_result = await self._preflight_login_state(session, platform, logger)
+            if preflight_result:
+                result.update(preflight_result)
+                return self._finalize(result, tracker, start_time, logger)
+
             logger.info("[Step 7] 正在构建 Agent 任务...")
             agent_start = asyncio.get_event_loop().time()
             publish_result = await self._run_agent(
@@ -482,6 +487,38 @@ class PublishService:
                     exc,
                 )
         raise last_exc or RuntimeError("发布浏览器启动失败")
+
+    async def _preflight_login_state(self, session, platform, logger) -> dict:
+        page = await session.get_current_page()
+        await page.goto(platform.publish_url, wait_until="domcontentloaded", timeout=30000)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
+        snapshot = await page.evaluate(
+            """() => ({
+                url: location.href,
+                title: document.title || "",
+                visible_text: (document.body && document.body.innerText || "").slice(0, 2000)
+            })"""
+        )
+        current_url = str((snapshot or {}).get("url") or getattr(page, "url", "") or "")
+        visible_text = str((snapshot or {}).get("visible_text") or "")
+        if not platform.is_login_page(current_url, visible_text):
+            if logger:
+                logger.info("[LoginPreflight] passed url=%s", current_url)
+            return {}
+        reason = f"Cookie 已失效，需要重新登录：当前页面跳转到登录页 {current_url}"
+        if logger:
+            logger.info("[LoginPreflight] login_required url=%s", current_url)
+        return {
+            "success": False,
+            "article_url": "",
+            "failure_reason": reason,
+            "publish_signal": "login_required",
+            "login_required": True,
+            "page_url": current_url,
+        }
 
     @staticmethod
     def _looks_like_port_conflict(exc: Exception) -> bool:
@@ -1066,43 +1103,38 @@ class PublishService:
             "会在 wait_seconds 秒内短轮询页面内缓存、当前弹窗、toast、字段错误、URL 和标题；"
             "本工具只返回证据，不替你判断成功或失败。"
         )
-        async def observe_publish_result(wait_seconds: float = 6.0, browser_session=None):
+        async def observe_publish_result(browser_session, wait_seconds: float = 6.0):
             tool_start = time.perf_counter()
             wait_seconds = max(0.5, min(float(wait_seconds or 6.0), 12.0))
             deadline = time.perf_counter() + wait_seconds
             last_snapshot = {}
             page = None
             try:
-                if browser_session is not None:
-                    page = await browser_session.get_current_page()
+                page = await browser_session.get_current_page()
                 while time.perf_counter() < deadline:
-                    if page is None and browser_session is not None:
+                    if page is None:
                         page = await browser_session.get_current_page()
-                    if page is not None:
-                        current = await page.evaluate(PUBLISH_OBSERVATION_SCRIPT, original_title or "")
-                        if isinstance(current, dict):
-                            last_snapshot = current
-                            normalized = normalize_observed_snapshot(
-                                last_snapshot,
-                                wait_seconds=wait_seconds,
-                                article_title=original_title,
-                            )
-                            if normalized.get("signals_found"):
-                                break
+                    if page is None:
+                        last_snapshot = self._publish_observation_error_snapshot(
+                            "observe_publish_result_current_page_unavailable"
+                        )
+                        await asyncio.sleep(0.3)
+                        continue
+                    current = await page.evaluate(PUBLISH_OBSERVATION_SCRIPT, original_title or "")
+                    if isinstance(current, dict):
+                        last_snapshot = current
+                        normalized = normalize_observed_snapshot(
+                            last_snapshot,
+                            wait_seconds=wait_seconds,
+                            article_title=original_title,
+                        )
+                        if normalized.get("signals_found"):
+                            break
                     await asyncio.sleep(0.3)
             except Exception as exc:
-                last_snapshot = {
-                    "url": "",
-                    "title": "",
-                    "visible_text_excerpt": "",
-                    "captured_signals": [],
-                    "dialogs": [],
-                    "toasts": [],
-                    "form_errors": [f"observe_publish_result_failed: {exc}"],
-                    "button_area_text": "",
-                    "management_page_hint": False,
-                    "article_title_visible": False,
-                }
+                last_snapshot = self._publish_observation_error_snapshot(
+                    f"observe_publish_result_failed: {exc}"
+                )
 
             normalized = normalize_observed_snapshot(
                 last_snapshot,
@@ -1147,6 +1179,21 @@ class PublishService:
             )
 
         return controller
+
+    @staticmethod
+    def _publish_observation_error_snapshot(message: str) -> dict:
+        return {
+            "url": "",
+            "title": "",
+            "visible_text_excerpt": message,
+            "captured_signals": [],
+            "dialogs": [],
+            "toasts": [],
+            "form_errors": [message],
+            "button_area_text": "",
+            "management_page_hint": False,
+            "article_title_visible": False,
+        }
 
     @staticmethod
     async def _cleanup_awaitable_with_timeout(

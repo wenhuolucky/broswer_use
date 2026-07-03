@@ -17,6 +17,8 @@ class ToutiaoPlatform(PlatformConfig):
         "uid_tt", "uid_tt_ss", "sessionid", "sessionid_ss",
         "sid_tt", "sid_guard", "sid_ucp_v1", "ssid_ucp_v1",
     ])
+    login_url_markers: list = field(default_factory=lambda: ["/auth/page/login"])
+    login_text_markers: list = field(default_factory=lambda: ["验证码登录", "获取验证码", "扫码登录", "密码登录"])
 
     def get_agent_prompt(
         self,

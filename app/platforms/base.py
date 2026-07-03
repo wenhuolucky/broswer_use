@@ -4,6 +4,7 @@ Platform base configuration and common interfaces.
 
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 
 @dataclass
@@ -19,6 +20,8 @@ class PlatformConfig:
     # an auth domain counts" (used by platforms like Sohu that don't expose a
     # single canonical session cookie name).
     login_cookie_names: list = field(default_factory=list)
+    login_url_markers: list = field(default_factory=list)
+    login_text_markers: list = field(default_factory=list)
 
     def get_agent_prompt(
         self,
@@ -54,6 +57,33 @@ class PlatformConfig:
             domain = str(cookie.get("domain", ""))
             if any(auth_domain in domain or domain in auth_domain for auth_domain in self.auth_domains):
                 return True
+        return False
+
+    def is_login_page(self, url: str, visible_text: str = "") -> bool:
+        """根据平台登录入口特征判断当前页面是否要求重新登录。
+
+        这是浏览器预检用的页面级判断，只识别登录页/登录表单，不判断发布业务异常。
+        """
+        normalized_url = str(url or "").lower()
+        if any(str(marker).lower() in normalized_url for marker in self.login_url_markers):
+            return True
+
+        text = " ".join(str(visible_text or "").split()).lower()
+        if not text:
+            return False
+        matched = [
+            marker
+            for marker in self.login_text_markers
+            if str(marker).lower() in text
+        ]
+        if len(matched) >= 2:
+            host = (urlparse(str(url or "")).hostname or "").lower()
+            return any(
+                host == auth_domain.lstrip(".").lower()
+                or host.endswith(auth_domain.lower())
+                or host.endswith(auth_domain.lstrip(".").lower())
+                for auth_domain in self.auth_domains
+            )
         return False
 
     def extract_account_name(self, cookies: list) -> str:
