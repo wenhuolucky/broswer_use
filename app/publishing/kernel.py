@@ -490,8 +490,9 @@ class PublishService:
 
     async def _preflight_login_state(self, session, platform, logger) -> dict:
         page = await session.get_current_page()
-        await page.goto(platform.publish_url, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(platform.publish_url)
         try:
+            await page.wait_for_load_state("domcontentloaded", timeout=5000)
             await page.wait_for_load_state("networkidle", timeout=5000)
         except Exception:
             pass
