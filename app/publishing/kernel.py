@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
+from urllib.parse import urlparse
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -84,17 +85,6 @@ class PublishService:
         # 发文渠道句柄：用于按渠道获取绑定的代理 IP。由 publish() 入参注入，
         # 默认空串（代理未启用 / 无渠道时直连）。
         self._channel_id = ""
-        self._publish_failure_texts = (
-            "发布失败",
-            "提交失败",
-            "请求失败",
-            "网络错误",
-            "请重试",
-            "今日发布的文章已达上限",
-            "发布的文章已达上限",
-            "今日文章发布数量已达上限",
-            "每日文章发布数量限制",
-        )
 
     def _platform(self):
         from app.platforms.toutiao import ToutiaoPlatform
@@ -267,6 +257,11 @@ class PublishService:
                     logger.warning("[LiveViewer] 发布实时查看启动失败: %s", exc, exc_info=True)
             browser_elapsed = asyncio.get_event_loop().time() - browser_start
             logger.info(f"[Step 6] 浏览器启动完成，耗时 {browser_elapsed:.2f}s")
+
+            preflight_result = await self._preflight_login_state(session, platform, logger)
+            if preflight_result:
+                result.update(preflight_result)
+                return self._finalize(result, tracker, start_time, logger)
 
             logger.info("[Step 7] 正在构建 Agent 任务...")
             agent_start = asyncio.get_event_loop().time()
@@ -442,7 +437,7 @@ class PublishService:
 
     @staticmethod
     def _get_browser_vision_config() -> dict:
-        raw_use_vision = os.getenv("BROWSER_USE_VISION", "auto").strip().lower()
+        raw_use_vision = os.getenv("BROWSER_USE_VISION", "true").strip().lower()
         raw_detail = os.getenv("BROWSER_USE_VISION_DETAIL", "low").strip().lower()
 
         if raw_use_vision in ("1", "true", "yes", "on"):
@@ -452,7 +447,7 @@ class PublishService:
         elif raw_use_vision == "auto":
             use_vision = "auto"
         else:
-            use_vision = "auto"
+            use_vision = True
 
         if raw_detail not in ("auto", "low", "high"):
             raw_detail = "low"
@@ -493,6 +488,110 @@ class PublishService:
                     exc,
                 )
         raise last_exc or RuntimeError("发布浏览器启动失败")
+
+    async def _preflight_login_state(self, session, platform, logger) -> dict:
+        page = await session.get_current_page()
+        target_url = platform.publish_url
+        page_url = ""
+        session_url = ""
+        current_url = ""
+        attempts = 0
+        await page.goto(platform.publish_url)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            await page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
+        for attempts in range(1, 6):
+            page_url = str(getattr(page, "url", "") or "")
+            try:
+                session_url = str(await session.get_current_page_url() or "")
+            except Exception as exc:
+                session_url = ""
+                if logger:
+                    logger.warning("[LoginPreflight] session url unavailable: %s", exc)
+            candidates = [page_url, session_url]
+            current_url = next(
+                (url for url in candidates if url and not self._is_unknown_preflight_url(url)),
+                page_url or session_url,
+            )
+            if current_url and not self._is_unknown_preflight_url(current_url):
+                break
+            await asyncio.sleep(0.2)
+
+        if not platform.is_login_page(current_url):
+            if self._is_expected_preflight_url(platform, current_url):
+                if logger:
+                    logger.info(
+                        "[LoginPreflight] status=authenticated target_url=%s page_url=%s "
+                        "session_url=%s final_url=%s attempts=%s",
+                        target_url,
+                        page_url,
+                        session_url,
+                        current_url,
+                        attempts,
+                    )
+                return {}
+            if logger:
+                logger.warning(
+                    "[LoginPreflight] status=unknown target_url=%s page_url=%s "
+                    "session_url=%s final_url=%s attempts=%s reason=unexpected_or_blank_url",
+                    target_url,
+                    page_url,
+                    session_url,
+                    current_url,
+                    attempts,
+                )
+            display_url = current_url or "(空)"
+            return {
+                "success": False,
+                "article_url": "",
+                "failure_reason": f"无法确认登录状态：访问发布页后当前 URL 为 {display_url}",
+                "publish_signal": "login_preflight_unknown",
+                "login_required": False,
+                "page_url": current_url,
+            }
+        reason = f"Cookie 已失效，需要重新登录：当前页面跳转到登录页 {current_url}"
+        if logger:
+            logger.info(
+                "[LoginPreflight] status=login_required target_url=%s page_url=%s "
+                "session_url=%s final_url=%s attempts=%s",
+                target_url,
+                page_url,
+                session_url,
+                current_url,
+                attempts,
+            )
+        return {
+            "success": False,
+            "article_url": "",
+            "failure_reason": reason,
+            "publish_signal": "login_required",
+            "login_required": True,
+            "page_url": current_url,
+        }
+
+    @staticmethod
+    def _is_unknown_preflight_url(url: str) -> bool:
+        normalized = str(url or "").strip().lower()
+        return not normalized or normalized == "about:blank" or normalized.startswith("data:")
+
+    @staticmethod
+    def _is_expected_preflight_url(platform, url: str) -> bool:
+        normalized = str(url or "").strip()
+        if not normalized:
+            return False
+        try:
+            current = urlparse(normalized)
+            publish = urlparse(str(platform.publish_url or ""))
+            home = urlparse(str(platform.home_url or ""))
+        except Exception:
+            return False
+        current_host = (current.netloc or "").lower()
+        expected_hosts = {host for host in ((publish.netloc or "").lower(), (home.netloc or "").lower()) if host}
+        if not current_host or current_host not in expected_hosts:
+            return False
+        return bool(current.scheme in {"http", "https"})
 
     @staticmethod
     def _looks_like_port_conflict(exc: Exception) -> bool:
@@ -724,7 +823,6 @@ class PublishService:
         logger.info(f"开始发布文章: {title}")
         publish_guard = {
             "confirm_publish_clicked": False,
-            "post_confirm_lookup_done": False,
             "forced_result": None,
             "failure_detected": None,
             "done_action_seen_at": 0.0,
@@ -871,54 +969,6 @@ class PublishService:
                 if self._did_execute_confirm_publish(last_item) and not publish_guard["confirm_publish_clicked"]:
                     publish_guard["confirm_publish_clicked"] = True
                     logger.info("[PublishGuard] confirm_publish_clicked")
-
-                if publish_guard["confirm_publish_clicked"] and not publish_guard["post_confirm_lookup_done"]:
-                    failure = await self._detect_publish_failure(session, logger)
-                    if failure.get("failed"):
-                        publish_guard["failure_detected"] = failure
-                        logger.warning(
-                            "[PublishGuard] explicit_failure_signal_detected: "
-                            f"{failure.get('signal', 'unknown')} | "
-                            f"text={failure.get('matched_text', '')} | url={failure.get('page_url', '')}"
-                        )
-                        self._log_final_summary(
-                            publish_guard,
-                            {
-                                "success": False,
-                                "article_url": "",
-                                "failure_reason": failure.get("matched_text", "")
-                                or failure.get("signal", ""),
-                            },
-                            logger,
-                        )
-                        agent_instance.state.stopped = True
-                        return
-
-                    publish_guard["post_confirm_lookup_done"] = True
-                    logger.info(
-                        "[PublishGuard] post_confirm_lookup_start title=%r wait_before_lookup=6s",
-                        title[:80],
-                    )
-                    await asyncio.sleep(6)
-                    lookup_start = time.perf_counter()
-                    lookup_result = await self._lookup_published_article_url(session, title, logger)
-                    lookup_elapsed = time.perf_counter() - lookup_start
-                    forced_result = self._build_post_confirm_lookup_result(lookup_result)
-                    publish_guard["forced_result"] = forced_result
-                    if forced_result["success"]:
-                        logger.info(
-                            "[PublishGuard] post_confirm_lookup_found duration=%.2fs article_url=%s",
-                            lookup_elapsed,
-                            forced_result.get("article_url", ""),
-                        )
-                    else:
-                        logger.warning(
-                            "[PublishGuard] post_confirm_lookup_miss duration=%.2fs reason=%r",
-                            lookup_elapsed,
-                            forced_result.get("failure_reason", ""),
-                        )
-                    logger.info("[PublishGuard] stop_after_confirm_lookup")
-                    agent_instance.state.stopped = True
             except Exception as exc:
                 logger.warning(f"[PublishGuard] step_end detect failed: {exc}")
 
@@ -954,10 +1004,24 @@ class PublishService:
         body_payload: PublishTaskBundle | None = None,
     ):
         from browser_use import ActionResult, Controller
-        from app.publishing.tools import BodyWritePayload, BodyWriter
+        from app.publishing.tools import (
+            PUBLISH_OBSERVATION_SCRIPT,
+            PUBLISH_OBSERVER_BOOTSTRAP_SCRIPT,
+            PUBLISH_OBSERVER_SCRIPT,
+            BodyWritePayload,
+            BodyWriter,
+            PublishObservationBuffer,
+            build_terminal_failure_payload,
+            evaluate_publish_script,
+            normalize_observed_snapshot,
+            summarize_observation_for_log,
+        )
 
         controller = Controller()
         writer = None
+        observation_buffer = PublishObservationBuffer(session_id=f"publish-{int(time.time() * 1000)}")
+        observer_bound_pages: set[int] = set()
+        observer_initialized_pages: set[int] = set()
         platform_name = (getattr(body_payload, "platform_name", "") or "").lower() if body_payload else ""
         if body_payload:
             writer = BodyWriter(
@@ -1037,8 +1101,9 @@ class PublishService:
             )
 
         @controller.action(
-            "发布后调用此工具获取文章链接。输入本次发布标题 title。工具会打开作品管理页，最多查询 3 次同标题文章；"
-            "found=true 时必须用 article_url 调用 done(success=true)；found=false 时必须用 reason 调用 done(success=false)。"
+            "当你根据页面证据判断文章已经发布成功或已提交审核后，必须调用本工具获取 article_url。"
+            "输入本次发布标题 title；工具会尝试查找同标题文章 URL。"
+            "如果未返回有效 article_url，发文任务不能返回 success=true；请观察页面和工具证据后调用 finish_publish_failed。"
         )
         async def get_published_article_url(title: str, browser_session):
             tool_start = time.perf_counter()
@@ -1068,7 +1133,250 @@ class PublishService:
                 include_in_memory=True,
             )
 
+        async def _ensure_publish_observer(page, browser_session=None) -> dict:
+            result = {
+                "ok": False,
+                "observer_installed": False,
+                "signal_count": len(observation_buffer.captured_signals),
+                "observer_session_id": observation_buffer.session_id,
+                "reason": "",
+            }
+            has_cdp_session = browser_session is not None and hasattr(
+                browser_session, "get_or_create_cdp_session"
+            )
+            if page is None and not has_cdp_session:
+                result["reason"] = "current_page_unavailable"
+                return result
+
+            page_key = id(page) if page is not None else 0
+
+            async def _push_publish_signal(_source, payload=None):
+                observation_buffer.record_signal(payload)
+
+            if page is not None and page_key not in observer_bound_pages:
+                try:
+                    if hasattr(page, "expose_binding"):
+                        await page.expose_binding("__publishSignalPush", _push_publish_signal)
+                except Exception as exc:
+                    message = str(exc)
+                    if "already" not in message.lower() and "exist" not in message.lower():
+                        observation_buffer.record_snapshot_error(f"expose_binding_failed: {message}")
+                        result["reason"] = message
+                try:
+                    if hasattr(page, "on"):
+                        page.on(
+                            "dialog",
+                            lambda dialog: observation_buffer.record_dialog(
+                                getattr(dialog, "message", "") or str(dialog)
+                            ),
+                        )
+                        page.on(
+                            "framenavigated",
+                            lambda frame: observation_buffer.record_navigation(getattr(frame, "url", "")),
+                        )
+                except Exception as exc:
+                    observation_buffer.record_snapshot_error(f"event_hook_failed: {exc}")
+                observer_bound_pages.add(page_key)
+
+            if page is not None and page_key not in observer_initialized_pages:
+                try:
+                    if hasattr(page, "add_init_script"):
+                        await page.add_init_script(PUBLISH_OBSERVER_BOOTSTRAP_SCRIPT)
+                except Exception as exc:
+                    observation_buffer.record_snapshot_error(f"add_init_script_failed: {exc}")
+                observer_initialized_pages.add(page_key)
+
+            try:
+                evaluated = await evaluate_publish_script(
+                    PUBLISH_OBSERVER_SCRIPT,
+                    browser_session=browser_session,
+                    page=page,
+                )
+                if isinstance(evaluated, dict):
+                    result.update(evaluated)
+                else:
+                    result.update(
+                        {
+                            "ok": True,
+                            "observer_installed": True,
+                            "raw_result": str(evaluated or "")[:300],
+                        }
+                    )
+            except Exception as exc:
+                result["reason"] = str(exc)
+                observation_buffer.record_snapshot_error(f"observer_install_failed: {exc}")
+            result["signal_count"] = len(observation_buffer.captured_signals)
+            result["observer_session_id"] = observation_buffer.session_id
+            return result
+
+        @controller.action(
+            "点击最终发布/确认发布按钮前必须调用。"
+            "在页面内安装发布结果监听器，捕获 2-3 秒自动消失的 toast、弹窗、字段校验或错误提示。"
+        )
+        async def prepare_publish_observer(browser_session):
+            tool_start = time.perf_counter()
+            result = {
+                "ok": False,
+                "observer_installed": False,
+                "signal_count": 0,
+                "reason": "",
+            }
+            try:
+                page = await browser_session.get_current_page()
+                result.update(await _ensure_publish_observer(page, browser_session=browser_session))
+            except Exception as exc:
+                result["reason"] = str(exc)
+            if logger:
+                logger.info(
+                    "[AgentTool] name=prepare_publish_observer duration=%.2fs ok=%s "
+                    "installed=%s signals=%s observer_session_id=%s reason=%r",
+                    time.perf_counter() - tool_start,
+                    result.get("ok"),
+                    result.get("observer_installed"),
+                    result.get("signal_count"),
+                    result.get("observer_session_id", ""),
+                    result.get("reason", ""),
+                )
+            return ActionResult(
+                extracted_content=json.dumps(result, ensure_ascii=False),
+                include_in_memory=True,
+            )
+
+        @controller.action(
+            "点击最终发布/确认发布按钮后调用，用于读取发布结果页面证据。"
+            "会在 wait_seconds 秒内短轮询页面内缓存、当前弹窗、toast、字段错误、URL 和标题；"
+            "本工具只返回证据，不替你判断成功或失败。"
+        )
+        async def observe_publish_result(browser_session, wait_seconds: float = 6.0):
+            tool_start = time.perf_counter()
+            wait_seconds = max(0.5, min(float(wait_seconds or 6.0), 12.0))
+            deadline = time.perf_counter() + wait_seconds
+            last_snapshot = {}
+            try:
+                while time.perf_counter() < deadline:
+                    page = await browser_session.get_current_page()
+                    has_cdp_session = hasattr(browser_session, "get_or_create_cdp_session")
+                    if page is None and not has_cdp_session:
+                        last_snapshot = self._publish_observation_error_snapshot(
+                            "observe_publish_result_current_page_unavailable"
+                        )
+                        observation_buffer.record_snapshot_error("observe_publish_result_current_page_unavailable")
+                        await asyncio.sleep(0.3)
+                        continue
+                    await _ensure_publish_observer(page, browser_session=browser_session)
+                    try:
+                        current = await evaluate_publish_script(
+                            PUBLISH_OBSERVATION_SCRIPT,
+                            original_title or "",
+                            browser_session=browser_session,
+                            page=page,
+                        )
+                    except Exception as exc:
+                        observation_buffer.record_snapshot_error(f"observe_evaluate_failed: {exc}")
+                        current = self._publish_observation_error_snapshot(f"observe_evaluate_failed: {exc}")
+                    if isinstance(current, dict):
+                        if not current.get("url"):
+                            observation_buffer.record_snapshot_error("observation_snapshot_missing_url")
+                            current = dict(current)
+                            fallback_url = str(getattr(page, "url", "") or "")
+                            if not fallback_url and hasattr(browser_session, "get_current_page_url"):
+                                try:
+                                    fallback_url = str(await browser_session.get_current_page_url() or "")
+                                except Exception:
+                                    fallback_url = ""
+                            current["url"] = fallback_url
+                        last_snapshot = observation_buffer.merge_snapshot(current)
+                    else:
+                        observation_buffer.record_snapshot_error(
+                            f"observe_evaluate_returned_{type(current).__name__}"
+                        )
+                        last_snapshot = observation_buffer.merge_snapshot(
+                            self._publish_observation_error_snapshot(
+                                f"observe_evaluate_returned_{type(current).__name__}"
+                            )
+                        )
+                    normalized = normalize_observed_snapshot(
+                        last_snapshot,
+                        wait_seconds=wait_seconds,
+                        article_title=original_title,
+                    )
+                    if normalized.get("signals_found"):
+                        break
+                    await asyncio.sleep(0.3)
+            except Exception as exc:
+                last_snapshot = self._publish_observation_error_snapshot(
+                    f"observe_publish_result_failed: {exc}"
+                )
+                observation_buffer.record_snapshot_error(f"observe_publish_result_failed: {exc}")
+
+            normalized = normalize_observed_snapshot(
+                observation_buffer.merge_snapshot(last_snapshot),
+                wait_seconds=wait_seconds,
+                article_title=original_title,
+            )
+            if logger:
+                logger.info(
+                    "[AgentTool] name=observe_publish_result duration=%.2fs signals_found=%s "
+                    "captured=%s dialogs=%s toasts=%s errors=%s url=%s "
+                    "observer_session_id=%s snapshot_error=%r",
+                    time.perf_counter() - tool_start,
+                    normalized.get("signals_found"),
+                    len(normalized.get("captured_signals", [])),
+                    len(normalized.get("dialogs", [])),
+                    len(normalized.get("toasts", [])),
+                    len(normalized.get("form_errors", [])),
+                    normalized.get("url", ""),
+                    normalized.get("observer_session_id", ""),
+                    normalized.get("snapshot_error", ""),
+                )
+                logger.info(
+                    "[AgentTool] name=observe_publish_result evidence=%s",
+                    json.dumps(
+                        summarize_observation_for_log(normalized),
+                        ensure_ascii=False,
+                    ),
+                )
+            return ActionResult(
+                extracted_content=json.dumps(normalized, ensure_ascii=False),
+                include_in_memory=True,
+            )
+
+        @controller.action(
+            "任意阶段当你根据页面原文和上下文判断这是不可恢复问题或不可恢复失败时必须调用。"
+            "reason 优先填写页面原文，evidence 可填写页面证据、当前阶段、已执行动作或 observe_publish_result 返回的关键证据；"
+            "调用后任务立即以失败结束，不要继续点击或调用其他发布相关工具。"
+        )
+        async def finish_publish_failed(reason: str, evidence: str = "", browser_session=None):
+            payload = build_terminal_failure_payload(reason=reason, evidence=evidence)
+            if logger:
+                logger.warning(
+                    "[AgentTool] name=finish_publish_failed reason=%r evidence=%r",
+                    str(reason or "")[:200],
+                    str(evidence or "")[:300],
+                )
+            return ActionResult(
+                is_done=True,
+                success=False,
+                extracted_content=payload,
+                metadata={"publish_signal": "agent_terminal_failure"},
+            )
+
         return controller
+
+    @staticmethod
+    def _publish_observation_error_snapshot(message: str) -> dict:
+        return {
+            "url": "",
+            "title": "",
+            "visible_text_excerpt": message,
+            "captured_signals": [],
+            "dialogs": [],
+            "toasts": [],
+            "form_errors": [message],
+            "button_area_text": "",
+            "management_page_hint": False,
+            "article_title_visible": False,
+        }
 
     @staticmethod
     async def _cleanup_awaitable_with_timeout(
@@ -1227,34 +1535,6 @@ class PublishService:
             if any(marker in normalized_text for marker in cover_markers):
                 return True
         return False
-
-    async def _detect_publish_failure(self, session, logger) -> dict:
-        try:
-            page = await session.get_current_page()
-            page_url = ""
-            page_text = ""
-
-            if page is not None:
-                try:
-                    page_url = await session.get_current_page_url()
-                except Exception:
-                    page_url = ""
-
-                try:
-                    page_text = await page.evaluate(
-                        """() => {
-                            const bodyText = document.body ? (document.body.innerText || "") : "";
-                            return bodyText.slice(0, 5000);
-                        }"""
-                    )
-                except Exception:
-                    page_text = ""
-
-            return self._detect_publish_failure_from_state(page_url=page_url, page_text=page_text)
-        except Exception as exc:
-            if logger:
-                logger.warning(f"[PublishGuard] detect_publish_failure failed: {exc}")
-            return {"failed": False, "signal": "", "page_url": "", "matched_text": ""}
 
     async def _capture_page_state(
         self,
@@ -1773,21 +2053,6 @@ class PublishService:
             "reason": last_reason,
         }
 
-    def _detect_publish_failure_from_state(self, page_url: str, page_text: str) -> dict:
-        normalized_url = page_url or ""
-        normalized_text = page_text or ""
-
-        for text in self._publish_failure_texts:
-            if text and text in normalized_text:
-                return {
-                    "failed": True,
-                    "signal": "failure_text",
-                    "page_url": normalized_url,
-                    "matched_text": text,
-                }
-
-        return {"failed": False, "signal": "", "page_url": normalized_url, "matched_text": ""}
-
     def _parse_agent_outcome(
         self,
         history,
@@ -1813,6 +2078,7 @@ class PublishService:
                         result["success"] = bool(parsed.get("success")) or result["success"]
                         result["account"] = parsed.get("account_name", "") or parsed.get("account", "")
                         result["article_url"] = parsed.get("article_url", "") or parsed.get("url", "") or result["article_url"]
+                        result["publish_signal"] = parsed.get("publish_signal", "") or result["publish_signal"]
                         if not result["success"]:
                             result["failure_reason"] = parsed.get("failure_reason", "") or parsed.get("message", "")
                 except (json.JSONDecodeError, TypeError):
@@ -1879,27 +2145,6 @@ class PublishService:
                     reason = reason[:marker_index].strip()
             return " ".join(reason.split())
         return ""
-
-    @staticmethod
-    def _build_post_confirm_lookup_result(lookup_result: dict) -> dict:
-        article_url = (lookup_result or {}).get("article_url", "") or ""
-        if (lookup_result or {}).get("found") and article_url:
-            return {
-                "success": True,
-                "article_url": article_url,
-                "account": "",
-                "failure_reason": "",
-                "publish_signal": "post_confirm_lookup_found",
-            }
-
-        reason = (lookup_result or {}).get("reason", "") or "post_confirm_lookup_miss"
-        return {
-            "success": False,
-            "article_url": "",
-            "account": "",
-            "failure_reason": reason,
-            "publish_signal": "post_confirm_lookup_miss",
-        }
 
     def _extract_article_url_from_text(self, text: str) -> str:
         urls = re.findall(r"https?://[^\s<>\"'，。；、)）\]]+", text or "")

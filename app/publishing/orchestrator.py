@@ -23,7 +23,8 @@ from app.domain.job import (
 )
 from app.platforms import registry
 from app.remote.login import RemoteLoginRunner
-from app.core.config import LOG_DIR
+from app.core.config import LOG_DIR, PUBLISH_JOB_TIMEOUT_SECONDS
+from app.utils.urls import normalize_article_url
 
 
 EXECUTING_PUBLISH_STATUSES = {
@@ -33,6 +34,17 @@ EXECUTING_PUBLISH_STATUSES = {
     STATUS_WAITING_COOKIE,
     STATUS_PUBLISHING,
 }
+
+MISSING_ARTICLE_URL_FAILURE_REASON = "发布已提交或可能成功，但未获取到文章 URL"
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds >= 60 and seconds % 60 == 0:
+        minutes = int(seconds // 60)
+        return f"{minutes} 分钟"
+    if seconds >= 1 and seconds == int(seconds):
+        return f"{int(seconds)} 秒"
+    return f"{seconds:g} 秒"
 
 
 class PublishAgent:
@@ -60,6 +72,7 @@ class PublishAgent:
         # 才惰性创建）。logger 按 session_id 反查 job，warm 会话（无 job）落到通用 sink。
         self.remote_runner = remote_runner or RemoteLoginRunner(
             on_cookie_ready=self._resume_for_remote_session,
+            on_session_timeout=self._fail_for_remote_session_timeout,
             logger_factory=self._remote_logger,
         )
         self._background_tasks: set[asyncio.Task] = set()
@@ -397,16 +410,45 @@ class PublishAgent:
             logger.info("发布实时查看链接已生成 live_url=%s", live_url)
 
         try:
-            result = await self.publish_adapter.publish(
-                platform=platform,
-                title=str(payload.get("title", "") or ""),
-                content=str(payload.get("content", "") or ""),
-                cookie=cookie,
-                request_id=job_id,
-                article_account_id=article_account_id,
-                cover_image_url=payload.get("cover_image_url"),
-                on_live_url_ready=on_live_url_ready,
-                channel_id=channel_id,
+            result = await asyncio.wait_for(
+                self.publish_adapter.publish(
+                    platform=platform,
+                    title=str(payload.get("title", "") or ""),
+                    content=str(payload.get("content", "") or ""),
+                    cookie=cookie,
+                    request_id=job_id,
+                    article_account_id=article_account_id,
+                    cover_image_url=payload.get("cover_image_url"),
+                    on_live_url_ready=on_live_url_ready,
+                    channel_id=channel_id,
+                ),
+                timeout=PUBLISH_JOB_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            reason = (
+                f"发文任务超过 {_format_duration(PUBLISH_JOB_TIMEOUT_SECONDS)}未完成，已强制终止"
+            )
+            result = {
+                "success": False,
+                "article_url": "",
+                "failure_reason": reason,
+                "publish_signal": "publish_timeout",
+            }
+            logger.error(reason)
+            self.job_store.update(
+                job_id,
+                status=STATUS_FAILED,
+                result=result,
+                error=reason,
+                live_url="",
+            )
+            return AutoPublishResponse(
+                code=500,
+                job_id=job_id,
+                status=STATUS_FAILED,
+                message=reason,
+                log_file_path=log_file_path,
+                result=result,
             )
         except Exception as exc:
             logger.exception("自动化发文服务异常: %s", exc)
@@ -426,6 +468,7 @@ class PublishAgent:
                 log_file_path=log_file_path,
             )
 
+        result = self._enforce_publish_success_contract(platform, result, article_account_id)
         status = STATUS_SUCCEEDED if result.get("success") else STATUS_FAILED
         if status == STATUS_FAILED and self._looks_like_login_required(result) and not self._cookie_refresh_attempted(job):
             logger.info("检测到 Cookie 可能失效，切换远程登录 failure_reason=%s", result.get("failure_reason", ""))
@@ -450,6 +493,23 @@ class PublishAgent:
             log_file_path=log_file_path,
             result=result,
         )
+
+    @staticmethod
+    def _enforce_publish_success_contract(platform: str, result: dict, article_account_id: str = "") -> dict:
+        normalized = dict(result or {})
+        article_url = normalize_article_url(
+            platform,
+            str(normalized.get("article_url", "") or "").strip(),
+            account_id=article_account_id,
+        )
+        normalized["article_url"] = article_url
+        if normalized.get("success") and not article_url:
+            normalized["success"] = False
+            normalized["failure_reason"] = (
+                str(normalized.get("failure_reason", "") or "").strip()
+                or MISSING_ARTICLE_URL_FAILURE_REASON
+            )
+        return normalized
 
     # ------------------------------------------------------------------
     # Cookie capture → channel binding → resume
@@ -690,6 +750,41 @@ class PublishAgent:
         if job is None:
             return
         await self.resume_after_cookie(job.job_id, cookies)
+
+    async def _fail_for_remote_session_timeout(self, session_id: str, reason: str) -> None:
+        job = self.job_store.find_by_remote_session(session_id)
+        if job is None:
+            return
+        if job.status not in {STATUS_STARTING_REMOTE_LOGIN, STATUS_WAITING_COOKIE}:
+            return
+
+        from app.remote import login as remote_login
+
+        message = (
+            f"登录超时：{_format_duration(remote_login.REMOTE_LOGIN_WAITING_TTL)}内未完成登录，"
+            "已关闭远程登录会话"
+        )
+        result = {
+            "success": False,
+            "failure_reason": message,
+            "publish_signal": reason,
+        }
+        logger, _ = setup_job_logger(job.job_id, self.log_dir)
+        logger.warning(
+            "远程登录会话超时关闭 session_id=%s reason=%s", session_id, reason
+        )
+        self.job_store.update(
+            job.job_id,
+            status=STATUS_FAILED,
+            result=result,
+            error=message,
+            live_url="",
+            login_url="",
+            remote_session_id="",
+        )
+        channel_id = str((job.payload or {}).get("channel_id", "") or "")
+        if job.type == "publish" and channel_id:
+            self._schedule_queue_advance(channel_id)
 
     def _cookie_refresh_attempted(self, job) -> bool:
         return bool(job and (job.payload or {}).get("cookie_refresh_attempted"))

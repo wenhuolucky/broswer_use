@@ -19,6 +19,7 @@ class PlatformConfig:
     # an auth domain counts" (used by platforms like Sohu that don't expose a
     # single canonical session cookie name).
     login_cookie_names: list = field(default_factory=list)
+    login_url_markers: list = field(default_factory=list)
 
     def get_agent_prompt(
         self,
@@ -55,6 +56,14 @@ class PlatformConfig:
             if any(auth_domain in domain or domain in auth_domain for auth_domain in self.auth_domains):
                 return True
         return False
+
+    def is_login_page(self, url: str, visible_text: str = "") -> bool:
+        """根据平台登录入口特征判断当前页面是否要求重新登录。
+
+        这是浏览器预检用的页面级判断，只看最终 URL 是否落到登录入口。
+        """
+        normalized_url = str(url or "").lower()
+        return any(str(marker).lower() in normalized_url for marker in self.login_url_markers)
 
     def extract_account_name(self, cookies: list) -> str:
         for cookie in cookies:
