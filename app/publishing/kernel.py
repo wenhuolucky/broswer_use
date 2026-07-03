@@ -1014,6 +1014,7 @@ class PublishService:
             build_terminal_failure_payload,
             evaluate_publish_script,
             normalize_observed_snapshot,
+            summarize_observation_for_log,
         )
 
         controller = Controller()
@@ -1327,6 +1328,13 @@ class PublishService:
                     normalized.get("url", ""),
                     normalized.get("observer_session_id", ""),
                     normalized.get("snapshot_error", ""),
+                )
+                logger.info(
+                    "[AgentTool] name=observe_publish_result evidence=%s",
+                    json.dumps(
+                        summarize_observation_for_log(normalized),
+                        ensure_ascii=False,
+                    ),
                 )
             return ActionResult(
                 extracted_content=json.dumps(normalized, ensure_ascii=False),

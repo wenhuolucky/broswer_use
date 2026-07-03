@@ -9,6 +9,7 @@ from app.publishing.tools.publish_result import (
     build_terminal_failure_payload,
     evaluate_publish_script,
     normalize_observed_snapshot,
+    summarize_observation_for_log,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "build_terminal_failure_payload",
     "evaluate_publish_script",
     "normalize_observed_snapshot",
+    "summarize_observation_for_log",
 ]

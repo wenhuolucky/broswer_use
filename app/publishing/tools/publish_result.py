@@ -454,6 +454,61 @@ def normalize_observed_snapshot(
     }
 
 
+def summarize_observation_for_log(snapshot: dict[str, Any] | None) -> dict[str, list[str]]:
+    """提取适合写日志的发布观察证据文本。
+
+    完整 snapshot 会包含正文和页面大段文本，直接打日志容易截断掉真正有用的
+    toast / 弹窗 / 字段错误。这里只保留短文本证据，方便从日志判断观察工具
+    到底看到了什么。
+    """
+
+    raw = snapshot if isinstance(snapshot, dict) else {}
+    captured_signals = _normalize_signal_list(raw.get("captured_signals"))
+    return {
+        "captured_texts": _limit_log_items(
+            [item.get("text", "") for item in captured_signals]
+        ),
+        "captured_kinds": _limit_log_items(
+            [item.get("kind", "") for item in captured_signals],
+            text_limit=80,
+            dedupe=False,
+        ),
+        "captured_selectors": _limit_log_items(
+            [item.get("selector_hint", "") for item in captured_signals],
+            text_limit=160,
+            dedupe=False,
+        ),
+        "dialog_texts": _limit_log_items(raw.get("dialogs")),
+        "toast_texts": _limit_log_items(raw.get("toasts")),
+        "form_error_texts": _limit_log_items(raw.get("form_errors")),
+    }
+
+
+def _limit_log_items(
+    value: Any,
+    *,
+    item_limit: int = 5,
+    text_limit: int = 180,
+    dedupe: bool = True,
+) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = _truncate_text(item, limit=text_limit)
+        if not text:
+            continue
+        if dedupe:
+            if text in seen:
+                continue
+            seen.add(text)
+        result.append(text)
+        if len(result) >= item_limit:
+            break
+    return result
+
+
 def _normalize_signal_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
