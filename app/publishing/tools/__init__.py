@@ -7,6 +7,7 @@ from app.publishing.tools.publish_result import (
     PUBLISH_OBSERVER_SCRIPT,
     PublishObservationBuffer,
     build_terminal_failure_payload,
+    evaluate_publish_script,
     normalize_observed_snapshot,
 )
 
@@ -18,5 +19,6 @@ __all__ = [
     "PUBLISH_OBSERVER_SCRIPT",
     "PublishObservationBuffer",
     "build_terminal_failure_payload",
+    "evaluate_publish_script",
     "normalize_observed_snapshot",
 ]

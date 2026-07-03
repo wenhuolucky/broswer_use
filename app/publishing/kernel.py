@@ -1012,6 +1012,7 @@ class PublishService:
             BodyWriter,
             PublishObservationBuffer,
             build_terminal_failure_payload,
+            evaluate_publish_script,
             normalize_observed_snapshot,
         )
 
@@ -1131,7 +1132,7 @@ class PublishService:
                 include_in_memory=True,
             )
 
-        async def _ensure_publish_observer(page) -> dict:
+        async def _ensure_publish_observer(page, browser_session=None) -> dict:
             result = {
                 "ok": False,
                 "observer_installed": False,
@@ -1139,16 +1140,19 @@ class PublishService:
                 "observer_session_id": observation_buffer.session_id,
                 "reason": "",
             }
-            if page is None:
+            has_cdp_session = browser_session is not None and hasattr(
+                browser_session, "get_or_create_cdp_session"
+            )
+            if page is None and not has_cdp_session:
                 result["reason"] = "current_page_unavailable"
                 return result
 
-            page_key = id(page)
+            page_key = id(page) if page is not None else 0
 
             async def _push_publish_signal(_source, payload=None):
                 observation_buffer.record_signal(payload)
 
-            if page_key not in observer_bound_pages:
+            if page is not None and page_key not in observer_bound_pages:
                 try:
                     if hasattr(page, "expose_binding"):
                         await page.expose_binding("__publishSignalPush", _push_publish_signal)
@@ -1173,7 +1177,7 @@ class PublishService:
                     observation_buffer.record_snapshot_error(f"event_hook_failed: {exc}")
                 observer_bound_pages.add(page_key)
 
-            if page_key not in observer_initialized_pages:
+            if page is not None and page_key not in observer_initialized_pages:
                 try:
                     if hasattr(page, "add_init_script"):
                         await page.add_init_script(PUBLISH_OBSERVER_BOOTSTRAP_SCRIPT)
@@ -1182,7 +1186,11 @@ class PublishService:
                 observer_initialized_pages.add(page_key)
 
             try:
-                evaluated = await page.evaluate(PUBLISH_OBSERVER_SCRIPT)
+                evaluated = await evaluate_publish_script(
+                    PUBLISH_OBSERVER_SCRIPT,
+                    browser_session=browser_session,
+                    page=page,
+                )
                 if isinstance(evaluated, dict):
                     result.update(evaluated)
                 else:
@@ -1214,7 +1222,7 @@ class PublishService:
             }
             try:
                 page = await browser_session.get_current_page()
-                result.update(await _ensure_publish_observer(page))
+                result.update(await _ensure_publish_observer(page, browser_session=browser_session))
             except Exception as exc:
                 result["reason"] = str(exc)
             if logger:
@@ -1246,16 +1254,22 @@ class PublishService:
             try:
                 while time.perf_counter() < deadline:
                     page = await browser_session.get_current_page()
-                    if page is None:
+                    has_cdp_session = hasattr(browser_session, "get_or_create_cdp_session")
+                    if page is None and not has_cdp_session:
                         last_snapshot = self._publish_observation_error_snapshot(
                             "observe_publish_result_current_page_unavailable"
                         )
                         observation_buffer.record_snapshot_error("observe_publish_result_current_page_unavailable")
                         await asyncio.sleep(0.3)
                         continue
-                    await _ensure_publish_observer(page)
+                    await _ensure_publish_observer(page, browser_session=browser_session)
                     try:
-                        current = await page.evaluate(PUBLISH_OBSERVATION_SCRIPT, original_title or "")
+                        current = await evaluate_publish_script(
+                            PUBLISH_OBSERVATION_SCRIPT,
+                            original_title or "",
+                            browser_session=browser_session,
+                            page=page,
+                        )
                     except Exception as exc:
                         observation_buffer.record_snapshot_error(f"observe_evaluate_failed: {exc}")
                         current = self._publish_observation_error_snapshot(f"observe_evaluate_failed: {exc}")
@@ -1263,7 +1277,13 @@ class PublishService:
                         if not current.get("url"):
                             observation_buffer.record_snapshot_error("observation_snapshot_missing_url")
                             current = dict(current)
-                            current["url"] = str(getattr(page, "url", "") or "")
+                            fallback_url = str(getattr(page, "url", "") or "")
+                            if not fallback_url and hasattr(browser_session, "get_current_page_url"):
+                                try:
+                                    fallback_url = str(await browser_session.get_current_page_url() or "")
+                                except Exception:
+                                    fallback_url = ""
+                            current["url"] = fallback_url
                         last_snapshot = observation_buffer.merge_snapshot(current)
                     else:
                         observation_buffer.record_snapshot_error(

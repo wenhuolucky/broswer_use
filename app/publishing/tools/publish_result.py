@@ -250,6 +250,94 @@ PUBLISH_OBSERVATION_SCRIPT = r"""(articleTitle) => {
 }"""
 
 
+def build_cdp_json_expression(function_script: str, *args: Any) -> str:
+    """把页面函数包装成 CDP Runtime.evaluate 可直接执行的 JSON 字符串表达式。"""
+
+    serialized_args = ", ".join(json.dumps(arg, ensure_ascii=False) for arg in args)
+    return f"(() => JSON.stringify(({function_script})({serialized_args})))()"
+
+
+async def evaluate_publish_script(
+    function_script: str,
+    *args: Any,
+    browser_session: Any = None,
+    page: Any = None,
+) -> Any:
+    """稳定执行发布观察 JS。
+
+    browser-use 的 Page.evaluate 在部分版本/包装层下会把对象结果变成字符串，
+    甚至拿不到当前 Playwright page。这里优先走 CDP Runtime.evaluate(returnByValue)，
+    失败后再回退到 page.evaluate，并统一把 JSON 字符串还原为 dict/list。
+    """
+
+    errors: list[str] = []
+    if browser_session is not None and hasattr(browser_session, "get_or_create_cdp_session"):
+        try:
+            cdp = await browser_session.get_or_create_cdp_session()
+            response = await cdp.cdp_client.send.Runtime.evaluate(
+                params={
+                    "expression": build_cdp_json_expression(function_script, *args),
+                    "returnByValue": True,
+                    "awaitPromise": True,
+                },
+                session_id=cdp.session_id,
+            )
+            return coerce_js_evaluation_result(_extract_cdp_runtime_value(response))
+        except Exception as exc:
+            errors.append(f"cdp_runtime_evaluate_failed: {exc}")
+
+    if page is not None and hasattr(page, "evaluate"):
+        try:
+            return coerce_js_evaluation_result(await page.evaluate(function_script, *args))
+        except Exception as exc:
+            errors.append(f"page_evaluate_failed: {exc}")
+
+    raise RuntimeError("; ".join(errors) or "javascript_evaluate_unavailable")
+
+
+def coerce_js_evaluation_result(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _extract_cdp_runtime_value(response: Any) -> Any:
+    raw = _model_to_plain(response)
+    if isinstance(raw, dict) and raw.get("exceptionDetails"):
+        raise RuntimeError(str(raw.get("exceptionDetails")))
+
+    result = raw.get("result") if isinstance(raw, dict) else getattr(response, "result", None)
+    result = _model_to_plain(result)
+    if isinstance(result, dict):
+        if "value" in result:
+            return result.get("value")
+        if result.get("type") == "undefined":
+            return ""
+        if "description" in result:
+            return result.get("description")
+
+    if isinstance(raw, dict) and "value" in raw:
+        return raw.get("value")
+    if hasattr(response, "value"):
+        return getattr(response, "value")
+    return raw
+
+
+def _model_to_plain(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        try:
+            return value.model_dump()
+        except Exception:
+            return value
+    return value
+
+
 def build_terminal_failure_payload(reason: str, evidence: str = "") -> str:
     """构造不可恢复失败的最终 JSON。"""
 
