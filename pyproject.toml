@@ -21,6 +21,7 @@ dependencies = [
     "loguru>=0.7.3",
     "markdown>=3.5.0",  # 用于将 Markdown 转换为 HTML
     "pymysql>=1.2.0",
+    "cryptography>=42.0.0",  # 用于手机号加密（AES-SIV 确定性加密 + HKDF）
 ]
 
 [dependency-groups]

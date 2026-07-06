@@ -4,6 +4,7 @@ import os
 from threading import RLock
 from typing import Any
 
+from app.accounts.crypto import PhoneCrypto, normalize_phone
 from app.accounts.errors import AccountConflict, AccountStoreUnavailable
 from app.accounts.models import ArticleAccount, UNAVAILABLE_STATUSES
 
@@ -17,13 +18,24 @@ class MySQLAccountStore:
     """MySQL backed article_accounts store.
 
     表由部署侧提前创建；这里不做 migrate，只做读写。
+    phone 字段存储 AES-SIV 确定性加密密文，同手机号同密钥密文相同，
+    可直接用于 WHERE phone = ? 查询。
     """
 
     def __init__(self):
         self._lock = RLock()
+        self._crypto: PhoneCrypto | None = None
+
+    def _get_crypto(self) -> PhoneCrypto:
+        """懒加载加密模块，首次调用时初始化。"""
+        if self._crypto is None:
+            self._crypto = PhoneCrypto()
+        return self._crypto
 
     def ready(self) -> bool:
         self._require_config()
+        # 初始化加密模块，密钥缺失时在此报错
+        self._get_crypto()
         conn = self._connect()
         try:
             with conn.cursor() as cur:
@@ -68,12 +80,14 @@ class MySQLAccountStore:
         return [self._row_to_account(row) for row in rows]
 
     def get_account(self, *, group_id: str, platform: str, phone: str) -> ArticleAccount | None:
+        crypto = self._get_crypto()
+        encrypted_phone = crypto.encrypt_phone(normalize_phone(phone))
         with self._locked_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"SELECT {_SELECT_COLUMNS} FROM article_accounts "
                     "WHERE group_id = %s AND platform = %s AND phone = %s LIMIT 1",
-                    (group_id, platform, phone),
+                    (group_id, platform, encrypted_phone),
                 )
                 row = cur.fetchone()
         return self._row_to_account(row) if row else None
@@ -90,6 +104,8 @@ class MySQLAccountStore:
         consecutive_failures: int,
         reset_failures: bool,
     ) -> ArticleAccount:
+        crypto = self._get_crypto()
+        encrypted_phone = crypto.encrypt_phone(normalize_phone(phone))
         failures = 0 if reset_failures else max(0, int(consecutive_failures))
         with self._locked_connection() as conn:
             with conn.cursor() as cur:
@@ -108,7 +124,7 @@ class MySQLAccountStore:
                         consecutive_failures = VALUES(consecutive_failures),
                         updated_at = CURRENT_TIMESTAMP
                     """,
-                    (group_id, group_text, platform, phone, channel, status, failures),
+                    (group_id, group_text, platform, encrypted_phone, channel, status, failures),
                 )
         account = self.get_account(group_id=group_id, platform=platform, phone=phone)
         if account is None:
@@ -127,13 +143,10 @@ class MySQLAccountStore:
         reset_failures: bool | None = None,
         consecutive_failures: int | None = None,
     ) -> ArticleAccount | None:
+        crypto = self._get_crypto()
         current = self.get_account(group_id=group_id, platform=platform, phone=phone)
         if current is None:
             return None
-        if new_phone and new_phone != phone:
-            existing = self.get_account(group_id=group_id, platform=platform, phone=new_phone)
-            if existing is not None:
-                raise AccountConflict("account_phone_exists", "当前分组下该手机号已存在")
 
         sets: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
         params: list[Any] = []
@@ -141,8 +154,12 @@ class MySQLAccountStore:
             sets.append("group_text = %s")
             params.append(group_text)
         if new_phone:
+            normalized_new = normalize_phone(new_phone)
+            existing = self.get_account(group_id=group_id, platform=platform, phone=normalized_new)
+            if existing is not None:
+                raise AccountConflict("account_phone_exists", "当前分组下该手机号已存在")
             sets.append("phone = %s")
-            params.append(new_phone)
+            params.append(crypto.encrypt_phone(normalized_new))
         if status is not None:
             sets.append("status = %s")
             params.append(status)
@@ -152,7 +169,9 @@ class MySQLAccountStore:
         elif consecutive_failures is not None:
             sets.append("consecutive_failures = %s")
             params.append(max(0, int(consecutive_failures)))
-        params.extend([group_id, platform, phone])
+
+        encrypted_old = crypto.encrypt_phone(normalize_phone(phone))
+        params.extend([group_id, platform, encrypted_old])
 
         with self._locked_connection() as conn:
             with conn.cursor() as cur:
@@ -164,14 +183,16 @@ class MySQLAccountStore:
         return self.get_account(group_id=group_id, platform=platform, phone=new_phone or phone)
 
     def delete_account(self, *, group_id: str, platform: str, phone: str) -> ArticleAccount | None:
+        crypto = self._get_crypto()
         account = self.get_account(group_id=group_id, platform=platform, phone=phone)
         if account is None:
             return None
+        encrypted_phone = crypto.encrypt_phone(normalize_phone(phone))
         with self._locked_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM article_accounts WHERE group_id = %s AND platform = %s AND phone = %s",
-                    (group_id, platform, phone),
+                    (group_id, platform, encrypted_phone),
                 )
         return account
 
@@ -237,11 +258,16 @@ class MySQLAccountStore:
 
         return _ConnectionContext()
 
-    @staticmethod
-    def _row_to_account(row: dict[str, Any]) -> ArticleAccount:
+    def _row_to_account(self, row: dict[str, Any]) -> ArticleAccount:
+        crypto = self._get_crypto()
+        encrypted_phone = str(row["phone"] or "")
+        try:
+            decrypted_phone = crypto.decrypt_phone(encrypted_phone)
+        except Exception as exc:
+            raise AccountStoreUnavailable(f"手机号解密失败: {exc}") from exc
         return ArticleAccount(
             id=int(row["id"]),
-            phone=str(row["phone"] or ""),
+            phone=decrypted_phone,
             platform=str(row["platform"] or ""),
             channel=str(row["channel"] or ""),
             status=str(row["status"] or "normal"),
