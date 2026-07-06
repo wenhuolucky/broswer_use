@@ -12,12 +12,26 @@ class ToutiaoPlatform(PlatformConfig):
     publish_url: str = "https://mp.toutiao.com/profile_v4/graphic/publish"
     auth_domains: list = field(default_factory=lambda: [".toutiao.com", "mp.toutiao.com", "www.toutiao.com"])
     account_cookies: list = field(default_factory=lambda: ["uid_tt", "uid_tt_ss"])
-    # 头条登录态的标志性 cookie；extract_native_key 默认取首个（uid_tt）做账号去重键。
+    # 头条登录态的标志性 cookie；login_cookie_names 用于 has_login_cookie 判断是否已登录。
     login_cookie_names: list = field(default_factory=lambda: [
         "uid_tt", "uid_tt_ss", "sessionid", "sessionid_ss",
         "sid_tt", "sid_guard", "sid_ucp_v1", "ssid_ucp_v1",
     ])
     login_url_markers: list = field(default_factory=lambda: ["/auth/page/login"])
+
+    def extract_native_key(self, cookies: list) -> str:
+        """头条登录会话去重键，使用 tt_webid。
+
+        注意：tt_webid 是新开浏览器实例时会变的设备标识，
+        因此仅能在同一浏览器实例内防止重复登录会话产生多个 channel。
+        真正的账号级去重由绑定接口（group_id + platform + phone）处理。
+        """
+        by_name = {c.get("name"): c.get("value") for c in cookies if c.get("name")}
+        tt_webid = by_name.get("tt_webid", "")
+        if tt_webid:
+            return tt_webid
+        # 兜底：退回到 account_cookies 逻辑
+        return super().extract_native_key(cookies)
 
     def get_agent_prompt(
         self,
