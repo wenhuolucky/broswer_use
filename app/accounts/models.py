@@ -26,6 +26,17 @@ def validate_phone(phone: str) -> str:
     return phone
 
 
+def normalize_phone(phone: str) -> str:
+    """归一化手机号：去除空格和连字符，校验 11 位格式。
+
+    用于加密和查询索引生成前统一手机号格式。
+    """
+    normalized = (phone or "").replace(" ", "").replace("-", "")
+    if not _PHONE_RE.match(normalized):
+        raise ValueError("手机号格式不正确")
+    return normalized
+
+
 def mask_phone(phone: str) -> str:
     if len(phone) != 11:
         return phone
