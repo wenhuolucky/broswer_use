@@ -103,12 +103,30 @@ class MySQLAccountStore:
         status: str,
         consecutive_failures: int,
         reset_failures: bool,
-    ) -> ArticleAccount:
+    ) -> tuple[ArticleAccount, str | None]:
+        """保存或重新绑定账号。
+
+        Returns:
+            (account, old_channel_id) — old_channel_id 为被替换的旧 channel（与入参不同），
+            调用方应清理旧 channel 的关联资源（cookie、代理绑定等）。
+            新增或 channel 未变化时 old_channel_id 为 None。
+        """
         crypto = self._get_crypto()
         encrypted_phone = crypto.encrypt_phone(normalize_phone(phone))
         failures = 0 if reset_failures else max(0, int(consecutive_failures))
+        old_channel: str | None = None
         with self._locked_connection() as conn:
             with conn.cursor() as cur:
+                # 先查旧 channel，用于通知上层清理
+                cur.execute(
+                    f"SELECT channel FROM article_accounts "
+                    "WHERE group_id = %s AND platform = %s AND phone = %s LIMIT 1",
+                    (group_id, platform, encrypted_phone),
+                )
+                existing_row = cur.fetchone()
+                if existing_row and str(existing_row["channel"] or "") != channel:
+                    old_channel = str(existing_row["channel"])
+
                 cur.execute(
                     """
                     INSERT INTO article_accounts
@@ -129,7 +147,7 @@ class MySQLAccountStore:
         account = self.get_account(group_id=group_id, platform=platform, phone=phone)
         if account is None:
             raise AccountStoreUnavailable("保存账号后未能读取账号记录")
-        return account
+        return account, old_channel
 
     def update_account(
         self,

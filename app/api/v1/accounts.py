@@ -247,7 +247,7 @@ async def upsert_account(
     if channel.platform != platform:
         raise account_error(409, "channel_platform_mismatch", "channel 平台和账号平台不一致")
     try:
-        account = account_store.upsert_account(
+        account, old_channel_id = account_store.upsert_account(
             group_id=group_id,
             group_text=request.group_text or group_id,
             platform=platform,
@@ -259,6 +259,11 @@ async def upsert_account(
         )
     except Exception as exc:
         _handle_store_error(exc)
+
+    # 清理被替换的旧 channel 关联资源（cookie、代理绑定）
+    if old_channel_id and old_channel_id != request.channel_id:
+        _cleanup_old_channel(old_channel_id)
+
     return _account_response(account, include_channel=True, include_runtime=False)
 
 
@@ -429,3 +434,15 @@ def _unassign_proxy(channel_id: str, cleanup_warnings: list[str]) -> bool:
     except Exception as exc:
         cleanup_warnings.append(f"unassign_proxy:{channel_id}:{exc}")
         return False
+
+
+def _cleanup_old_channel(old_channel_id: str) -> None:
+    """清理被替换的旧 channel 关联资源（cookie、代理绑定）。"""
+    try:
+        # 删除旧 channel 及其 cookie
+        agent.delete_channel(old_channel_id)
+        # 解除旧 channel 的代理绑定
+        _unassign_proxy(old_channel_id, [])
+    except Exception:
+        # 旧 channel 可能已不存在（已被删除或过期），静默忽略
+        pass
