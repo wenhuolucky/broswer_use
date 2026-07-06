@@ -54,8 +54,10 @@ class PhoneCrypto:
             raise AccountStoreUnavailable(
                 "缺少 ACCOUNT_PHONE_ENCRYPTION_KEY 环境变量"
             )
+        # 补齐 base64url padding（生成命令通常省略尾部 =）
+        padded = raw + "=" * (4 - len(raw) % 4) if len(raw) % 4 else raw
         try:
-            key = base64.urlsafe_b64decode(raw)
+            key = base64.urlsafe_b64decode(padded)
         except Exception as exc:
             raise AccountStoreUnavailable(
                 "ACCOUNT_PHONE_ENCRYPTION_KEY 格式不合法（需 base64url 编码）"
