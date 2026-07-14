@@ -38,6 +38,18 @@ EXECUTING_PUBLISH_STATUSES = {
 MISSING_ARTICLE_URL_FAILURE_REASON = "发布已提交或可能成功，但未获取到文章 URL"
 
 
+def _count_chinese_words(text: str) -> int:
+    """按平台规则计算标题字数：汉字算 1 个字，英文/数字/符号 2 个字符算 1 个字。"""
+    chinese_count = 0
+    ascii_count = 0
+    for ch in text:
+        if '一' <= ch <= '鿿':
+            chinese_count += 1
+        else:
+            ascii_count += 1
+    return chinese_count + ascii_count // 2
+
+
 def _format_duration(seconds: float) -> str:
     if seconds >= 60 and seconds % 60 == 0:
         minutes = int(seconds // 60)
@@ -151,13 +163,26 @@ class PublishAgent:
 
     @staticmethod
     def _validate_title_for_platform(platform: str, title: str) -> str:
+        """校验标题字数。
+
+        头条号：2-30 个字，空格不计，英文 2 字符算 1 个字。
+        搜狐号：5-72 个字，空格计入，英文 2 字符算 1 个字。
+        """
         limits = {
             "toutiao": (2, 30),
             "sohu": (5, 72),
         }
-        title_length = len((title or "").strip())
-        minimum, maximum = limits.get((platform or "").strip(), (1, 200))
-        if title_length < minimum or title_length > maximum:
+        platform = (platform or "").strip()
+        if platform == "toutiao":
+            # 头条：空格不计
+            stripped = (title or "").replace(" ", "")
+            word_count = _count_chinese_words(stripped)
+        else:
+            # 搜狐：空格计入
+            word_count = _count_chinese_words(title or "")
+
+        minimum, maximum = limits.get(platform, (1, 200))
+        if word_count < minimum or word_count > maximum:
             return "标题长度不符合要求"
         return ""
 
