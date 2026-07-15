@@ -9,23 +9,52 @@ browser-use/
 ├─ app/                    # 业务代码
 │  ├─ server.py            # FastAPI 应用入口
 │  ├─ api/                 # HTTP 路由（含 VNC/发布实时查看的反向代理）
-│  ├─ core/                # 配置、运行参数与日志
+│  ├─ accounts/            # 账号管理（加密、模型、MySQL 存储）
+│  ├─ channels/            # 渠道存储（SQLite，含 cookie）
 │  ├─ cookies/             # Cookie 保存和规范化
-│  ├─ jobs/                # 任务模型和状态存储
+│  ├─ core/                # 配置、运行参数与日志
+│  ├─ domain/              # 领域模型（Channel、Job、请求/响应）
+│  ├─ jobs/                # 任务模型和状态存储（SQLite）
 │  ├─ platforms/           # 平台配置（sohu/toutiao）
 │  ├─ proxy/               # 多 IP 代理模块（渠道→IP 永久绑定）
 │  ├─ publishing/          # 发文编排与各平台发文内核
 │  ├─ remote/              # 远程登录与浏览器画面服务
+│  ├─ schemas/             # Pydantic 数据模型
 │  └─ utils/               # 浏览器、URL 等工具
 ├─ data/                   # 运行期数据，git 忽略
+├─ docs/                   # 设计文档与 API 参考
 ├─ logs/                   # 运行期日志，git 忽略
+├─ tests/                  # 单元测试
 ├─ Dockerfile
 ├─ docker-compose.yml
 ├─ entrypoint.sh
 ├─ pyproject.toml          # 依赖声明（uv）
 ├─ uv.lock                 # 锁定版本
 ├─ .env.example
-└─ proxies.yaml.example     # 多 IP 代理配置模板
+└── proxies.yaml.example   # 多 IP 代理配置模板
+```
+
+## 依赖
+
+- Python >= 3.13
+- 运行时依赖声明在 `pyproject.toml`，`uv.lock` 锁定精确版本
+- 新增依赖用 `uv add <包名>`，开发依赖用 `uv add --dev <包名>`
+
+## 数据库
+
+本服务使用两种数据库：
+
+| 数据库 | 用途 | 配置 |
+|---|---|---|
+| **SQLite** | 渠道（channel）、任务（job）存储，持久化 cookie 和发文记录 | `SQLITE_PATH=data/app.db`（默认） |
+| **MySQL** | 账号表 `article_accounts` 存储，按 `group_id` 分组管理账号 | `MYSQL_HOST`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE` |
+
+### MySQL 表初始化
+
+`article_accounts` 表由部署侧提前创建，后端只读写不建表。建表后需扩展 `phone` 字段长度（手机号加密后密文最长约 71 字符）：
+
+```sql
+ALTER TABLE article_accounts MODIFY COLUMN phone VARCHAR(64) NOT NULL;
 ```
 
 ## 配置
@@ -36,19 +65,50 @@ browser-use/
 cp .env.example .env
 ```
 
-至少配置：
+### 必填配置
 
 ```text
+# LLM（默认 Qwen）
 LLM_API_KEY=your_qwen_key
 LLM_BASE_URL=http://47.242.205.13:8110/v1
 LLM_MODEL=Qwen/Qwen3.5-397B-A17B
 BROWSER_USE_VISION=true
 BROWSER_USE_VISION_DETAIL=low
+
+# 接口鉴权 Token（业务路由的 Bearer Token）
+PUBLISH_API_TOKEN=change_me_to_a_strong_secret
+
+# 手机号加密密钥（32 bytes 的 base64url 编码）
+# 生成方式：openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
+ACCOUNT_PHONE_ENCRYPTION_KEY=<生成的密钥>
+
+# MySQL 账号存储
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=browser_publish
+MYSQL_PASSWORD=change_me
+MYSQL_DATABASE=browser_publish
 ```
 
-`BROWSER_USE_VISION` 支持 `auto`、`true`、`false`；发布 agent 默认 `true`，确保 browser-use 每步截图会进入支持视觉的 LLM 输入，便于识别短暂弹窗、toast 和页面异常。`BROWSER_USE_VISION_DETAIL` 支持 `low`、`high`、`auto`，默认 `low` 以控制图片负载。
+### 关键可选配置
 
-搜狐号发布会把后台预览链接转换为 `https://www.sohu.com/a/{article_id}_{account_id}`。其中的搜狐号数字 id 按渠道存在各 channel 的 `metadata`（`account_number`）里，登录期抓取。
+```text
+# SQLite 存储路径（留空则回退内存存储，仅本地开发/测试用）
+SQLITE_PATH=data/app.db
+
+# 服务端口（默认 8833）
+SERVICE_PORT=8833
+
+# 远程登录并发（每个会话约占 400MB 内存，按服务器内存设置）
+MAX_REMOTE_LOGIN_SESSIONS=30
+
+# 登录 live url 对外暴露的公网 base（反向代理需转发 /vnc/{session_id}/）
+REMOTE_PUBLIC_BASE_URL=http://222.212.94.89
+```
+
+完整配置项见 `.env.example`，所有字段均有注释说明。
+
+`BROWSER_USE_VISION` 支持 `auto`、`true`、`false`；发布 agent 默认 `true`，确保 browser-use 每步截图会进入支持视觉的 LLM 输入，便于识别短暂弹窗、toast 和页面异常。`BROWSER_USE_VISION_DETAIL` 支持 `low`、`high`、`auto`，默认 `low` 以控制图片负载。
 
 ## Docker 启动
 
@@ -56,7 +116,7 @@ BROWSER_USE_VISION_DETAIL=low
 docker compose up -d --build
 ```
 
-服务地址（`docker-compose.yml` 默认将容器内 8833 映射到宿主机 8833）：
+服务地址（`docker-compose.yml` 默认将容器内 8833 映射到宿主机 8833，可通过 `HOST_PORT` 环境变量自定义）：
 
 ```text
 http://127.0.0.1:8833
@@ -90,7 +150,74 @@ uv run playwright install chromium
 uv run uvicorn app.server:app --host 127.0.0.1 --port 8833
 ```
 
-依赖在 `pyproject.toml` 中声明，`uv.lock` 锁定精确版本。新增依赖用 `uv add <包名>`，开发依赖用 `uv add --dev <包名>`。
+## 运行测试
+
+```bash
+uv run pytest
+```
+
+测试位于 `tests/unit/`，使用 pytest + pytest-asyncio。
+
+## 手机号加密
+
+数据库中的手机号使用 **AES-256-SIV 确定性加密**存储，不再保存明文。
+
+- 密文格式：`enc:v1:<base64url(ciphertext)>`
+- 同一手机号 + 同一密钥 = 同一密文，可直接 `WHERE phone = ?` 查询
+- API 接口仍使用明文手机号，服务内部自动加解密，对外契约不变
+- 加密密钥通过环境变量 `ACCOUNT_PHONE_ENCRYPTION_KEY` 管理，缺失时服务无法启动
+
+### 历史数据迁移
+
+如果数据库已有明文手机号，需执行迁移：
+
+```python
+import os
+import pymysql
+from app.accounts.crypto import PhoneCrypto
+
+crypto = PhoneCrypto()
+
+conn = pymysql.connect(
+    host=os.getenv("MYSQL_HOST"),
+    user=os.getenv("MYSQL_USER"),
+    password=os.getenv("MYSQL_PASSWORD"),
+    database=os.getenv("MYSQL_DATABASE"),
+    charset="utf8mb4",
+    autocommit=True,
+    cursorclass=pymysql.cursors.DictCursor,
+)
+
+with conn.cursor() as cur:
+    cur.execute("SELECT id, phone FROM article_accounts WHERE phone NOT LIKE 'enc:v1:%%'")
+    rows = cur.fetchall()
+
+for row in rows:
+    encrypted = crypto.encrypt_phone(row["phone"])
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE article_accounts SET phone = %s WHERE id = %s",
+            (encrypted, row["id"])
+        )
+    print(f"Migrated id={row['id']}")
+
+conn.close()
+print(f"Done. Migrated {len(rows)} records.")
+```
+
+## Channel 去重
+
+绑定接口 `PUT /api/v1/accounts/{platform}/{phone}` 按 `group_id + platform + phone` 去重：
+
+- 同一分组下同一手机号重复绑定时，旧 channel 及其 cookie、代理绑定会被自动清理
+- 新 channel 正常绑定，对外接口不变
+
+## 标题字数规则
+
+| 平台 | 范围 | 计算规则 |
+|---|---|---|
+| 头条号 | 2-30 字 | 汉字算 1 字，英文/数字 2 字符算 1 字，**空格不计** |
+| 搜狐号 | 5-72 字 | 汉字算 1 字，英文/数字 2 字符算 1 字，**空格计入** |
 
 ## 多 IP 代理（可选）
 
@@ -268,3 +395,27 @@ curl http://127.0.0.1:8833/api/v1/channels/3f9a2b1c8d4e4f0a9b2c1d3e4f5a6b7c/publ
 - `logs/jobs/{YYYY-MM-DD}/{job_id}.log`：每个任务一个日志文件（编排 + 发文内核日志合一），
   仅供运维在服务器侧排查（不对外提供 HTTP 接口）；按日期分目录，超过 14 天的日期目录自动清理
 - `logs/service.log`：统一主日志（每行带 job_id，按天轮转、保留 14 天、zip 压缩）
+
+## 故障排查
+
+### 服务启动失败
+
+- 检查 `.env` 中所有必填配置是否已填写（见上文"必填配置"）
+- 检查 MySQL 是否可达：`mysql -h $MYSQL_HOST -u $MYSQL_USER -p`
+- 查看容器日志：`docker compose logs publish`
+
+### 登录页白屏
+
+- `docker-compose.yml` 中已配置 `extra_hosts` 将 `g1.itc.cn` 钉到可达 IP（搜狐号登录页 bundle 托管在此 CDN）
+- 若日后仍白屏，在服务器执行 `getent ahosts g1.itc.cn` 获取可达 IP 后更新 `docker-compose.yml`
+
+### Cookie 失效
+
+- 发文任务会自动检测 cookie 失效并返回 `live_url` 要求重新登录
+- 登录成功后 cookie 自动更新，原发文任务继续执行
+- 若频繁失效，检查代理 IP 是否被平台封禁
+
+### 端口被占用
+
+- 默认服务端口 8833，可通过 `HOST_PORT` 环境变量修改宿主机映射端口
+- CDP 端口段 9000-9999，KasmVNC 端口段 6900+，均监听 127.0.0.1
